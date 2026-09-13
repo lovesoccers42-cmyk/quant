@@ -22,8 +22,20 @@ def collect(biz_day: str | None = None) -> dict:
 
     frames = []
     for mkt in ("KOSPI", "KOSDAQ"):
-        cap = stock.get_market_cap_by_ticker(biz_day, market=mkt)
-        fund = stock.get_market_fundamental_by_ticker(biz_day, market=mkt)
+        try:
+            cap = stock.get_market_cap_by_ticker(biz_day, market=mkt)
+            fund = stock.get_market_fundamental_by_ticker(biz_day, market=mkt)
+        except Exception as e:
+            raise RuntimeError(
+                f"KRX에서 {mkt} 데이터를 받지 못했습니다 (기준일 {biz_day}). "
+                f"원인: {type(e).__name__}: {e}\n"
+                "KRX가 빈 응답이나 HTML을 돌려준 경우입니다. 확인 순서:\n"
+                " 1) GitHub Secrets에 KRX_ID / KRX_PW 가 등록돼 있는지 "
+                "(pykrx는 계정이 있으면 로그인해서 받아옵니다)\n"
+                " 2) 기준일이 휴장일이 아닌지\n"
+                " 3) 그래도 실패하면 KRX가 해외 IP를 막은 것입니다"
+            ) from e
+
         m = cap[["종가", "시가총액"]].join(fund[["EPS", "BPS", "DPS"]], how="left")
         m["시장구분"] = mkt
         frames.append(m)

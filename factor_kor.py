@@ -149,6 +149,10 @@ def run() -> dict:
                            weights=config.QVM_WEIGHTS,
                            n_portfolio=config.N_PORTFOLIO)
 
+    coverage = {k: int(port[k].notna().sum())
+                for k in ("ROE", "PER", "12M", "K_ratio",
+                          "z_quality", "z_value", "z_momentum", "qvm")}
+
     invest = port[port["invest"] == "Y"].copy()
     codes = [c for c in invest["종목코드"] if c in price_pivot.columns]
 
@@ -168,7 +172,7 @@ def run() -> dict:
                 .sort_values("매수/매도", ascending=False).head(15))
 
     return {"selected": len(invest), "buy_signals": n_buy, "sell_signals": n_sell,
-            "excel": str(xlsx_path), "model_date": today,
+            "coverage": coverage, "excel": str(xlsx_path), "model_date": today,
             "top_buys": top_buys.to_dict(orient="records")}
 
 

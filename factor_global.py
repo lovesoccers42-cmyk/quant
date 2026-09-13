@@ -90,6 +90,11 @@ def run() -> dict:
                            weights=config.QVM_WEIGHTS,
                            n_portfolio=config.N_PORTFOLIO)
 
+    # 어느 팩터에서 종목이 떨어져 나갔는지 리포트에 남깁니다
+    coverage = {k: int(port[k].notna().sum())
+                for k in ("ROE", "PER", "12M", "K_ratio",
+                          "z_quality", "z_value", "z_momentum", "qvm")}
+
     invest = port[port["invest"] == "Y"].copy()
     invest = invest.sort_values("qvm").reset_index(drop=True).round(4)
 
@@ -102,7 +107,7 @@ def run() -> dict:
                    "z_quality", "z_value", "z_momentum"]].head(15))
 
     return {"universe": len(port), "selected": len(invest),
-            "excel": str(xlsx_path), "model_date": today,
+            "coverage": coverage, "excel": str(xlsx_path), "model_date": today,
             "top_buys": top.to_dict(orient="records")}
 
 

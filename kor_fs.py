@@ -2,6 +2,7 @@
 """FnGuide 재무제표 수집 (연간/분기) — 병렬 + 일괄 저장. 월간 실행용."""
 import logging
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 
@@ -71,13 +72,16 @@ def _fetch_one(ticker: str) -> pd.DataFrame:
 
 
 def _fetch_with_retry(ticker: str):
+    """(티커, 데이터프레임 또는 None, 실패 사유) 반환."""
     try:
         http_util.polite_sleep(config.FS_SLEEP)
         df = _fetch_one(ticker)
-        return ticker, (df if len(df) else None)
+        if len(df):
+            return ticker, df, None
+        return ticker, None, "빈 결과"
     except Exception as e:
         log.debug("재무제표 수집 실패 %s: %s", ticker, e)
-        return ticker, None
+        return ticker, None, f"{type(e).__name__}: {str(e)[:120]}"
 
 
 def collect() -> dict:
@@ -86,14 +90,16 @@ def collect() -> dict:
         raise RuntimeError("kor_ticker가 비어 있습니다.")
 
     errors, buffer, total_rows = [], [], 0
+    reasons = Counter()
 
     with ThreadPoolExecutor(max_workers=config.FS_WORKERS) as pool:
         futures = {pool.submit(_fetch_with_retry, t): t for t in tickers}
         done = 0
         for fut in as_completed(futures):
-            ticker, df = fut.result()
+            ticker, df, why = fut.result()
             if df is None:
                 errors.append(ticker)
+                reasons[why or "알 수 없음"] += 1
             else:
                 buffer.append(df)
             done += 1
@@ -106,7 +112,11 @@ def collect() -> dict:
     if buffer:
         total_rows += store.upsert("kor_fs", pd.concat(buffer, ignore_index=True))
 
-    return {"tickers": len(tickers), "rows": total_rows, "errors": errors,
+    if reasons:
+        log.warning("재무제표 실패 사유: %s", dict(reasons.most_common(5)))
+
+    return {"tickers": len(tickers), "rows": total_rows,
+            "fail_reasons": dict(reasons.most_common(5)), "errors": errors,
             "error_rate": round(len(errors) / max(len(tickers), 1), 4)}
 
 

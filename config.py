@@ -37,7 +37,8 @@ HTTP_RETRIES = int(os.getenv("QUANT_HTTP_RETRIES", "3"))
 # Yahoo가 데이터센터 IP를 제한하면 통째로 실패하므로 적당히 잡습니다.
 YF_CHUNK = int(os.getenv("QUANT_YF_CHUNK", "100"))    # 주가 한 번에 받을 심볼 수
 YF_SLEEP = float(os.getenv("QUANT_YF_SLEEP", "1.0"))  # 묶음 사이 간격(초)
-FS_CHUNK = int(os.getenv("QUANT_FS_CHUNK", "50"))     # 재무제표·배당 묶음 크기
+FS_CHUNK = int(os.getenv("QUANT_FS_CHUNK", "50"))     # yahooquery 묶음 크기
+US_FS_WORKERS = int(os.getenv("QUANT_US_FS_WORKERS", "8"))  # 재무제표 동시 조회 수
 US_DAILY_PRICE_DAYS = int(os.getenv("QUANT_US_DAILY_PRICE_DAYS", "10"))
 US_MONTHLY_PRICE_YEARS = int(os.getenv("QUANT_US_MONTHLY_PRICE_YEARS", "2"))
 

@@ -68,6 +68,17 @@ raw = pd.DataFrame({
 clean = global_ticker._clean(raw, "20260911")
 
 check(len(clean) == N, f"비정상 종목 제외 ({len(clean)} == {N}) — 워런트/$·시총0 걸러짐")
+
+# 클래스주 심볼 변환 (실제 장애: BRK/B 가 그대로 나가 Yahoo에서 404/502)
+klass = pd.DataFrame({
+    "Name": ["Berkshire B", "Berkshire A", "Brown Forman B"],
+    "Symbol": ["BRK/B", "BRK/A", "BF.B"],
+    "Sector": ["Finance"] * 3, "Market Cap": [1e12, 1e12, 3e10],
+    "country": ["United States"] * 3, "Exchange": ["NYSE"] * 3,
+})
+kc = global_ticker._clean(klass, "20260911")
+check(list(kc["Symbol"]) == ["BRK-B", "BRK-A", "BF-B"],
+      f"클래스주 심볼 Yahoo 표기로 변환 {list(kc['Symbol'])}")
 check("ABC.WS" not in set(clean["Symbol"]), "워런트(.WS) 제외")
 check("$XYZ" not in set(clean["Symbol"]), "$ 접두 종목 제외")
 check(clean["Market Cap"].dtype.kind == "f", "시총 문자열 → 숫자 변환")

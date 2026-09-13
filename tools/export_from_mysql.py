@@ -16,7 +16,14 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd  # noqa: E402
 
-TABLES = ["kor_ticker", "kor_sector", "kor_price", "kor_fs", "kor_value"]
+TABLES = [
+    # 한국장
+    "kor_ticker", "kor_sector", "kor_price", "kor_fs", "kor_value",
+    # 미국장
+    "global_ticker", "global_price", "global_fs", "global_value",
+]
+# 주가 테이블과 그 날짜 컬럼 (최근 N년만 보관)
+PRICE_TABLES = {"kor_price": "날짜", "global_price": "Date"}
 KEEP_YEARS = int(os.getenv("QUANT_PRICE_KEEP_YEARS", "2"))
 OUT = ROOT / "data"
 
@@ -48,19 +55,21 @@ def dump() -> list[Path]:
             continue
 
         # 날짜 타입 정리
-        for col in ("기준일", "날짜"):
+        for col in ("기준일", "날짜", "date", "Date"):
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.normalize()
 
+        # 한국 종목코드만 6자리 고정 (미국 Symbol은 문자라 건드리지 않음)
         for col in ("종목코드", "CMP_CD"):
             if col in df.columns:
                 df[col] = df[col].astype(str).str.zfill(6)
 
         # 주가는 최근 N년만 (저장소 크기 절약)
-        if table == "kor_price" and "날짜" in df.columns and len(df):
-            cutoff = df["날짜"].max() - pd.DateOffset(years=KEEP_YEARS)
+        date_col = PRICE_TABLES.get(table)
+        if date_col and date_col in df.columns and len(df):
+            cutoff = df[date_col].max() - pd.DateOffset(years=KEEP_YEARS)
             before = len(df)
-            df = df[df["날짜"] >= cutoff]
+            df = df[df[date_col] >= cutoff]
             print(f"  {table}: 최근 {KEEP_YEARS}년만 보관 ({before:,} → {len(df):,}행)")
 
         path = OUT / f"{table}.parquet"
@@ -78,6 +87,7 @@ def upload(paths: list[Path]):
     import requests as rq
 
     repo = os.getenv("GH_REPO") or input("GitHub 레포 (예: hong/quant-agent): ").strip()
+    print("  토큰은 Contents: Read and write 권한이 있어야 합니다.")
     token = os.getenv("GH_TOKEN") or getpass.getpass("GitHub 토큰 (github_pat_...): ").strip()
     if not (repo and token):
         print("레포/토큰이 없어 업로드를 건너뜁니다. data 폴더의 parquet을 "

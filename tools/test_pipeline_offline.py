@@ -195,6 +195,38 @@ no_dy = scored[universe["DY"].isna().values]
 check(no_dy["z_value"].notna().all(),
       f"무배당 종목도 밸류 점수 유지 ({no_dy['z_value'].notna().sum()}/{len(no_dy)})")
 
+# ── 8. 실제 장애 재현: 배당 데이터가 통째로 비었을 때 ────────
+# 2026-09-13 미국 월간 테스트에서 배당 수집이 0종목이 되자 DY가 전부 0(상수)이 됐고,
+# scipy zscore가 분산 0에서 NaN을 뱉어 z_value가 전 종목 NaN → 선정 0개가 됐습니다.
+dead_dy = universe.copy()
+dead_dy["DY"] = np.nan          # 수집 실패 → build_scores가 0으로 채움 → 상수 컬럼
+scored2 = fc.build_scores(dead_dy, symbol="Symbol", sector="Sector",
+                          weights=[1/3, 1/3, 1/3], n_portfolio=150)
+check(scored2["z_value"].notna().all(),
+      f"배당 전무해도 z_value 살아남음 ({scored2['z_value'].notna().sum()}/{len(scored2)})")
+check(int((scored2["invest"] == "Y").sum()) == 150,
+      f"배당 전무해도 150개 선정됨 ({int((scored2['invest'] == 'Y').sum())})")
+
+# 팩터 하나가 통째로 비면(수집 장애) 모델은 멈추는 게 맞습니다 —
+# 팩터가 빠진 다른 모델을 조용히 내놓는 쪽이 투자 판단에는 더 위험합니다.
+# 대신 어느 팩터가 비었는지 리포트가 짚어줘야 합니다.
+one_dead = universe.copy()
+one_dead["CFO"] = np.nan
+scored3 = fc.build_scores(one_dead, symbol="Symbol", sector="Sector",
+                          weights=[1/3, 1/3, 1/3], n_portfolio=150)
+check(int((scored3["invest"] == "Y").sum()) == 0,
+      "CFO 수집 장애 시 모델이 멈춤 (조용히 다른 모델을 내지 않음)")
+
+import pipeline as pl  # noqa: E402
+cov = {k: int(scored3[k].notna().sum())
+       for k in ("ROE", "PER", "12M", "K_ratio",
+                 "z_quality", "z_value", "z_momentum", "qvm")}
+warns = pl.check_factor({"selected": 0, "coverage": cov})
+named = any("z_quality" in w for w in warns)
+check(named, f"리포트가 비어 있는 팩터를 지목함 → {[w[:60] for w in warns][-1:]}")
+check(cov["z_value"] > 0 and cov["z_momentum"] > 0,
+      f"멀쩡한 팩터는 살아 있음 (z_value {cov['z_value']}, z_momentum {cov['z_momentum']})")
+
 print(f"\n저장소 현황: {store.summary()}")
 shutil.rmtree(TMP, ignore_errors=True)
 

@@ -27,11 +27,13 @@ def _session():
         return None
 
 
-def _download(symbols: list[str], fr: str, to: str) -> pd.DataFrame:
+def download(symbols: list[str], fr: str, to: str, **extra) -> pd.DataFrame:
+    """yfinance 묶음 다운로드. actions=True를 주면 배당·분할 컬럼도 옵니다."""
     import yfinance as yf
 
     kw = dict(start=fr, end=to, progress=False, group_by="ticker",
               auto_adjust=False, threads=True)
+    kw.update(extra)
 
     sess = _session()
     if sess is not None:
@@ -96,7 +98,7 @@ def collect(days: int | None = None, years: int | None = None) -> dict:
 
     for n, chunk in enumerate(chunks, 1):
         try:
-            raw = _download(chunk, fr, to)
+            raw = download(chunk, fr, to)
             long = _to_long(raw, chunk)
         except Exception as e:
             log.warning("묶음 %d/%d 실패: %s", n, len(chunks), e)

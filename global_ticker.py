@@ -89,6 +89,11 @@ def _clean(df: pd.DataFrame, biz_day: str | None = None) -> pd.DataFrame:
     df["Symbol"] = df["Symbol"].astype(str).str.strip()
     df = df[df["Symbol"].notna() & (df["Symbol"] != "") & (df["Symbol"] != "nan")]
 
+    # 나스닥 스크리너는 클래스주를 BRK/B 로 주지만 Yahoo는 BRK-B 를 씁니다.
+    # 그대로 두면 URL 경로가 깨져 해당 종목만 조용히 실패합니다.
+    df["Symbol"] = df["Symbol"].str.replace("/", "-", regex=False)
+    df["Symbol"] = df["Symbol"].str.replace(r"\.([A-Z])$", r"-\1", regex=True)
+
     # "$3,050,000,000" 같은 표기도 있어 문자 제거 후 숫자화
     mc = df["Market Cap"].astype(str).str.replace(r"[^0-9.\-]", "", regex=True)
     df["Market Cap"] = pd.to_numeric(mc, errors="coerce")

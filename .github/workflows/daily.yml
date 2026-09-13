@@ -55,31 +55,40 @@ jobs:
       - name: 데이터 저장소 내려받기
         run: |
           mkdir -p data output
-          gh release download data-store -D data --clobber \
+          gh release download data-store -D data -p 'kor_*.parquet' --clobber \
             || echo "저장소가 아직 없습니다 — 월간 실행을 먼저 돌려주세요."
           ls -lh data || true
 
       - name: 일간 파이프라인 실행
         run: python run_daily.py
 
-      - name: 데이터 저장소 올리기
-        if: always()
-        run: |
-          gh release view data-store >/dev/null 2>&1 \
-            || gh release create data-store --title "데이터 저장소" \
-                 --notes "파이프라인이 관리하는 parquet 데이터입니다. 직접 수정하지 마세요."
-          if ls data/*.parquet >/dev/null 2>&1; then
-            gh release upload data-store data/*.parquet --clobber
-          fi
-
-      - name: 결과 파일 올리기
+      - name: 저장소·결과 올리기
         if: always()
         run: |
           shopt -s nullglob
-          files=(output/*.parquet output/*.json output/*.xlsx)
-          if [ ${#files[@]} -gt 0 ]; then
-            gh release upload data-store "${files[@]}" --clobber
-          fi
+          gh release view data-store >/dev/null 2>&1 \
+            || gh release create data-store --title "데이터 저장소" \
+                 --notes "파이프라인이 관리하는 parquet 데이터입니다. 직접 수정하지 마세요."
+
+          # 자기 시장 파일만 올립니다. 한국·미국이 같은 릴리스를 쓰기 때문에
+          # 상대 파일까지 올리면 상대의 최신 데이터를 낡은 사본으로 덮어씁니다.
+          files=(data/kor_*.parquet output/*_kr_*.parquet \
+                 output/*_kr_*.json output/*_kr_*.xlsx)
+
+          fail=0
+          for f in "${files[@]}"; do
+            ok=0
+            for try in 1 2 3; do
+              if gh release upload data-store "$f" --clobber; then ok=1; break; fi
+              echo "::warning::업로드 재시도 $try — $f"
+              sleep $((try * 5))
+            done
+            if [ $ok -ne 1 ]; then
+              echo "::error::업로드 실패 — $f"
+              fail=1
+            fi
+          done
+          exit $fail
 
       - name: 실행 기록 보관
         if: always()

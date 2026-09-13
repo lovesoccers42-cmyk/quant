@@ -41,12 +41,28 @@ def latest_ttm(fs: pd.DataFrame, *, symbol: str, account: str, date: str,
     return fs.groupby([symbol, account]).tail(1)
 
 
+def safe_z(s: pd.Series) -> pd.Series:
+    """표준편차가 0이거나 유효값이 1개뿐이면 0으로 돌려주는 z점수.
+
+    scipy의 zscore는 분산이 0이면 0/0 → 전부 NaN을 내놓습니다. 팩터 합산은
+    skipna=False라 한 컬럼만 NaN이 돼도 그 종목의 점수가 통째로 사라집니다.
+    실제로 배당 데이터가 전부 비어 DY가 모두 0이 되자, 그 한 컬럼 때문에
+    z_value가 전 종목 NaN이 되고 선정 종목이 0개가 된 적이 있습니다.
+    """
+    s = pd.to_numeric(s, errors="coerce")
+    valid = s.dropna()
+    if len(valid) < 2 or float(valid.std(ddof=0)) == 0:
+        return pd.Series(np.where(s.notna(), 0.0, np.nan),
+                         index=s.index, dtype="float64")
+    return pd.Series(zscore(s, nan_policy="omit"), index=s.index, dtype="float64")
+
+
 def col_clean(df: pd.DataFrame, cutoff: float = 0.01, asc: bool = False) -> pd.DataFrame:
     """상하위 cutoff를 경계값으로 누른 뒤 순위 → z점수."""
     q_low = df.quantile(cutoff)
     q_hi = df.quantile(1 - cutoff)
     df_trim = df.clip(q_low, q_hi, axis=1)
-    return df_trim.rank(axis=0, ascending=asc).apply(zscore, nan_policy="omit")
+    return df_trim.rank(axis=0, ascending=asc).apply(safe_z)
 
 
 def k_ratio(ret_cum: pd.DataFrame, min_obs: int = K_RATIO_MIN_OBS) -> pd.Series:
@@ -131,7 +147,7 @@ def build_scores(data_bind: pd.DataFrame, *, symbol: str, sector: str,
 
     # 최종 QVM — 낮을수록 우수
     final = (data_bind[[symbol, "z_quality", "z_value", "z_momentum"]]
-             .set_index(symbol).apply(zscore, nan_policy="omit"))
+             .set_index(symbol).apply(safe_z))
     final.columns = ["quality", "value", "momentum"]
     qvm = (final * list(weights)).sum(axis=1, skipna=False).to_frame("qvm")
 

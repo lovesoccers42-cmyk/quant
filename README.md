@@ -129,6 +129,9 @@ GH_REPO = "아이디/레포이름"
 > **GH_TOKEN**: GitHub → Settings → Developer settings → Personal access tokens →
 > **Fine-grained tokens** → 이 레포만 선택 → **Actions: Read and write**,
 > **Contents: Read-only**. 만료일은 1년으로 넉넉히.
+>
+> `export_from_mysql.bat`으로 릴리스에 직접 올릴 때는 **Contents: Read and write**가
+> 필요합니다(파일을 쓰기 때문). 대시보드용 토큰은 읽기만 있으면 됩니다.
 
 4. 폰 브라우저로 열고 **홈 화면에 추가**.
 

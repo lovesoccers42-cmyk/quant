@@ -49,10 +49,11 @@ def check_crawl(stats: dict) -> list:
     warns = []
     if stats.get("error_rate", 0) > config.MAX_ERROR_RATE:
         warns.append(f"수집 실패율 {stats['error_rate']:.1%} — 기준({config.MAX_ERROR_RATE:.0%}) 초과, "
-                     f"실패 {len(stats.get('errors', []))}종목. "
-                     f"해외 IP 차단 가능성 — 워커 수를 줄여보세요.")
+                     f"실패 {len(stats.get('errors', []))}종목.")
     if stats.get("rows", 0) == 0:
         warns.append("저장된 행이 0건 — 소스 구조 변경 또는 차단 가능성")
+    if stats.get("fail_reasons"):
+        warns.append(f"실패 사유: {stats['fail_reasons']}")
     return warns
 
 
@@ -60,6 +61,14 @@ def check_factor(stats: dict) -> list:
     warns = []
     if stats["selected"] < config.N_PORTFOLIO * 0.5:
         warns.append(f"선정 종목 {stats['selected']}개 — 목표({config.N_PORTFOLIO})의 절반 미만")
+
+    # 어느 팩터에서 끊겼는지 짚어 줍니다 (qvm은 세 z가 모두 있어야 나옵니다)
+    cov = stats.get("coverage") or {}
+    if cov and cov.get("qvm", 0) == 0:
+        empty = [k for k in ("z_quality", "z_value", "z_momentum") if cov.get(k, 0) == 0]
+        warns.append(
+            f"qvm 점수를 받은 종목이 0개입니다. 비어 있는 팩터: {empty or '없음'} "
+            f"(커버리지 {cov}). 해당 팩터의 원천 수집 단계를 먼저 확인하세요.")
     return warns
 
 
