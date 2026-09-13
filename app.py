@@ -570,8 +570,11 @@ with tab_bt:
     st.markdown("##### 백테스트 돌리기")
     bc1, bc2 = st.columns(2)
     bt_top_n = bc1.number_input("보유 종목 수", 5, 300, 30, step=5)
-    bt_reb = bc2.selectbox("리밸런싱", ["ME", "QE"],
-                           format_func=lambda v: "월말" if v == "ME" else "분기말")
+    REB = {"B": "일간", "W-FRI": "주간(금)", "ME": "월말", "QE": "분기말"}
+    bt_reb = bc2.selectbox("리밸런싱", list(REB), index=2,
+                           format_func=lambda v: REB[v],
+                           help="한국장 4년 백테스트에서는 월말이 가장 좋았습니다. "
+                                "주기를 줄일수록 비용이 늘고 성과가 떨어졌습니다.")
     bt_cost = st.slider("편도 거래비용 (bp)", 0, 100, 25, step=5,
                         help="한국 주식은 수수료+세금 합쳐 편도 25bp 안팎입니다.")
 

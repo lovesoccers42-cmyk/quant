@@ -71,9 +71,13 @@ def k_ratio(ret_cum: pd.DataFrame, min_obs: int = K_RATIO_MIN_OBS) -> pd.Series:
     statsmodels sm.OLS(y, x).fit()의 params[0]/bse[0]과 같으며,
     수천 종목을 한 번에 처리하기 위해 닫힌 형태로 계산합니다.
     """
+    # 컬럼마다 pandas로 접근하면 종목 수 × 리밸런싱 횟수만큼 오버헤드가 쌓입니다.
+    # (일간 리밸런싱이면 2,600종목 × 740회) 한 번에 numpy로 내려서 처리합니다.
+    arr = ret_cum.to_numpy(dtype="float64")
     out = {}
-    for col in ret_cum.columns:
-        y = ret_cum[col].dropna().to_numpy(dtype="float64")
+    for j, col in enumerate(ret_cum.columns):
+        a = arr[:, j]
+        y = a[~np.isnan(a)]
         n = len(y)
         if n < min_obs:
             out[col] = np.nan

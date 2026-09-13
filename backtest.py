@@ -130,26 +130,46 @@ def _shares(ticker: pd.DataFrame, spec: Spec) -> pd.Series:
 
 
 # ── 시점별 점수 ──────────────────────────────────────────────
-def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days):
-    """asof 시점에 실제로 알 수 있었던 정보만으로 QVM 점수를 냅니다."""
-    cutoff = asof - pd.Timedelta(days=lag_days)
-    fs_known = fs[fs[spec.f_date] <= cutoff]
-    if fs_known.empty:
-        return None
+def _ttm_pivot(fs, cutoff, spec, cache):
+    """공시지연을 반영한 TTM 피벗. 분기마다만 바뀌므로 캐시합니다.
 
-    ttm = fc.latest_ttm(fs_known, symbol=spec.p_sym if spec.p_sym in fs.columns
+    일간 리밸런싱이면 1,000번 넘게 불리는데 실제 내용은 분기마다만
+    바뀝니다. '그 시점에 알려진 마지막 분기'를 키로 캐시하면
+    같은 계산을 수백 번 반복하지 않습니다.
+    """
+    known = fs[spec.f_date] <= cutoff
+    if not known.any():
+        return None
+    key = fs.loc[known, spec.f_date].max()
+    if key in cache:
+        return cache[key]
+
+    ttm = fc.latest_ttm(fs[known], symbol=spec.p_sym if spec.p_sym in fs.columns
                         else spec.t_sym,
                         account=spec.f_acct, date=spec.f_date, value=spec.f_val,
                         mean_accounts=spec.mean_accounts)
     sym_col = spec.p_sym if spec.p_sym in ttm.columns else spec.t_sym
     pivot = ttm.pivot(index=sym_col, columns=spec.f_acct, values="ttm")
 
-    # 퀄리티
     for metric, (num, den) in spec.quality.items():
         if num in pivot.columns and den in pivot.columns:
             pivot[metric] = pivot[num] / pivot[den]
         else:
             pivot[metric] = np.nan
+
+    cache[key] = (pivot, sym_col)
+    return cache[key]
+
+
+def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
+              ttm_cache=None):
+    """asof 시점에 실제로 알 수 있었던 정보만으로 QVM 점수를 냅니다."""
+    got = _ttm_pivot(fs, asof - pd.Timedelta(days=lag_days), spec,
+                     ttm_cache if ttm_cache is not None else {})
+    if got is None:
+        return None
+    pivot, sym_col = got
+    pivot = pivot.copy()
 
     # 그날의 주가와 추정 시총
     px = price_pivot.loc[:asof]
@@ -234,6 +254,15 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
     shares = _shares(ticker, spec)
 
+    # 거래대금 피벗을 미리 한 번만 만듭니다. 날짜마다 전체를 정렬하면
+    # 일간 리밸런싱에서 같은 정렬을 1,000번 반복하게 됩니다.
+    turnover_pivot = None
+    if min_turnover > 0 and spec.p_vol in price.columns:
+        tv = price.assign(_v=pd.to_numeric(price[spec.p_close], errors='coerce')
+                          * pd.to_numeric(price[spec.p_vol], errors='coerce'))
+        turnover_pivot = tv.pivot_table(index=spec.p_date, columns=spec.p_sym,
+                                        values='_v', aggfunc='last').sort_index()
+
     # 리밸런싱 날짜 — 모멘텀에 1년이 필요하므로 첫 1년은 건너뜁니다
     first = price_pivot.index.min() + pd.DateOffset(years=1)
     dates = [d for d in
@@ -254,18 +283,21 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
              spec.label, dates[0].date(), dates[-1].date(), len(dates), top_n)
 
     rows, holdings_log, sel_log = [], [], []
+    ttm_cache = {}
     prev_holdings: set = set()
 
     for i, t in enumerate(dates[:-1]):
         t_next = dates[i + 1]
-        scored = _score_at(t, price_pivot, fs, ticker, sector, shares, spec, lag_days)
+        scored = _score_at(t, price_pivot, fs, ticker, sector, shares, spec,
+                           lag_days, ttm_cache)
         if scored is None or scored.empty:
             continue
 
-        eligible, _ = fc.liquidity_eligible(
-            price, symbol=spec.p_sym, date=spec.p_date, close=spec.p_close,
-            volume=spec.p_vol, asof=t, window=config.LIQUIDITY_WINDOW,
-            min_value=min_turnover)
+        eligible = None
+        if turnover_pivot is not None:
+            win = turnover_pivot.loc[:t].tail(config.LIQUIDITY_WINDOW)
+            avg = win.mean()
+            eligible = set(avg[avg >= min_turnover].index)
 
         picks, sel = fc.select_portfolio(
             scored, symbol="symbol", sector="sector", n=top_n,
