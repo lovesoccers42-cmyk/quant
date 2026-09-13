@@ -36,6 +36,36 @@ PRIMARY_KEYS: dict[str, list[str]] = {
 KOR_TABLES = [t for t in PRIMARY_KEYS if t.startswith("kor_")]
 US_TABLES = [t for t in PRIMARY_KEYS if t.startswith("global_")]
 
+# 파일이 없을 때 만들어 둘 빈 테이블의 컬럼 (타입 포함).
+# 예전에는 dummy 컬럼 하나짜리 빈 테이블을 만들었는데, 그러면 실제 컬럼을 쓰는
+# 쿼리가 "Referenced column 공시구분 not found" 같은 엉뚱한 오류로 죽었습니다.
+# 스키마를 갖춘 빈 테이블이면 0건이 깔끔하게 반환됩니다.
+SCHEMAS: dict[str, dict[str, str]] = {
+    "kor_ticker": {"종목코드": "VARCHAR", "종목명": "VARCHAR", "시장구분": "VARCHAR",
+                   "종가": "DOUBLE", "시가총액": "DOUBLE", "기준일": "TIMESTAMP",
+                   "EPS": "DOUBLE", "BPS": "DOUBLE", "주당배당금": "DOUBLE",
+                   "종목구분": "VARCHAR"},
+    "kor_sector": {"IDX_CD": "VARCHAR", "CMP_CD": "VARCHAR", "CMP_KOR": "VARCHAR",
+                   "SEC_NM_KOR": "VARCHAR", "기준일": "TIMESTAMP"},
+    "kor_price": {"날짜": "TIMESTAMP", "시가": "DOUBLE", "고가": "DOUBLE",
+                  "저가": "DOUBLE", "종가": "DOUBLE", "거래량": "DOUBLE",
+                  "종목코드": "VARCHAR"},
+    "kor_fs": {"계정": "VARCHAR", "기준일": "TIMESTAMP", "값": "DOUBLE",
+               "종목코드": "VARCHAR", "공시구분": "VARCHAR"},
+    "kor_value": {"종목코드": "VARCHAR", "기준일": "TIMESTAMP", "지표": "VARCHAR",
+                  "값": "DOUBLE"},
+    "global_ticker": {"Name": "VARCHAR", "Symbol": "VARCHAR", "Exchange": "VARCHAR",
+                      "Sector": "VARCHAR", "Market Cap": "DOUBLE",
+                      "Dividend": "DOUBLE", "country": "VARCHAR", "date": "TIMESTAMP"},
+    "global_price": {"Date": "TIMESTAMP", "High": "DOUBLE", "Low": "DOUBLE",
+                     "Open": "DOUBLE", "Close": "DOUBLE", "Volume": "DOUBLE",
+                     "Symbol": "VARCHAR"},
+    "global_fs": {"Symbol": "VARCHAR", "date": "TIMESTAMP", "account": "VARCHAR",
+                  "value": "DOUBLE", "freq": "VARCHAR"},
+    "global_value": {"Symbol": "VARCHAR", "date": "TIMESTAMP", "지표": "VARCHAR",
+                     "값": "DOUBLE"},
+}
+
 # 날짜로 취급할 컬럼 (parquet 왕복 시 타입 고정)
 DATE_COLS = {"기준일", "날짜", "date", "Date"}
 
@@ -142,8 +172,9 @@ def connect() -> duckdb.DuckDBPyConnection:
                 f"create view {table} as select * from read_parquet('{p.as_posix()}')"
             )
         else:
-            # 뷰가 없으면 쿼리가 깨지므로 빈 테이블이라도 만들어 둡니다.
-            con.execute(f"create table {table} (dummy integer)")
+            # 파일이 없어도 쿼리가 깨지지 않도록 스키마를 갖춘 빈 테이블을 만듭니다.
+            cols = ", ".join(f'"{c}" {t}' for c, t in SCHEMAS[table].items())
+            con.execute(f"create table {table} ({cols})")
     return con
 
 
@@ -210,8 +241,16 @@ def summary(tables=None) -> dict:
     return out
 
 
-def init_db() -> dict:
-    """MySQL 시절 DDL 단계 대체 — 폴더만 준비합니다."""
+def init_db(market: str | None = None) -> dict:
+    """MySQL 시절 DDL 단계 대체 — 폴더를 준비하고 빠진 테이블을 보고합니다."""
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return {"data_dir": str(config.DATA_DIR),
-            "tables": [t for t in PRIMARY_KEYS if exists(t)]}
+
+    wanted = {"kr": KOR_TABLES, "us": US_TABLES}.get(market, list(PRIMARY_KEYS))
+    present = [t for t in wanted if exists(t)]
+    missing = [t for t in wanted if not exists(t)]
+
+    out = {"data_dir": str(config.DATA_DIR), "tables": present}
+    if missing:
+        # 이게 비어 있으면 뒤 단계가 0건으로 돌다가 엉뚱한 곳에서 터집니다.
+        out["missing"] = missing
+    return out

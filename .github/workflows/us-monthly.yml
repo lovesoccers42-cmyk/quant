@@ -76,7 +76,7 @@ jobs:
           # 자기 시장 파일만 올립니다. 한국·미국이 같은 릴리스를 쓰기 때문에
           # 상대 파일까지 올리면 상대의 최신 데이터를 낡은 사본으로 덮어씁니다.
           files=(data/global_*.parquet output/*_us_*.parquet \
-                 output/*_us_*.json output/*_us_*.xlsx)
+                 output/*_us_*.json output/*미국*.xlsx)
 
           fail=0
           for f in "${files[@]}"; do

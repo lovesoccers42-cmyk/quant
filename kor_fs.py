@@ -37,13 +37,22 @@ def _clean_fs(df, ticker, frequency):
 def _fetch_one(ticker: str) -> pd.DataFrame:
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{ticker}"
     page = http_util.get(url, referer=REFERER)
-    page.encoding = page.apparent_encoding or "utf-8"
+    # FnGuide는 EUC-KR로 내려옵니다. 자동 추정이 틀리면 본문이 깨져 표를 못 찾습니다.
+    page.encoding = page.encoding or "euc-kr"
+    if (page.encoding or "").lower() in ("iso-8859-1", "ascii"):
+        page.encoding = "euc-kr"
     html_text = page.text
 
     # 같은 응답을 재사용 (요청 1회로 표 파싱 + 결산년 추출)
     data = pd.read_html(StringIO(html_text), displayed_only=False)
     if len(data) < 6:
-        raise ValueError(f"재무제표 표를 찾지 못함 (표 {len(data)}개)")
+        # 무엇이 왔는지 리포트에 남깁니다 — 차단 페이지인지 구조 변경인지 갈립니다
+        soup = BeautifulSoup(html_text, "html.parser")
+        title = (soup.title.get_text(strip=True) if soup.title else "") or "(제목없음)"
+        body = " ".join(soup.get_text(" ").split())[:120] or "(본문없음)"
+        raise ValueError(
+            f"재무제표 표를 찾지 못함 (표 {len(data)}개) "
+            f"| HTTP {page.status_code} | 제목[{title}] | 본문[{body}]")
 
     # 연간
     fs_y = pd.concat([

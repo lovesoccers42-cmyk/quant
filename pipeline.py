@@ -57,6 +57,15 @@ def check_crawl(stats: dict) -> list:
     return warns
 
 
+def check_store(stats: dict) -> list:
+    """저장소에 빠진 테이블이 있으면 바로 짚어 줍니다."""
+    missing = stats.get("missing") or []
+    if not missing:
+        return []
+    return [f"저장소에 없는 테이블: {missing}. 릴리스(data-store)에 해당 parquet이 "
+            f"올라가 있는지 확인하세요. 비어 있으면 뒤 단계가 0건으로 돌아갑니다."]
+
+
 def check_factor(stats: dict) -> list:
     warns = []
     if stats["selected"] < config.N_PORTFOLIO * 0.5:
@@ -106,7 +115,8 @@ def _biz_day():
 def daily_steps() -> list[Step]:
     biz_day = _biz_day()
     return [
-        Step("저장소 준비", store.init_db, critical=True),
+        Step("저장소 준비", store.init_db, {"market": "kr"},
+             critical=True, validator=check_store),
         Step("티커 수집(pykrx)", kor_ticker.collect, {"biz_day": biz_day},
              critical=True, validator=check_ticker),
         Step("섹터 수집(WISE)", kor_sector.collect, {"biz_day": biz_day},
@@ -121,7 +131,8 @@ def daily_steps() -> list[Step]:
 def monthly_steps() -> list[Step]:
     biz_day = _biz_day()
     return [
-        Step("저장소 준비", store.init_db, critical=True),
+        Step("저장소 준비", store.init_db, {"market": "kr"},
+             critical=True, validator=check_store),
         Step("티커 수집(pykrx)", kor_ticker.collect, {"biz_day": biz_day},
              critical=True, validator=check_ticker),
         Step("섹터 수집(WISE)", kor_sector.collect, {"biz_day": biz_day},
@@ -138,7 +149,8 @@ def monthly_steps() -> list[Step]:
 # ── 미국장 ───────────────────────────────────────────────────
 def us_daily_steps() -> list[Step]:
     return [
-        Step("저장소 준비", store.init_db, critical=True),
+        Step("저장소 준비", store.init_db, {"market": "us"},
+             critical=True, validator=check_store),
         Step("종목 수집(나스닥 스크리너)", global_ticker.collect,
              critical=True, validator=check_us_ticker),
         Step(f"주가 수집(최근 {config.US_DAILY_PRICE_DAYS}일)", global_price.collect,
@@ -151,7 +163,8 @@ def us_daily_steps() -> list[Step]:
 
 def us_monthly_steps() -> list[Step]:
     return [
-        Step("저장소 준비", store.init_db, critical=True),
+        Step("저장소 준비", store.init_db, {"market": "us"},
+             critical=True, validator=check_store),
         Step("종목 수집(나스닥 스크리너)", global_ticker.collect,
              critical=True, validator=check_us_ticker),
         Step(f"주가 수집({config.US_MONTHLY_PRICE_YEARS}년)", global_price.collect,

@@ -99,7 +99,7 @@ def run() -> dict:
     invest = invest.sort_values("qvm").reset_index(drop=True).round(4)
 
     today = f"{date.today():%Y%m%d}"
-    xlsx_path = config.OUTPUT_DIR / f"model_us_{today}.xlsx"
+    xlsx_path = config.OUTPUT_DIR / config.report_filename("미국", today)
     invest.to_excel(xlsx_path, index=False)
     invest.to_parquet(config.OUTPUT_DIR / "model_us_latest.parquet", index=False)
 

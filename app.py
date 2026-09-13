@@ -29,7 +29,7 @@ MARKETS = {
         "key": "kr",
         "model": "model_kr_latest.parquet",
         "run": "run_kr_latest.json",
-        "xlsx_prefix": "model_kr_",
+        "xlsx_key": "한국",
         "daily_wf": "daily.yml",
         "monthly_wf": "monthly.yml",
         "symbol": "종목코드",
@@ -43,7 +43,7 @@ MARKETS = {
         "key": "us",
         "model": "model_us_latest.parquet",
         "run": "run_us_latest.json",
-        "xlsx_prefix": "model_us_",
+        "xlsx_key": "미국",
         "daily_wf": "us-daily.yml",
         "monthly_wf": "us-monthly.yml",
         "symbol": "Symbol",
@@ -369,7 +369,7 @@ with tab_top:
         with st.expander("엑셀(.xlsx) 원본"):
             assets, _ = release_assets()
             xlsx = sorted([n for n in assets
-                           if n.startswith(M["xlsx_prefix"]) and n.endswith(".xlsx")])
+                           if n.endswith(".xlsx") and M["xlsx_key"] in n])
             if xlsx:
                 latest = xlsx[-1]
                 blob = download_asset(latest)

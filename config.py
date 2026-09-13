@@ -60,6 +60,17 @@ MIN_TICKERS = int(os.getenv("QUANT_MIN_TICKERS", "1500"))
 MAX_ERROR_RATE = float(os.getenv("QUANT_MAX_ERROR_RATE", "0.05"))
 MIN_SECTORS = int(os.getenv("QUANT_MIN_SECTORS", "10"))
 
+# ── 결과 엑셀 파일명 ─────────────────────────────────────────
+# 예) "상수리 퀀트투자 알고리즘 미국 0913_100.xlsx"
+REPORT_NAME = os.getenv("QUANT_REPORT_NAME", "상수리 퀀트투자 알고리즘")
+REPORT_SUFFIX = os.getenv("QUANT_REPORT_SUFFIX", "100")
+
+
+def report_filename(market_label: str, yyyymmdd: str) -> str:
+    """market_label은 '한국' 또는 '미국', yyyymmdd는 8자리."""
+    return f"{REPORT_NAME} {market_label} {yyyymmdd[4:]}_{REPORT_SUFFIX}.xlsx"
+
+
 # ── 알림 설정 ────────────────────────────────────────────────
 SMTP_HOST = os.getenv("QUANT_SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("QUANT_SMTP_PORT", "587"))
