@@ -1,0 +1,217 @@
+# -*- coding: utf-8 -*-
+"""데이터 저장소 — MySQL 대체.
+
+각 테이블은 data/<table>.parquet 파일 하나로 저장되고,
+조회는 DuckDB가 그 parquet들을 뷰로 올려서 처리합니다.
+기존 MySQL SQL(한글 컬럼명, interval 문법)이 거의 그대로 동작합니다.
+
+사용:
+    store.upsert("kor_ticker", df)          # 기본키 기준 덮어쓰기
+    store.read_sql("select * from kor_ticker where ...")
+"""
+from __future__ import annotations
+
+import threading
+
+import duckdb
+import pandas as pd
+
+import config
+
+# 테이블별 기본키 (MySQL primary key와 동일)
+PRIMARY_KEYS: dict[str, list[str]] = {
+    # 한국장
+    "kor_ticker": ["종목코드", "기준일"],
+    "kor_sector": ["CMP_CD", "기준일"],
+    "kor_price": ["날짜", "종목코드"],
+    "kor_fs": ["계정", "기준일", "종목코드", "공시구분"],
+    "kor_value": ["종목코드", "기준일", "지표"],
+    # 미국장
+    "global_ticker": ["Symbol", "country", "date"],
+    "global_price": ["Date", "Symbol"],
+    "global_fs": ["Symbol", "date", "account", "freq"],
+    "global_value": ["Symbol", "date", "지표"],
+}
+
+KOR_TABLES = [t for t in PRIMARY_KEYS if t.startswith("kor_")]
+US_TABLES = [t for t in PRIMARY_KEYS if t.startswith("global_")]
+
+# 날짜로 취급할 컬럼 (parquet 왕복 시 타입 고정)
+DATE_COLS = {"기준일", "날짜", "date", "Date"}
+
+_write_lock = threading.Lock()
+
+
+def path(table: str):
+    return config.DATA_DIR / f"{table}.parquet"
+
+
+def exists(table: str) -> bool:
+    return path(table).exists()
+
+
+def _normalize(df: pd.DataFrame, table: str) -> pd.DataFrame:
+    df = df.copy()
+    for col in df.columns:
+        if col in DATE_COLS:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.normalize()
+    # 한국 종목코드는 항상 6자리 문자열 (미국 Symbol은 문자라 건드리지 않음)
+    for col in ("종목코드", "CMP_CD"):
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.zfill(6)
+    if "Symbol" in df.columns:
+        df["Symbol"] = df["Symbol"].astype(str).str.strip()
+    return df
+
+
+def read(table: str) -> pd.DataFrame:
+    """테이블 전체를 DataFrame으로. 없으면 빈 DataFrame."""
+    if not exists(table):
+        return pd.DataFrame()
+    return pd.read_parquet(path(table))
+
+
+def write(table: str, df: pd.DataFrame) -> int:
+    """테이블 전체를 덮어씁니다."""
+    df = _normalize(df, table)
+    with _write_lock:
+        tmp = path(table).with_suffix(".parquet.tmp")
+        df.to_parquet(tmp, index=False, compression="zstd")
+        tmp.replace(path(table))
+    return len(df)
+
+
+def upsert(table: str, df: pd.DataFrame) -> int:
+    """기본키가 겹치면 새 값으로 교체, 없으면 추가. 반영된 행 수를 반환."""
+    if df is None or len(df) == 0:
+        return 0
+
+    keys = PRIMARY_KEYS.get(table)
+    if not keys:
+        raise ValueError(f"알 수 없는 테이블: {table}")
+
+    new = _normalize(df, table)
+    n_new = len(new)
+
+    with _write_lock:
+        old = pd.read_parquet(path(table)) if path(table).exists() else pd.DataFrame()
+        if len(old):
+            # 컬럼 순서를 기존 테이블에 맞춤
+            new = new.reindex(columns=[c for c in old.columns if c in new.columns]
+                              + [c for c in new.columns if c not in old.columns])
+            merged = pd.concat([old, new], ignore_index=True)
+        else:
+            merged = new
+
+        merged = merged.drop_duplicates(subset=keys, keep="last").reset_index(drop=True)
+        merged = merged.sort_values(keys).reset_index(drop=True)
+
+        tmp = path(table).with_suffix(".parquet.tmp")
+        merged.to_parquet(tmp, index=False, compression="zstd")
+        tmp.replace(path(table))
+
+    return n_new
+
+
+PRICE_DATE_COL = {"kor_price": "날짜", "global_price": "Date"}
+
+
+def prune_price(table: str = "kor_price", keep_years: int | None = None) -> int:
+    """주가 테이블에서 오래된 행을 잘라 저장소 크기를 제한합니다. 남은 행 수 반환."""
+    keep_years = keep_years or config.PRICE_KEEP_YEARS
+    col = PRICE_DATE_COL[table]
+    if not exists(table):
+        return 0
+    df = pd.read_parquet(path(table))
+    if df.empty:
+        return 0
+    cutoff = df[col].max() - pd.DateOffset(years=keep_years)
+    kept = df[df[col] >= cutoff]
+    if len(kept) < len(df):
+        write(table, kept)
+    return len(kept)
+
+
+def connect() -> duckdb.DuckDBPyConnection:
+    """존재하는 모든 테이블을 뷰로 등록한 DuckDB 커넥션."""
+    con = duckdb.connect()
+    for table in PRIMARY_KEYS:
+        p = path(table)
+        if p.exists():
+            con.execute(
+                f"create view {table} as select * from read_parquet('{p.as_posix()}')"
+            )
+        else:
+            # 뷰가 없으면 쿼리가 깨지므로 빈 테이블이라도 만들어 둡니다.
+            con.execute(f"create table {table} (dummy integer)")
+    return con
+
+
+def read_sql(query: str) -> pd.DataFrame:
+    """기존 MySQL 쿼리를 그대로 실행 (DuckDB 문법 호환)."""
+    con = connect()
+    try:
+        return con.execute(query).df()
+    finally:
+        con.close()
+
+
+def common_tickers(limit: int | None = None) -> list[str]:
+    """최신 기준일의 보통주 종목코드 목록."""
+    if not exists("kor_ticker"):
+        return []
+    df = read_sql("""
+        select 종목코드 from kor_ticker
+        where 기준일 = (select max(기준일) from kor_ticker)
+          and 종목구분 = '보통주'
+        order by 종목코드;
+    """)
+    tickers = df["종목코드"].astype(str).str.zfill(6).tolist()
+    limit = limit if limit is not None else config.TICKER_LIMIT
+    if limit:
+        tickers = tickers[:limit]
+    return tickers
+
+
+def us_symbols(limit: int | None = None) -> list[str]:
+    """최신 date의 미국 상장 종목 심볼 목록."""
+    if not exists("global_ticker"):
+        return []
+    df = read_sql("""
+        select Symbol from global_ticker
+        where date = (select max(date) from global_ticker)
+          and country = 'United States'
+        order by "Market Cap" desc nulls last;
+    """)
+    symbols = df["Symbol"].astype(str).str.strip().tolist()
+    limit = limit if limit is not None else config.TICKER_LIMIT
+    if limit:
+        symbols = symbols[:limit]
+    return symbols
+
+
+def summary(tables=None) -> dict:
+    """저장소 현황 — 대시보드/리포트용."""
+    out = {}
+    for table in (tables or PRIMARY_KEYS):
+        p = path(table)
+        if not p.exists():
+            out[table] = {"rows": 0, "mb": 0.0, "latest": None}
+            continue
+        df = pd.read_parquet(p)
+        date_col = next((c for c in ("기준일", "날짜", "date", "Date")
+                         if c in df.columns), None)
+        latest = str(df[date_col].max().date()) if date_col and len(df) else None
+        out[table] = {
+            "rows": len(df),
+            "mb": round(p.stat().st_size / 1024 / 1024, 2),
+            "latest": latest,
+        }
+    return out
+
+
+def init_db() -> dict:
+    """MySQL 시절 DDL 단계 대체 — 폴더만 준비합니다."""
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return {"data_dir": str(config.DATA_DIR),
+            "tables": [t for t in PRIMARY_KEYS if exists(t)]}

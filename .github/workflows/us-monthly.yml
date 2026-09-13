@@ -1,0 +1,96 @@
+name: 미국 월간 실행
+
+on:
+  schedule:
+    # 12:00 UTC 매월 2일 = 21:00 KST (한국 월간과 날짜를 띄워 겹치지 않게)
+    - cron: "0 12 2 * *"
+  workflow_dispatch:
+    inputs:
+      ticker_limit:
+        description: "테스트용 종목 수 제한 (0 = 전체). 첫 확인은 30 정도로"
+        required: false
+        default: "0"
+      yf_chunk:
+        description: "yfinance 묶음 크기 (Yahoo가 막으면 30까지 낮추세요)"
+        required: false
+        default: "100"
+      fs_chunk:
+        description: "재무제표·배당 묶음 크기"
+        required: false
+        default: "50"
+
+concurrency:
+  group: quant-pipeline-us
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  us_monthly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      QUANT_SMTP_USER: ${{ secrets.QUANT_SMTP_USER }}
+      QUANT_SMTP_PASS: ${{ secrets.QUANT_SMTP_PASS }}
+      QUANT_REPORT_EMAIL: ${{ secrets.QUANT_REPORT_EMAIL }}
+      QUANT_TG_TOKEN: ${{ secrets.QUANT_TG_TOKEN }}
+      QUANT_TG_CHAT_ID: ${{ secrets.QUANT_TG_CHAT_ID }}
+      QUANT_TICKER_LIMIT: ${{ github.event.inputs.ticker_limit || '0' }}
+      QUANT_YF_CHUNK: ${{ github.event.inputs.yf_chunk || '100' }}
+      QUANT_FS_CHUNK: ${{ github.event.inputs.fs_chunk || '50' }}
+      TZ: Asia/Seoul
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 데이터 저장소 내려받기
+        run: |
+          mkdir -p data output
+          gh release download data-store -D data --clobber \
+            || echo "저장소가 아직 없습니다 — 미국 월간 실행을 먼저 돌려주세요."
+          ls -lh data || true
+
+      - name: 파이프라인 실행
+        run: python run_us_monthly.py
+
+      - name: 데이터 저장소 올리기
+        if: always()
+        run: |
+          gh release view data-store >/dev/null 2>&1 \
+            || gh release create data-store --title "데이터 저장소" \
+                 --notes "파이프라인이 관리하는 parquet 데이터입니다. 직접 수정하지 마세요."
+          if ls data/*.parquet >/dev/null 2>&1; then
+            gh release upload data-store data/*.parquet --clobber
+          fi
+
+      - name: 결과 파일 올리기
+        if: always()
+        run: |
+          shopt -s nullglob
+          files=(output/*.parquet output/*.json output/*.xlsx)
+          if [ ${#files[@]} -gt 0 ]; then
+            gh release upload data-store "${files[@]}" --clobber
+          fi
+
+      - name: 실행 기록 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: us-monthly-${{ github.run_number }}
+          path: |
+            output/
+            logs/
+          retention-days: 60
+          if-no-files-found: warn

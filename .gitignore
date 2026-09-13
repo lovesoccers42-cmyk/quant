@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.parquet.tmp
+logs/
+output/
+data/
+.streamlit/secrets.toml
+.venv/
