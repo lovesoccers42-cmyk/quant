@@ -49,6 +49,17 @@ TICKER_LIMIT = int(os.getenv("QUANT_TICKER_LIMIT", "0"))
 QVM_WEIGHTS = [1 / 3, 1 / 3, 1 / 3]   # quality, value, momentum
 N_PORTFOLIO = int(os.getenv("QUANT_N_PORTFOLIO", "1000"))
 
+# ── 포트폴리오 제약 ──────────────────────────────────────────
+# 한 섹터가 차지할 수 있는 최대 비중. 1.0이면 제한 없음(예전 동작).
+# 섹터 중립 z점수를 써도 최종 순위는 전 종목 통합이라 특정 섹터가 쏠립니다.
+MAX_SECTOR_PCT = float(os.getenv("QUANT_MAX_SECTOR_PCT", "0.25"))
+
+# 최근 N거래일 평균 거래대금이 이 값 미만이면 제외 (0이면 필터 끔).
+# 실제로 원하는 수량을 살 수 있는 종목만 남기기 위한 것입니다.
+LIQUIDITY_WINDOW = int(os.getenv("QUANT_LIQUIDITY_WINDOW", "20"))
+MIN_TURNOVER_KR = float(os.getenv("QUANT_MIN_TURNOVER_KR", "500000000"))   # 5억원
+MIN_TURNOVER_US = float(os.getenv("QUANT_MIN_TURNOVER_US", "5000000"))     # 500만 달러
+
 # ── 에이전트 설정 ────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 AGENT_MODEL = os.getenv("QUANT_AGENT_MODEL", "claude-sonnet-5")

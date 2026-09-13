@@ -21,6 +21,14 @@ on:
         description: "편도 거래비용 (bp). 한국 주식은 25 안팎"
         required: false
         default: "25"
+      max_sector_pct:
+        description: "한 섹터 최대 비중 (0.25 = 25%). 1 이면 제한 없음(예전 동작)"
+        required: false
+        default: "0.25"
+      min_turnover:
+        description: "20일 평균 거래대금 하한. 0 이면 필터 끔(예전 동작). 한국 5억 = 500000000"
+        required: false
+        default: "500000000"
 
 concurrency:
   group: quant-backtest
@@ -63,7 +71,9 @@ jobs:
             "${{ github.event.inputs.market }}" \
             "${{ github.event.inputs.top_n }}" \
             "${{ github.event.inputs.rebalance }}" \
-            "${{ github.event.inputs.cost_bps }}"
+            "${{ github.event.inputs.cost_bps }}" \
+            "${{ github.event.inputs.max_sector_pct }}" \
+            "${{ github.event.inputs.min_turnover }}"
 
       - name: 결과 올리기
         if: always()

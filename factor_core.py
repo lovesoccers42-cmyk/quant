@@ -108,6 +108,83 @@ def momentum(price_pivot: pd.DataFrame, skip_days: int = MOM_SKIP_DAYS):
     return ret_list, k_ratio(ret_cum)
 
 
+def liquidity_eligible(price: pd.DataFrame, *, symbol: str, date: str,
+                       close: str, volume: str, asof=None,
+                       window: int = 20, min_value: float = 0.0):
+    """최근 window 거래일 평균 거래대금이 min_value 이상인 종목 집합.
+
+    '실제로 살 수 있는가'를 거릅니다. 거래대금이 하루 몇천만원인 종목은
+    모델이 아무리 좋게 봐도 원하는 수량을 못 삽니다.
+    min_value가 0이면 필터를 끕니다(None 반환).
+    """
+    if min_value <= 0 or volume not in price.columns:
+        return None, {"적용": False}
+
+    df = price if asof is None else price[price[date] <= asof]
+    if df.empty:
+        return None, {"적용": False, "사유": "주가 데이터 없음"}
+
+    df = df.sort_values(date).groupby(symbol, observed=True).tail(window)
+    value = pd.to_numeric(df[close], errors="coerce") * pd.to_numeric(df[volume],
+                                                                     errors="coerce")
+    avg = value.groupby(df[symbol]).mean().dropna()
+    eligible = set(avg[avg >= min_value].index)
+
+    return eligible, {"적용": True, "기준_거래대금": min_value,
+                      "검사종목": int(len(avg)), "통과": len(eligible),
+                      "탈락": int(len(avg) - len(eligible))}
+
+
+def select_portfolio(scored: pd.DataFrame, *, symbol: str, sector: str,
+                     n: int, max_sector_pct: float = 1.0, eligible=None):
+    """qvm 상위에서 포트폴리오를 고릅니다.
+
+    max_sector_pct: 한 섹터가 차지할 수 있는 최대 비중 (1.0이면 제한 없음).
+
+    섹터 중립 z점수는 '섹터 안에서의 우열'만 맞춥니다. 최종 qvm은 전 종목을
+    한 줄로 세우기 때문에, 그 시기에 좋았던 섹터가 통째로 상위를 차지합니다.
+    실제로 한국 백테스트에서 IT가 보유의 44%를 먹었습니다. 그건 분산된
+    포트폴리오가 아니라 사실상 그 섹터에 베팅한 것입니다.
+    """
+    df = scored.dropna(subset=["qvm"]).sort_values("qvm").copy()
+    stats = {"후보": len(df)}
+
+    if eligible is not None:
+        before = len(df)
+        df = df[df[symbol].astype(str).isin(eligible)]
+        stats["유동성탈락"] = before - len(df)
+
+    if 0 < max_sector_pct < 1 and len(df):
+        want = max(1, int(np.ceil(n * max_sector_pct)))
+        rank_in_sector = df.groupby(sector, observed=True).cumcount()
+
+        # 섹터 수가 적으면 요청한 상한으로는 n종목을 못 채웁니다.
+        # (예: 섹터 3개 · 상한 25% → 최대 3 × ceil(n/4)). 그럴 때 조용히
+        # 종목 수를 줄이는 대신 상한을 필요한 만큼만 올리고 그 사실을 남깁니다.
+        cap = want
+        while cap < n and int((rank_in_sector < cap).sum()) < n:
+            cap += 1
+
+        capped = df[rank_in_sector < cap]
+        stats["섹터상한탈락"] = len(df) - len(capped)
+        stats["섹터별상한"] = cap
+        if cap != want:
+            stats["상한완화"] = (f"{want}종목 → {cap}종목 "
+                              f"(섹터가 {df[sector].nunique()}개뿐이라 "
+                              f"요청한 {max_sector_pct:.0%}로는 {n}종목을 못 채움)")
+        df = capped
+
+    out = df.head(n).copy()
+    out.insert(0, "순위", range(1, len(out) + 1))
+
+    if len(out):
+        top = out[sector].value_counts()
+        stats["선정"] = len(out)
+        stats["최대섹터"] = f"{top.index[0]} {top.iloc[0]}종목 ({top.iloc[0]/len(out):.0%})"
+        stats["섹터수"] = int(top.size)
+    return out, stats
+
+
 def build_scores(data_bind: pd.DataFrame, *, symbol: str, sector: str,
                  weights, n_portfolio: int) -> pd.DataFrame:
     """z_quality / z_value / z_momentum / qvm / invest 컬럼을 붙여 반환.

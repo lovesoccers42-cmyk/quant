@@ -39,7 +39,7 @@ TRADING_DAYS = 252
 class Spec:
     """시장별 테이블·컬럼 이름."""
     label: str
-    price: str; p_date: str; p_close: str; p_sym: str
+    price: str; p_date: str; p_close: str; p_sym: str; p_vol: str
     fs: str; f_date: str; f_acct: str; f_val: str; f_freq: str
     ticker: str; t_date: str; t_sym: str; t_name: str; t_mcap: str; t_close: str
     mcap_scale: float          # 시총을 재무제표 단위로 맞추는 나눗셈
@@ -56,6 +56,7 @@ SPECS = {
     "kr": Spec(
         label="한국",
         price="kor_price", p_date="날짜", p_close="종가", p_sym="종목코드",
+        p_vol="거래량",
         fs="kor_fs", f_date="기준일", f_acct="계정", f_val="값", f_freq="공시구분",
         ticker="kor_ticker", t_date="기준일", t_sym="종목코드", t_name="종목명",
         t_mcap="시가총액", t_close="종가",
@@ -72,6 +73,7 @@ SPECS = {
     "us": Spec(
         label="미국",
         price="global_price", p_date="Date", p_close="Close", p_sym="Symbol",
+        p_vol="Volume",
         fs="global_fs", f_date="date", f_acct="account", f_val="value", f_freq="freq",
         ticker="global_ticker", t_date="date", t_sym="Symbol", t_name="Name",
         t_mcap="Market Cap", t_close=None,
@@ -97,7 +99,7 @@ def _load(spec: Spec):
     acct_sql = ", ".join(f"'{a}'" for a in accounts)
 
     price = store.read_sql(
-        f'select "{spec.p_date}", "{spec.p_close}", "{spec.p_sym}" from {spec.price};')
+        f'select "{spec.p_date}", "{spec.p_close}", "{spec.p_vol}", "{spec.p_sym}" from {spec.price};')
     fs = store.read_sql(
         f"select * from {spec.fs} where {spec.f_freq} = 'q' "
         f"and {spec.f_acct} in ({acct_sql});")
@@ -214,7 +216,7 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days):
 # ── 본체 ─────────────────────────────────────────────────────
 def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         cost_bps: float = 25.0, lag_days: int = 90,
-        min_price: float = 0.0) -> dict:
+        max_sector_pct: float = 1.0, min_turnover: float = 0.0) -> dict:
     spec = SPECS[market]
     price, fs, ticker, sector = _load(spec)
 
@@ -251,7 +253,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     log.info("%s장 백테스트: %s ~ %s, 리밸런싱 %d회, 상위 %d종목",
              spec.label, dates[0].date(), dates[-1].date(), len(dates), top_n)
 
-    rows, holdings_log = [], []
+    rows, holdings_log, sel_log = [], [], []
     prev_holdings: set = set()
 
     for i, t in enumerate(dates[:-1]):
@@ -260,11 +262,17 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         if scored is None or scored.empty:
             continue
 
-        picks = scored.nsmallest(top_n, "qvm")
+        eligible, _ = fc.liquidity_eligible(
+            price, symbol=spec.p_sym, date=spec.p_date, close=spec.p_close,
+            volume=spec.p_vol, asof=t, window=config.LIQUIDITY_WINDOW,
+            min_value=min_turnover)
+
+        picks, sel = fc.select_portfolio(
+            scored, symbol="symbol", sector="sector", n=top_n,
+            max_sector_pct=max_sector_pct, eligible=eligible)
+        sel_log.append({"리밸런싱일": t, **sel})
+
         codes = [c for c in picks["symbol"] if c in price_pivot.columns]
-        if min_price > 0:
-            px_now = price_pivot.loc[:t].ffill().iloc[-1]
-            codes = [c for c in codes if px_now.get(c, 0) >= min_price]
         if len(codes) < 5:
             continue
 
@@ -305,6 +313,17 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     perf["누적_벤치마크"] = (1 + perf["벤치마크"]).cumprod()
 
     summary = _metrics(perf, spec, top_n, cost_bps, lag_days)
+    summary["제약"] = {
+        "섹터상한": ("없음" if max_sector_pct >= 1
+                  else f"한 섹터 최대 {max_sector_pct:.0%}"),
+        "유동성기준": ("없음" if min_turnover <= 0
+                   else f"{config.LIQUIDITY_WINDOW}일 평균 거래대금 {min_turnover:,.0f} 이상"),
+    }
+    if sel_log:
+        sl = pd.DataFrame(sel_log)
+        for k in ("유동성탈락", "섹터상한탈락"):
+            if k in sl.columns:
+                summary["제약"][f"평균 {k}"] = int(sl[k].mean())
     holdings = pd.concat(holdings_log, ignore_index=True) if holdings_log else pd.DataFrame()
 
     return {"market": market, "summary": summary, "perf": perf, "holdings": holdings}

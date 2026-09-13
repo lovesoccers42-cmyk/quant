@@ -153,7 +153,83 @@ check((perf["비용차감수익률"] <= perf["수익률"] + 1e-12).all(), "비�
 check(len(res["holdings"]) == s["리밸런싱횟수"] * 30, "보유종목 기록 수 일치")
 check(len(s["한계"]) >= 4, f"한계 {len(s['한계'])}가지를 리포트에 명시")
 
-# ── 4. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
+# ── 4. 섹터 상한 · 유동성 필터가 실제로 무는가 ───────────────
+import factor_core as fc  # noqa: E402
+
+# 한 섹터가 상위를 독식하도록 만든 뒤 상한이 실제로 자르는지
+skew = pd.DataFrame({
+    "sym": [f"S{i:03d}" for i in range(200)],
+    "sector": (["IT"] * 120 + ["금융"] * 40 + ["소재"] * 40),
+    "qvm": np.concatenate([np.linspace(-3, -1, 120),      # IT가 최상위 독식
+                           np.linspace(-1, 0, 40),
+                           np.linspace(0, 1, 40)]),
+})
+
+no_cap, _ = fc.select_portfolio(skew, symbol="sym", sector="sector",
+                                n=40, max_sector_pct=1.0)
+capped, cstats = fc.select_portfolio(skew, symbol="sym", sector="sector",
+                                     n=40, max_sector_pct=0.25)
+
+it_before = (no_cap["sector"] == "IT").mean()
+it_after = (capped["sector"] == "IT").mean()
+check(it_before == 1.0, f"상한 없으면 IT가 {it_before:.0%} 독식 (문제 재현)")
+check(it_after < it_before, f"상한 걸면 IT {it_before:.0%} → {it_after:.0%}")
+check(len(capped) == 40, f"목표 종목 수는 채움 ({len(capped)}개)")
+check("상한완화" in cstats,
+      f"섹터가 3개뿐이라 상한을 완화했고 그 사실을 남김 → {cstats.get('상한완화','없음')}")
+check(capped["sector"].nunique() == 3, f"섹터 {capped['sector'].nunique()}개로 분산")
+
+# 섹터가 넉넉하면 요청한 상한이 그대로 지켜져야 한다
+wide = pd.DataFrame({
+    "sym": [f"W{i:03d}" for i in range(300)],
+    "sector": [f"S{i % 10}" for i in range(300)],
+    "qvm": np.concatenate([np.linspace(-3, -1, 100), np.linspace(-1, 1, 200)]),
+})
+wcap, wstats = fc.select_portfolio(wide, symbol="sym", sector="sector",
+                                   n=40, max_sector_pct=0.25)
+check(len(wcap) == 40 and "상한완화" not in wstats,
+      f"섹터 10개면 완화 없이 40종목 ({len(wcap)}개)")
+check((wcap["sector"].value_counts() / 40).max() <= 0.25 + 1e-9,
+      f"요청한 25% 그대로 지켜짐 (최대 {(wcap['sector'].value_counts()/40).max():.0%})")
+check(capped["qvm"].is_monotonic_increasing, "qvm 순서는 유지 (좋은 종목 우선)")
+check("순위" in capped.columns and capped["순위"].iloc[0] == 1, "순위 컬럼 부여")
+
+# 유동성 필터
+liq_px = pd.DataFrame({
+    "날짜": list(DAYS[-25:]) * 3,
+    "종목코드": ["A"] * 25 + ["B"] * 25 + ["C"] * 25,
+    "종가": [10000] * 75,
+    "거래량": [100_000] * 25 + [10_000] * 25 + [1_000] * 25,   # 10억 / 1억 / 1천만
+})
+elig, lstats = fc.liquidity_eligible(liq_px, symbol="종목코드", date="날짜",
+                                     close="종가", volume="거래량",
+                                     window=20, min_value=500_000_000)
+check(elig == {"A"}, f"거래대금 5억 미만 제외 → 통과 {sorted(elig)}")
+check(lstats["탈락"] == 2, f"탈락 {lstats['탈락']}종목 집계")
+off, ostats = fc.liquidity_eligible(liq_px, symbol="종목코드", date="날짜",
+                                    close="종가", volume="거래량", min_value=0)
+check(off is None and ostats["적용"] is False, "기준 0이면 필터 꺼짐(예전 동작)")
+
+# 백테스트 전후 비교 — 같은 데이터로 제약만 바꿔 돌린다
+before = backtest.run(market="kr", top_n=30, rebalance="QE",
+                      max_sector_pct=1.0, min_turnover=0)
+after = backtest.run(market="kr", top_n=30, rebalance="QE",
+                     max_sector_pct=0.25, min_turnover=0)
+
+
+def max_share(r):
+    h = r["holdings"]
+    return h["섹터"].value_counts().iloc[0] / len(h)
+
+
+mb, ma = max_share(before), max_share(after)
+print(f"\n    최대 섹터 비중: 제약 없음 {mb:.0%} → 상한 적용 {ma:.0%}")
+check(ma < mb or mb <= 0.25, f"상한 적용 후 쏠림 완화 ({mb:.0%} → {ma:.0%})")
+check(ma <= 0.26, f"보유 기준으로도 25% 이하 유지 ({ma:.0%})")
+check(after["summary"]["제약"]["섹터상한"] == "한 섹터 최대 25%",
+      "리포트에 제약 조건 기록")
+
+# ── 5. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
 store.write("kor_price", store.read("kor_price").query("날짜 >= '2025-10-01'"))
 try:
     backtest.run(market="kr", top_n=30, rebalance="QE")

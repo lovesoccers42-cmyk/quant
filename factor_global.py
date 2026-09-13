@@ -36,7 +36,7 @@ def _load():
         where date = (select max(date) from global_value);
     """)
     price_list = store.read_sql("""
-        select Date, Close, Symbol from global_price
+        select Date, Close, Volume, Symbol from global_price
         where Date >= (select (select max(Date) from global_price) - interval 1 year);
     """)
     return ticker_list, fs_list, value_list, price_list
@@ -87,16 +87,21 @@ def run() -> dict:
     data_bind = data_bind.drop_duplicates("Symbol")
 
     port = fc.build_scores(data_bind, symbol="Symbol", sector="Sector",
-                           weights=config.QVM_WEIGHTS,
-                           n_portfolio=config.N_PORTFOLIO)
+                           weights=config.QVM_WEIGHTS, n_portfolio=len(data_bind))
 
     # 어느 팩터에서 종목이 떨어져 나갔는지 리포트에 남깁니다
     coverage = {k: int(port[k].notna().sum())
                 for k in ("ROE", "PER", "12M", "K_ratio",
                           "z_quality", "z_value", "z_momentum", "qvm")}
 
-    invest = port[port["invest"] == "Y"].copy()
-    invest = invest.sort_values("qvm").reset_index(drop=True).round(4)
+    eligible, liq = fc.liquidity_eligible(
+        price_list, symbol="Symbol", date="Date", close="Close", volume="Volume",
+        window=config.LIQUIDITY_WINDOW, min_value=config.MIN_TURNOVER_US)
+
+    invest, sel = fc.select_portfolio(
+        port, symbol="Symbol", sector="Sector", n=config.N_PORTFOLIO,
+        max_sector_pct=config.MAX_SECTOR_PCT, eligible=eligible)
+    invest = invest.reset_index(drop=True).round(4)
 
     today = f"{date.today():%Y%m%d}"
     xlsx_path = config.OUTPUT_DIR / config.report_filename("미국", today)
@@ -107,7 +112,8 @@ def run() -> dict:
                    "z_quality", "z_value", "z_momentum"]].head(15))
 
     return {"universe": len(port), "selected": len(invest),
-            "coverage": coverage, "excel": str(xlsx_path), "model_date": today,
+            "coverage": coverage, "유동성": liq, "선정": sel,
+            "excel": str(xlsx_path), "model_date": today,
             "top_buys": top.to_dict(orient="records")}
 
 

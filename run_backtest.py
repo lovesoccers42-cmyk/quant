@@ -32,7 +32,8 @@ def _summary_rows(s: dict) -> pd.DataFrame:
 
 
 def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
-         cost_bps: float = 25.0) -> int:
+         cost_bps: float = 25.0, max_sector_pct: float = -1.0,
+         min_turnover: float = -1.0) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -41,8 +42,16 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             encoding="utf-8"), logging.StreamHandler()],
         force=True)
 
+    # 음수면 config 기본값. 0(섹터상한 1.0)이면 제약 없이 = 예전 동작
+    if max_sector_pct < 0:
+        max_sector_pct = config.MAX_SECTOR_PCT
+    if min_turnover < 0:
+        min_turnover = (config.MIN_TURNOVER_KR if market == "kr"
+                        else config.MIN_TURNOVER_US)
+
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
-                       cost_bps=cost_bps)
+                       cost_bps=cost_bps, max_sector_pct=max_sector_pct,
+                       min_turnover=min_turnover)
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -83,6 +92,9 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         bv = f"{bv}{unit}" if bv is not None else "-"
         print(f"  {k:<14}{pv:>12}{bv:>12}")
     print(f"\n  초과수익률: {s['초과수익률']}%p")
+    print("\n  제약:")
+    for k, v in s.get("제약", {}).items():
+        print(f"   · {k}: {v}")
     print("\n  한계:")
     for lim in s["한계"]:
         print(f"   · {lim}")
@@ -95,4 +107,6 @@ if __name__ == "__main__":
     top_n = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     reb = sys.argv[3] if len(sys.argv) > 3 else "ME"
     cost = float(sys.argv[4]) if len(sys.argv) > 4 else 25.0
-    sys.exit(main(market, top_n, reb, cost))
+    cap = float(sys.argv[5]) if len(sys.argv) > 5 else -1.0
+    turn = float(sys.argv[6]) if len(sys.argv) > 6 else -1.0
+    sys.exit(main(market, top_n, reb, cost, cap, turn))

@@ -547,6 +547,9 @@ with tab_bt:
             rows.append({"지표": k, "포트폴리오": p.get(k), "벤치마크": b.get(k)})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+        if s.get("제약"):
+            st.caption("제약: " + " · ".join(f"{k} {v}" for k, v in s["제약"].items()))
+
         with st.expander("⚠️ 이 숫자를 믿기 전에 — 한계", expanded=False):
             for lim in s.get("한계", []):
                 st.write(f"· {lim}")
@@ -572,6 +575,21 @@ with tab_bt:
     bt_cost = st.slider("편도 거래비용 (bp)", 0, 100, 25, step=5,
                         help="한국 주식은 수수료+세금 합쳐 편도 25bp 안팎입니다.")
 
+    with st.expander("포트폴리오 제약 (끄면 예전 동작)"):
+        cap_pct = st.slider("한 섹터 최대 비중 (%)", 10, 100, 25, step=5,
+                            help="100%면 제한 없음. 섹터 중립 z점수를 써도 최종 "
+                                 "순위는 전 종목 통합이라 특정 섹터가 쏠립니다.")
+        default_turn = 500_000_000 if M["key"] == "kr" else 5_000_000
+        use_liq = st.checkbox("유동성 필터 사용", value=True,
+                              help="20일 평균 거래대금이 기준 미만인 종목 제외. "
+                                   "실제로 원하는 수량을 살 수 있는 종목만 남깁니다.")
+        turn = st.number_input(
+            "거래대금 하한 (한국=원, 미국=달러)", 0, 100_000_000_000,
+            default_turn, step=100_000_000 if M["key"] == "kr" else 1_000_000,
+            disabled=not use_liq)
+        st.caption("둘 다 끄면(상한 100% · 필터 해제) 제약 이전과 같은 조건이라 "
+                   "전후 비교를 할 수 있습니다.")
+
     bt_active = [r for r in recent_runs(10)
                  if r["status"] in ("queued", "in_progress", "waiting")
                  and r.get("path", "").endswith("backtest.yml")]
@@ -581,7 +599,9 @@ with tab_bt:
     if st.button("🧪 백테스트 실행", key="run_bt", disabled=bool(bt_active)):
         ok, msg = dispatch("backtest.yml", {
             "market": M["key"], "top_n": str(int(bt_top_n)),
-            "rebalance": bt_reb, "cost_bps": str(int(bt_cost))})
+            "rebalance": bt_reb, "cost_bps": str(int(bt_cost)),
+            "max_sector_pct": str(round(cap_pct / 100, 2)),
+            "min_turnover": str(int(turn) if use_liq else 0)})
         (st.success if ok else st.error)(msg)
         if ok:
             time.sleep(3)

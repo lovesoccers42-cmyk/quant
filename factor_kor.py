@@ -33,7 +33,7 @@ def _load():
         where 기준일 = (select max(기준일) from kor_value);
     """)
     price_list = store.read_sql("""
-        select 날짜, 종가, 종목코드 from kor_price
+        select 날짜, 종가, 거래량, 종목코드 from kor_price
         where 날짜 >= (select (select max(날짜) from kor_price) - interval 1 year);
     """)
     sector_list = store.read_sql("""
@@ -146,14 +146,21 @@ def run() -> dict:
     data_bind = data_bind.drop(["CMP_CD"], axis=1)
 
     port = fc.build_scores(data_bind, symbol="종목코드", sector="SEC_NM_KOR",
-                           weights=config.QVM_WEIGHTS,
-                           n_portfolio=config.N_PORTFOLIO)
+                           weights=config.QVM_WEIGHTS, n_portfolio=len(data_bind))
 
     coverage = {k: int(port[k].notna().sum())
                 for k in ("ROE", "PER", "12M", "K_ratio",
                           "z_quality", "z_value", "z_momentum", "qvm")}
 
-    invest = port[port["invest"] == "Y"].copy()
+    # 실제로 살 수 있는 종목만 + 한 섹터 쏠림 제한
+    eligible, liq = fc.liquidity_eligible(
+        price_list, symbol="종목코드", date="날짜", close="종가", volume="거래량",
+        window=config.LIQUIDITY_WINDOW, min_value=config.MIN_TURNOVER_KR)
+
+    invest, sel = fc.select_portfolio(
+        port, symbol="종목코드", sector="SEC_NM_KOR", n=config.N_PORTFOLIO,
+        max_sector_pct=config.MAX_SECTOR_PCT, eligible=eligible)
+
     codes = [c for c in invest["종목코드"] if c in price_pivot.columns]
 
     tech = _technical_signals(price_pivot, codes)
@@ -172,7 +179,8 @@ def run() -> dict:
                 .sort_values("매수/매도", ascending=False).head(15))
 
     return {"selected": len(invest), "buy_signals": n_buy, "sell_signals": n_sell,
-            "coverage": coverage, "excel": str(xlsx_path), "model_date": today,
+            "coverage": coverage, "유동성": liq, "선정": sel,
+            "excel": str(xlsx_path), "model_date": today,
             "top_buys": top_buys.to_dict(orient="records")}
 
 
