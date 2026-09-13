@@ -3,6 +3,7 @@
 
     python run_backtest.py kr 30 ME
     python run_backtest.py us 50 QE
+    python run_backtest.py kr 100 W-FRI 25 0.25 500000000 4   # 주간 4등분
 """
 import json
 import logging
@@ -33,7 +34,7 @@ def _summary_rows(s: dict) -> pd.DataFrame:
 
 def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
          cost_bps: float = 25.0, max_sector_pct: float = -1.0,
-         min_turnover: float = -1.0) -> int:
+         min_turnover: float = -1.0, tranches: int = 1) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -51,7 +52,7 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
                        cost_bps=cost_bps, max_sector_pct=max_sector_pct,
-                       min_turnover=min_turnover)
+                       min_turnover=min_turnover, tranches=max(1, int(tranches)))
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -83,7 +84,7 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     print(f"  {label}장 QVM 백테스트 · {s['기간']}")
     print("=" * 62)
     print(f"  리밸런싱 {s['리밸런싱횟수']}회 · 보유 {s['보유종목수']}종목 "
-          f"· 평균 턴오버 {s['평균턴오버']}%")
+          f"· 회차당 턴오버 {s['평균턴오버']}% (연환산 {s['연환산턴오버']:.0f}%)")
     print(f"  {'':14}{'포트폴리오':>12}{'벤치마크':>12}")
     for k in ("누적수익률", "연환산수익률", "연변동성", "최대낙폭", "승률", "샤프"):
         pv, bv = p.get(k), b.get(k)
@@ -109,4 +110,5 @@ if __name__ == "__main__":
     cost = float(sys.argv[4]) if len(sys.argv) > 4 else 25.0
     cap = float(sys.argv[5]) if len(sys.argv) > 5 else -1.0
     turn = float(sys.argv[6]) if len(sys.argv) > 6 else -1.0
-    sys.exit(main(market, top_n, reb, cost, cap, turn))
+    tr = int(sys.argv[7]) if len(sys.argv) > 7 else 1
+    sys.exit(main(market, top_n, reb, cost, cap, turn, tr))

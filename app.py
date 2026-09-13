@@ -569,14 +569,24 @@ with tab_bt:
     st.divider()
     st.markdown("##### 백테스트 돌리기")
     bc1, bc2 = st.columns(2)
-    bt_top_n = bc1.number_input("보유 종목 수", 5, 300, 30, step=5)
+    bt_top_n = bc1.number_input("보유 종목 수", 5, 300, 100, step=5,
+                                help="한국장 백테스트에서는 100종목이 30종목보다 "
+                                     "수익·샤프·낙폭·비용 전부 나았습니다.")
     REB = {"B": "일간", "W-FRI": "주간(금)", "ME": "월말", "QE": "분기말"}
     bt_reb = bc2.selectbox("리밸런싱", list(REB), index=2,
                            format_func=lambda v: REB[v],
-                           help="한국장 4년 백테스트에서는 월말이 가장 좋았습니다. "
-                                "주기를 줄일수록 비용이 늘고 성과가 떨어졌습니다.")
+                           help="주기를 줄이려면 아래 '분할 등분 수'를 같이 올리세요. "
+                                "그냥 줄이면 매번 전체가 바뀌어 비용만 늡니다.")
     bt_cost = st.slider("편도 거래비용 (bp)", 0, 100, 25, step=5,
                         help="한국 주식은 수수료+세금 합쳐 편도 25bp 안팎입니다.")
+    bt_tr = st.select_slider(
+        "분할 등분 수", [1, 2, 3, 4, 6, 12], value=1,
+        help="1이면 매 회차 전체 교체(예전 동작). 4면 자금을 4등분해 매 회차 "
+             "한 등분만 점검합니다. 주간+4등분이면 거래는 매주 작게 하면서 "
+             "종목별 점검 간격은 4주로 유지됩니다.")
+    if bt_tr > 1:
+        st.caption(f"매 회차 약 {int(bt_top_n) // bt_tr}종목만 점검 · "
+                   f"종목별 점검 간격 {bt_tr}회차")
 
     with st.expander("포트폴리오 제약 (끄면 예전 동작)"):
         cap_pct = st.slider("한 섹터 최대 비중 (%)", 10, 100, 25, step=5,
@@ -604,7 +614,8 @@ with tab_bt:
             "market": M["key"], "top_n": str(int(bt_top_n)),
             "rebalance": bt_reb, "cost_bps": str(int(bt_cost)),
             "max_sector_pct": str(round(cap_pct / 100, 2)),
-            "min_turnover": str(int(turn) if use_liq else 0)})
+            "min_turnover": str(int(turn) if use_liq else 0),
+            "tranches": str(int(bt_tr))})
         (st.success if ok else st.error)(msg)
         if ok:
             time.sleep(3)

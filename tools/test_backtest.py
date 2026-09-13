@@ -229,6 +229,43 @@ check(ma <= 0.26, f"보유 기준으로도 25% 이하 유지 ({ma:.0%})")
 check(after["summary"]["제약"]["섹터상한"] == "한 섹터 최대 25%",
       "리포트에 제약 조건 기록")
 
+# ── 4-b. 분할 리밸런싱 ───────────────────────────────────────
+one = backtest.run(market="kr", top_n=20, rebalance="QE", tranches=1)
+four = backtest.run(market="kr", top_n=20, rebalance="QE", tranches=4)
+
+check(one["summary"]["제약"]["분할리밸런싱"].startswith("없음"),
+      "1등분이면 예전 동작으로 기록")
+check(four["summary"]["제약"]["분할리밸런싱"].startswith("4등분"),
+      f"4등분 기록: {four['summary']['제약']['분할리밸런싱']}")
+
+# K=1은 예전과 같아야 한다 — 회귀 방지
+base = backtest.run(market="kr", top_n=30, rebalance="QE",
+                    max_sector_pct=1.0, min_turnover=0, tranches=1)
+check(abs(float(base["perf"]["누적"].iloc[-1])
+          - float(before["perf"]["누적"].iloc[-1])) < 1e-12,
+      "tranches=1 은 기존 결과와 완전히 동일 (회귀 없음)")
+
+# 보유 종목 수는 유지되고, 회차당 교체는 줄어야 한다
+h1 = one["holdings"].groupby("리밸런싱일").size()
+h4 = four["holdings"].groupby("리밸런싱일").size()
+check(int(h4.iloc[-1]) == int(h1.iloc[-1]),
+      f"분할해도 총 보유 종목 수 동일 ({int(h1.iloc[-1])}종목)")
+
+t1 = float(one["perf"]["턴오버"].iloc[1:].mean())
+t4 = float(four["perf"]["턴오버"].iloc[1:].mean())
+print(f"\n    회차당 턴오버: 1등분 {t1:.1%} → 4등분 {t4:.1%}")
+check(t4 <= t1 + 1e-9, f"4등분이 회차당 거래가 더 작다 ({t1:.1%} → {t4:.1%})")
+check("연환산턴오버" in four["summary"], "주기 다른 설정끼리 비교할 연환산 턴오버 제공")
+
+# 각 종목은 최소 tranches 회차 동안 유지돼야 한다(한 등분은 4회차에 한 번만 손댐)
+hold4 = four["holdings"]
+dates4 = sorted(hold4["리밸런싱일"].unique())
+if len(dates4) >= 6:
+    sets = [set(hold4.loc[hold4["리밸런싱일"] == d, "종목코드"]) for d in dates4]
+    changed = [len(sets[i] - sets[i - 1]) for i in range(2, len(sets))]
+    check(max(changed) <= 20 // 4 + 1,
+          f"회차당 신규 편입이 한 등분 크기 이하 (최대 {max(changed)}종목)")
+
 # ── 5. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
 store.write("kor_price", store.read("kor_price").query("날짜 >= '2025-10-01'"))
 try:

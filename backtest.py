@@ -236,7 +236,18 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
 # ── 본체 ─────────────────────────────────────────────────────
 def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         cost_bps: float = 25.0, lag_days: int = 90,
-        max_sector_pct: float = 1.0, min_turnover: float = 0.0) -> dict:
+        max_sector_pct: float = 1.0, min_turnover: float = 0.0,
+        tranches: int = 1) -> dict:
+    """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
+
+    주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
+    거래가 커지고 회전율도 그만큼 뜁니다. 분할 리밸런싱은 주기는 주간으로
+    두되 매주 한 등분만 손보기 때문에,
+      · 한 번의 거래가 작고 (100종목 4등분이면 25종목 중 이탈분만)
+      · 각 종목의 점검 간격은 여전히 4주라 회전율이 안 늘고
+      · 진입 시점이 4주에 흩어져 특정 하루의 운을 덜 탑니다.
+    K=1이면 예전 동작과 완전히 같습니다.
+    """
     spec = SPECS[market]
     price, fs, ticker, sector = _load(spec)
 
@@ -286,6 +297,12 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     ttm_cache = {}
     prev_holdings: set = set()
 
+    # 분할 리밸런싱 상태 — 등분별 보유 종목
+    n_tr = max(1, int(tranches))
+    sizes = [top_n // n_tr + (1 if j < top_n % n_tr else 0) for j in range(n_tr)]
+    sleeves: list[list[str]] = [[] for _ in range(n_tr)]
+    started = False
+
     for i, t in enumerate(dates[:-1]):
         t_next = dates[i + 1]
         scored = _score_at(t, price_pivot, fs, ticker, sector, shares, spec,
@@ -304,7 +321,28 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             max_sector_pct=max_sector_pct, eligible=eligible)
         sel_log.append({"리밸런싱일": t, **sel})
 
-        codes = [c for c in picks["symbol"] if c in price_pivot.columns]
+        target = [str(c) for c in picks["symbol"] if c in price_pivot.columns]
+        if len(target) < 5:
+            continue
+
+        if not started:
+            # 첫 회차는 전액을 한 번에 넣습니다. 순위를 등분에 번갈아 나눠
+            # 어느 한 등분만 상위권을 독차지하지 않게 합니다.
+            for j, c in enumerate(target[:top_n]):
+                sleeves[j % n_tr].append(c)
+            started = True
+        else:
+            slot = i % n_tr
+            tset = set(target)
+            others = {c for j, s in enumerate(sleeves) if j != slot for c in s}
+            keep = [c for c in sleeves[slot] if c in tset]     # 아직 상위면 유지
+            need = sizes[slot] - len(keep)
+            if need > 0:
+                blocked = set(keep) | others
+                keep += [c for c in target if c not in blocked][:need]
+            sleeves[slot] = keep[:sizes[slot]]
+
+        codes = list(dict.fromkeys(c for s in sleeves for c in s))
         if len(codes) < 5:
             continue
 
@@ -331,11 +369,13 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                      "비용차감수익률": port_ret - cost,
                      "벤치마크": bench_ret, "턴오버": turnover})
 
-        top = picks.head(min(top_n, len(picks)))
+        info = scored.drop_duplicates("symbol").set_index("symbol")
+        info.index = info.index.astype(str)
+        info = info.reindex(codes)
         holdings_log.append(pd.DataFrame({
-            "리밸런싱일": t, "종목코드": top["symbol"].values,
-            "종목명": top["name"].values, "섹터": top["sector"].values,
-            "qvm": top["qvm"].round(4).values}))
+            "리밸런싱일": t, "종목코드": codes,
+            "종목명": info["name"].values, "섹터": info["sector"].values,
+            "qvm": info["qvm"].round(4).values}))
 
     if not rows:
         raise RuntimeError("유효한 리밸런싱이 한 번도 없었습니다.")
@@ -350,6 +390,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                   else f"한 섹터 최대 {max_sector_pct:.0%}"),
         "유동성기준": ("없음" if min_turnover <= 0
                    else f"{config.LIQUIDITY_WINDOW}일 평균 거래대금 {min_turnover:,.0f} 이상"),
+        "분할리밸런싱": ("없음 (매 회차 전체 교체)" if n_tr <= 1
+                    else f"{n_tr}등분 — 매 회차 {sizes[0]}종목만 점검"),
     }
     if sel_log:
         sl = pd.DataFrame(sel_log)
@@ -389,6 +431,9 @@ def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
         "리밸런싱횟수": int(len(perf)),
         "보유종목수": top_n,
         "평균턴오버": round(float(perf["턴오버"].mean()) * 100, 1),
+        # 주기가 다르면 회차당 턴오버는 비교가 안 됩니다(주간 5%와 월간 20%는
+        # 같은 회전율). 연 단위로 환산해 나란히 놓을 수 있게 합니다.
+        "연환산턴오버": round(float(perf["턴오버"].mean()) * (len(perf) / years) * 100, 0),
         "거래비용가정": f"편도 {cost_bps:.0f}bp",
         "공시지연가정": f"{lag_days}일",
         "포트폴리오": port,

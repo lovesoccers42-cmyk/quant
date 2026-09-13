@@ -29,6 +29,10 @@ on:
         description: "20일 평균 거래대금 하한. 0 이면 필터 끔(예전 동작). 한국 5억 = 500000000"
         required: false
         default: "500000000"
+      tranches:
+        description: "분할 리밸런싱 등분 수. 1이면 매번 전체 교체. 주간 4등분이면 4"
+        required: false
+        default: "1"
 
 concurrency:
   group: quant-backtest
@@ -73,7 +77,8 @@ jobs:
             "${{ github.event.inputs.rebalance }}" \
             "${{ github.event.inputs.cost_bps }}" \
             "${{ github.event.inputs.max_sector_pct }}" \
-            "${{ github.event.inputs.min_turnover }}"
+            "${{ github.event.inputs.min_turnover }}" \
+            "${{ github.event.inputs.tranches }}"
 
       - name: 결과 올리기
         if: always()
