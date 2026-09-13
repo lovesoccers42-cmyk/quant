@@ -71,28 +71,40 @@ jobs:
         if: always()
         run: |
           shopt -s nullglob
-          gh release view data-store >/dev/null 2>&1 \
-            || gh release create data-store --title "데이터 저장소" \
-                 --notes "파이프라인이 관리하는 parquet 데이터입니다. 직접 수정하지 마세요."
+          echo "--- output 폴더 내용 ---"
+          ls -la output 2>/dev/null || echo "(output 폴더 없음)"
 
-          # 자기 시장 파일만 올립니다. 한국·미국이 같은 릴리스를 쓰기 때문에
-          # 상대 파일까지 올리면 상대의 최신 데이터를 낡은 사본으로 덮어씁니다.
-          files=(data/kor_*.parquet output/*_kr_*.parquet \
-                 output/*_kr_*.json output/*한국*.xlsx)
+          gh release view data-store >/dev/null 2>&1 ||
+            gh release create data-store --title "데이터 저장소" --notes "파이프라인이 관리하는 데이터입니다. 직접 수정하지 마세요."
+
+          # data/ 는 한국·미국이 공유하므로 자기 시장 파일만.
+          # output/ 는 이 실행이 만든 결과만 들어 있으므로 통째로 올린다.
+          # (파일명 패턴에 의존하면 이름을 바꿀 때마다 조용히 누락된다)
+          files=(data/kor_*.parquet output/*)
+
+          echo "--- 올릴 파일 ${#files[@]}개 ---"
+          for f in "${files[@]}"; do echo "  $f"; done
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::올릴 파일이 하나도 없습니다"
+          fi
 
           fail=0
           for f in "${files[@]}"; do
+            [ -f "$f" ] || continue
             ok=0
             for try in 1 2 3; do
               if gh release upload data-store "$f" --clobber; then ok=1; break; fi
-              echo "::warning::업로드 재시도 $try — $f"
+              echo "::warning::업로드 재시도 $try - $f"
               sleep $((try * 5))
             done
             if [ $ok -ne 1 ]; then
-              echo "::error::업로드 실패 — $f"
+              echo "::error::업로드 실패 - $f"
               fail=1
             fi
           done
+
+          echo "--- 릴리스에 현재 올라가 있는 파일 ---"
+          gh release view data-store --json assets --jq '.assets[].name' || true
           exit $fail
 
       - name: 실행 기록 보관

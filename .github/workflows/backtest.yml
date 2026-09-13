@@ -1,0 +1,102 @@
+name: 백테스트
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "시장"
+        required: true
+        default: "kr"
+        type: choice
+        options: ["kr", "us"]
+      top_n:
+        description: "보유 종목 수 (실전에서 살 수 있는 수로)"
+        required: false
+        default: "30"
+      rebalance:
+        description: "리밸런싱 주기 — ME(월말) / QE(분기말)"
+        required: false
+        default: "ME"
+      cost_bps:
+        description: "편도 거래비용 (bp). 한국 주식은 25 안팎"
+        required: false
+        default: "25"
+
+concurrency:
+  group: quant-backtest
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TZ: Asia/Seoul
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 데이터 내려받기
+        run: |
+          mkdir -p data output
+          prefix=kor
+          if [ "${{ github.event.inputs.market }}" = "us" ]; then prefix=global; fi
+          gh release download data-store -D data -p "${prefix}_*.parquet" --clobber
+          ls -lh data
+
+      - name: 백테스트 실행
+        run: |
+          python run_backtest.py \
+            "${{ github.event.inputs.market }}" \
+            "${{ github.event.inputs.top_n }}" \
+            "${{ github.event.inputs.rebalance }}" \
+            "${{ github.event.inputs.cost_bps }}"
+
+      - name: 결과 올리기
+        if: always()
+        run: |
+          shopt -s nullglob
+          echo "--- output 폴더 내용 ---"
+          ls -la output 2>/dev/null || echo "(output 폴더 없음)"
+
+          # 백테스트는 읽기 전용입니다. data/ 는 절대 올리지 않습니다.
+          files=(output/*)
+          fail=0
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || continue
+            ok=0
+            for try in 1 2 3; do
+              if gh release upload data-store "$f" --clobber; then ok=1; break; fi
+              echo "::warning::업로드 재시도 $try - $f"
+              sleep $((try * 5))
+            done
+            if [ $ok -ne 1 ]; then
+              echo "::error::업로드 실패 - $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: 실행 기록 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ github.event.inputs.market }}-${{ github.run_number }}
+          path: |
+            output/
+            logs/
+          retention-days: 90
+          if-no-files-found: warn

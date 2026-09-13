@@ -280,8 +280,8 @@ else:
             "아래 **실행** 탭에서 월간 실행을 먼저 한 번 돌려주세요.")
 
 top_label = "🔔 매수 신호" if M["has_signals"] else "🔔 상위 종목"
-tab_top, tab_run, tab_model, tab_log = st.tabs(
-    [top_label, "▶️ 실행", "📊 모델", "📜 기록"])
+tab_top, tab_run, tab_model, tab_bt, tab_log = st.tabs(
+    [top_label, "▶️ 실행", "📊 모델", "🧪 백테스트", "📜 기록"])
 
 SYM, NAME, SEC = M["symbol"], M["name"], M["sector"]
 
@@ -478,6 +478,115 @@ with tab_model:
                                  alt.Y("count()", title="종목 수"))
                          .properties(height=220))
                 st.altair_chart(chart, use_container_width=True)
+
+
+# ── 백테스트 ─────────────────────────────────────────────────
+def series_colors() -> tuple[str, str]:
+    """포트폴리오 / 벤치마크 색. 두 테마 모두 대비·색각 검사를 통과한 값."""
+    try:
+        dark = st.get_option("theme.base") == "dark"
+    except Exception:
+        dark = False
+    return ("#3987e5", "#d95926") if dark else ("#2a78d6", "#eb6834")
+
+
+with tab_bt:
+    bt = load_run(f"backtest_{M['key']}_latest.json")
+
+    if not bt:
+        st.info("아직 백테스트 결과가 없습니다. 아래에서 한 번 돌려주세요.")
+    else:
+        s = bt.get("summary", {})
+        p = s.get("포트폴리오", {})
+        b = s.get("벤치마크(전종목 동일가중)", {})
+
+        st.caption(f"{s.get('기간','-')} · 리밸런싱 {s.get('리밸런싱횟수','-')}회 "
+                   f"· 보유 {s.get('보유종목수','-')}종목 "
+                   f"· 턴오버 {s.get('평균턴오버','-')}%")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("누적수익률", f"{p.get('누적수익률','-')}%",
+                  delta=f"{s.get('초과수익률','-')}%p vs 벤치마크")
+        c2.metric("최대낙폭", f"{p.get('최대낙폭','-')}%")
+        c3.metric("샤프", p.get("샤프", "-"))
+
+        curve = bt.get("curve") or {}
+        if curve.get("dates"):
+            port_c, bench_c = series_colors()
+            long = pd.concat([
+                pd.DataFrame({"날짜": pd.to_datetime(curve["dates"]),
+                              "구분": "포트폴리오", "누적": curve["portfolio"]}),
+                pd.DataFrame({"날짜": pd.to_datetime(curve["dates"]),
+                              "구분": "벤치마크", "누적": curve["benchmark"]}),
+            ])
+            long["수익률"] = (long["누적"] - 1) * 100
+
+            import altair as alt
+            hover = alt.selection_point(fields=["날짜"], nearest=True,
+                                        on="mouseover", empty=False)
+            base = alt.Chart(long).encode(
+                x=alt.X("날짜:T", title=None,
+                        axis=alt.Axis(grid=False, tickCount=5)),
+                y=alt.Y("수익률:Q", title="누적 수익률 (%)",
+                        axis=alt.Axis(grid=True, gridOpacity=0.18)),
+                color=alt.Color("구분:N", title=None,
+                                scale=alt.Scale(domain=["포트폴리오", "벤치마크"],
+                                                range=[port_c, bench_c]),
+                                legend=alt.Legend(orient="top", direction="horizontal")),
+            )
+            chart = (base.mark_line(strokeWidth=2)
+                     + base.mark_point(size=60, filled=True)
+                     .encode(opacity=alt.condition(hover, alt.value(1), alt.value(0)),
+                             tooltip=["날짜:T", "구분:N",
+                                      alt.Tooltip("수익률:Q", format=".2f", title="누적 %")])
+                     .add_params(hover))
+            st.altair_chart(chart.properties(height=280), use_container_width=True)
+
+        rows = []
+        for k in ("누적수익률", "연환산수익률", "연변동성", "최대낙폭", "승률", "샤프"):
+            rows.append({"지표": k, "포트폴리오": p.get(k), "벤치마크": b.get(k)})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        with st.expander("⚠️ 이 숫자를 믿기 전에 — 한계", expanded=False):
+            for lim in s.get("한계", []):
+                st.write(f"· {lim}")
+            st.caption(f"거래비용 {s.get('거래비용가정','-')} · "
+                       f"공시지연 {s.get('공시지연가정','-')} 가정")
+
+        assets, _ = release_assets()
+        bx = sorted([n for n in assets
+                     if n.endswith(".xlsx") and "백테스트" in n and M["xlsx_key"] in n])
+        if bx:
+            blob = download_asset(bx[-1])
+            if blob:
+                st.download_button(f"⬇️ {bx[-1]}", blob, file_name=bx[-1],
+                                   mime="application/vnd.openxmlformats-officedocument."
+                                        "spreadsheetml.sheet", key="dl_bt")
+
+    st.divider()
+    st.markdown("##### 백테스트 돌리기")
+    bc1, bc2 = st.columns(2)
+    bt_top_n = bc1.number_input("보유 종목 수", 5, 300, 30, step=5)
+    bt_reb = bc2.selectbox("리밸런싱", ["ME", "QE"],
+                           format_func=lambda v: "월말" if v == "ME" else "분기말")
+    bt_cost = st.slider("편도 거래비용 (bp)", 0, 100, 25, step=5,
+                        help="한국 주식은 수수료+세금 합쳐 편도 25bp 안팎입니다.")
+
+    bt_active = [r for r in recent_runs(10)
+                 if r["status"] in ("queued", "in_progress", "waiting")
+                 and r.get("path", "").endswith("backtest.yml")]
+    if bt_active:
+        st.info("⏳ 백테스트 실행 중")
+
+    if st.button("🧪 백테스트 실행", key="run_bt", disabled=bool(bt_active)):
+        ok, msg = dispatch("backtest.yml", {
+            "market": M["key"], "top_n": str(int(bt_top_n)),
+            "rebalance": bt_reb, "cost_bps": str(int(bt_cost))})
+        (st.success if ok else st.error)(msg)
+        if ok:
+            time.sleep(3)
+            st.cache_data.clear()
+            st.rerun()
 
 
 # ── 기록 ─────────────────────────────────────────────────────
