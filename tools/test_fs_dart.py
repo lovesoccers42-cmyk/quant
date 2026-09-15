@@ -32,10 +32,17 @@ def check(cond, msg):
         fails.append(msg)
 
 
-def row(aid, nm, sj, dt, amount=None, add=None):
-    return {"account_id": aid, "account_nm": nm, "sj_div": sj, "thstrm_dt": dt,
-            "thstrm_amount": "" if amount is None else f"{amount:,}",
-            "thstrm_add_amount": "" if add is None else f"{add:,}"}
+# 실제 fnlttSinglAcntAll 응답에는 날짜 컬럼이 없습니다(thstrm_dt는 '주요계정'
+# API에만 있습니다). 실제로 여기서 전 계정이 버려져 0행이 났습니다.
+# 그래서 픽스처도 날짜 없이, 사업연도·보고서코드만 주고 만듭니다.
+def row(aid, nm, sj, reprt, amount=None, add=None, year=2023, dt=None):
+    r = {"account_id": aid, "account_nm": nm, "sj_div": sj,
+         "bsns_year": str(year), "reprt_code": reprt,
+         "thstrm_amount": "" if amount is None else f"{amount:,}",
+         "thstrm_add_amount": "" if add is None else f"{add:,}"}
+    if dt:
+        r["thstrm_dt"] = dt
+    return r
 
 
 def payload(rows):
@@ -47,10 +54,9 @@ def payload(rows):
 #  → 분기별 100 / 150 / 180 / 170
 CUM = {1: 100, 2: 250, 3: 430, 4: 600}
 ASSETS = {1: 1000, 2: 1100, 3: 1050, 4: 1200}
-ENDS = {1: "2023.01.01 ~ 2023.03.31", 2: "2023.01.01 ~ 2023.06.30",
-        3: "2023.01.01 ~ 2023.09.30", 4: "2023.01.01 ~ 2023.12.31"}
-BS_ENDS = {1: "2023.03.31 현재", 2: "2023.06.30 현재",
-           3: "2023.09.30 현재", 4: "2023.12.31 현재"}
+# 보고서코드: 1분기 11013 · 반기 11012 · 3분기 11014 · 사업보고서 11011
+ENDS = {1: "11013", 2: "11012", 3: "11014", 4: "11011"}
+BS_ENDS = ENDS
 
 by_q = {}
 for q in (1, 2, 3, 4):
@@ -144,12 +150,76 @@ p2 = dart.parse_report(payload(nogp), "000660", 1)
 check(abs(p2.get("매출총이익", (None, 0))[1] - 300) < 1e-6,
       f"매출총이익 미보고 시 매출액-매출원가로 생성 ({p2.get('매출총이익')})")
 
-# ── 5. 12월 결산이 아닌 회사 ─────────────────────────────────
-march = [row("ifrs-full_Revenue", "매출액", "IS",
-             "2023.04.01 ~ 2023.06.30", add=int(200 * 1e8))]
-p3 = dart.parse_report(payload(march), "000660", 1)
-check(p3["매출액"][0].strftime("%Y-%m-%d") == "2023-06-30",
-      "reprt_code로 추측하지 않고 실제 기간 종료일을 씀 (3월 결산 대응)")
+# ── 5. 날짜 컬럼이 없을 때 ───────────────────────────────────
+# 실제 응답에는 thstrm_dt가 아예 없습니다. 사업연도 + 보고서코드로 분기말을
+# 만들어야 합니다. 이게 안 되면 전 계정이 버려집니다(실제로 그랬습니다).
+nodate = [row("ifrs_Assets", "자산총계", "BS", "11014",
+              amount=int(500 * 1e8), year=2017)]
+p3 = dart.parse_report(payload(nodate), "000660", 3, 2017, "11014")
+check(p3["자산"][0].strftime("%Y-%m-%d") == "2017-09-30",
+      f"날짜 컬럼이 없어도 사업연도+보고서코드로 분기말 생성 ({p3['자산'][0].date()})")
+
+# 날짜가 있으면 그걸 우선 (다른 API 응답이 섞여 들어와도 안전)
+withdt = [row("ifrs_Assets", "자산총계", "BS", "11013",
+              amount=int(500 * 1e8), year=2023, dt="2023.06.30 현재")]
+p3b = dart.parse_report(payload(withdt), "000660", 1, 2023, "11013")
+check(p3b["자산"][0].strftime("%Y-%m-%d") == "2023-06-30",
+      "날짜 컬럼이 있으면 그쪽을 우선")
+
+# ── 5-b. 금액 컬럼 두 개의 의미 구분 ─────────────────────────
+# thstrm_amount는 분기보고서에서 '그 분기 3개월', 사업보고서에서 '1년'입니다.
+# 둘을 구분 못 하면 누적을 3개월로 착각해 엉뚱한 값이 나옵니다.
+q3 = [row("ifrs-full_Revenue", "매출액", "IS", "11012", amount=int(150 * 1e8))]
+pq = dart.parse_report(payload(q3), "000660", 2, 2023, "11012")
+check(pq["매출액"][2] == "q3m", f"분기보고서 thstrm_amount = 3개월치 ({pq['매출액'][2]})")
+
+yr = [row("ifrs-full_Revenue", "매출액", "IS", "11011", amount=int(600 * 1e8))]
+py = dart.parse_report(payload(yr), "000660", 4, 2023, "11011")
+check(py["매출액"][2] == "cum", f"사업보고서 thstrm_amount = 1년 누적 ({py['매출액'][2]})")
+
+add = [row("ifrs-full_Revenue", "매출액", "IS", "11012",
+           amount=int(150 * 1e8), add=int(250 * 1e8))]
+pa = dart.parse_report(payload(add), "000660", 2, 2023, "11012")
+check(pa["매출액"][1] == 250 and pa["매출액"][2] == "cum",
+      "두 컬럼이 다 있으면 누적(thstrm_add_amount)을 씀")
+
+# 3개월치와 누적이 섞여 와도 3개월치로 환산되는가
+# 1Q 3개월 100 · 2Q 3개월 150 · 3Q 누적 430 · 사업보고서 누적 600
+mixed = {
+    1: dart.parse_report(payload([row("ifrs-full_Revenue", "매출액", "IS", "11013",
+                                      amount=int(100 * 1e8))]), "A", 1, 2023, "11013"),
+    2: dart.parse_report(payload([row("ifrs-full_Revenue", "매출액", "IS", "11012",
+                                      amount=int(150 * 1e8))]), "A", 2, 2023, "11012"),
+    3: dart.parse_report(payload([row("ifrs-full_Revenue", "매출액", "IS", "11014",
+                                      add=int(430 * 1e8))]), "A", 3, 2023, "11014"),
+    4: dart.parse_report(payload([row("ifrs-full_Revenue", "매출액", "IS", "11011",
+                                      amount=int(600 * 1e8))]), "A", 4, 2023, "11011"),
+}
+dm = dart.to_quarterly(mixed, "A").sort_values("기준일")["값"].tolist()
+check(dm == [100, 150, 180, 170],
+      f"3개월치와 누적이 섞여 와도 정확히 환산 {dm} (기대 [100,150,180,170])")
+
+# ── 5-c. 실제 응답 회귀 테스트 ───────────────────────────────
+# 2026-09-15 실행에서 실제로 받은 SK하이닉스 2015년 사업보고서 응답입니다.
+# 계정은 제대로 왔는데 날짜 컬럼이 없어 통째로 버려졌던 바로 그 데이터입니다.
+REAL = [
+    {"account_id": "ifrs_CurrentAssets", "sj_div": "BS", "account_nm": "유동자산",
+     "thstrm_amount": "9760030000000", "bsns_year": "2015", "reprt_code": "11011"},
+    {"account_id": "-표준계정코드 미사용-", "sj_div": "BS", "account_nm": "단기금융상품",
+     "thstrm_amount": "3615554000000", "bsns_year": "2015", "reprt_code": "11011"},
+    {"account_id": "ifrs_PropertyPlantAndEquipment", "sj_div": "BS",
+     "account_nm": "유형자산", "thstrm_amount": "16966252000000",
+     "bsns_year": "2015", "reprt_code": "11011"},
+    {"account_id": "ifrs_Assets", "sj_div": "BS", "account_nm": "자산총계",
+     "thstrm_amount": "29677906000000", "bsns_year": "2015", "reprt_code": "11011"},
+]
+pr = dart.parse_report(payload(REAL), "000660", 4, 2015, "11011")
+check("자산" in pr, "실제 응답에서 자산총계를 찾음")
+check(abs(pr["자산"][1] - 296779.06) < 0.01,
+      f"29.68조 → 296,779억원 ({pr['자산'][1]:,.2f})")
+check(pr["자산"][0].strftime("%Y-%m-%d") == "2015-12-31",
+      f"사업보고서 → 12월 31일 ({pr['자산'][0].date()})")
+check(pr["자산"][2] == "point", "재무상태표는 잔액(차분 안 함)")
 
 # ── 6. 오류 응답 ─────────────────────────────────────────────
 check(dart.parse_report({"status": "013", "message": "데이터 없음"}, "A", 1) == {},
@@ -178,11 +248,24 @@ check(("000660", 2015) not in keys,
       "한 분기도 못 읽은 건은 완료로 안 봄 (매핑 고친 뒤 재시도 가능)")
 check(("005930", 2015) in keys, "정상 수집 건은 계속 건너뜀")
 
-# ── 7-b. 유동성 상위 N개로 자르기 ────────────────────────────
+# ── 7-b. 12월 결산 판정 (기존 kor_fs로, DART 호출 없이) ──────
+import store  # noqa: E402
+store.write("kor_fs", pd.DataFrame([
+    {"종목코드": "005930", "기준일": pd.Timestamp(f"2023-{m:02d}-28"),
+     "계정": "자산", "값": 1.0, "공시구분": "q"} for m in (3, 6, 9, 12)
+] + [
+    {"종목코드": "111111", "기준일": pd.Timestamp(f"2023-{m:02d}-28"),
+     "계정": "자산", "값": 1.0, "공시구분": "q"} for m in (2, 5, 8, 11)
+]))
+dec = dart.december_filers()
+check("005930" in dec, "3·6·9·12월 결산 종목은 허용")
+check("111111" not in dec,
+      "2·5·8·11월(비12월 결산) 종목은 제외 — 날짜 계산이 틀리므로")
+
 check(dart._priority_tickers(limit=0) == [] or True, "limit 인자 수용")
 
 # ── 8. 기존 kor_fs 스키마와 동일한가 ─────────────────────────
-import store  # noqa: E402
+store.write("kor_fs", pd.DataFrame(columns=list(store.SCHEMAS["kor_fs"])))  # 7-b 픽스처 정리
 check(set(df.columns) == set(store.SCHEMAS["kor_fs"]) - set(),
       f"kor_fs와 컬럼 동일 {sorted(df.columns)}")
 check(set(df["공시구분"]) == {"q"}, "공시구분 'q'로 저장 (분기)")
