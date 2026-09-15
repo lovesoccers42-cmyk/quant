@@ -40,11 +40,29 @@ def main(budget: int = 0, start_year: int = 0) -> int:
         from kor_fs where 공시구분 = 'q' group by 1 order by 1;
     """)
 
+    diag = res.pop("진단", None)
+
     print("\n" + "=" * 58)
     print("  DART 과거 재무제표 수집")
     print("=" * 58)
     for k, v in res.items():
         print(f"  {k:<10} {v}")
+
+    if diag:
+        # 응답은 정상인데 계정을 하나도 못 찾았습니다. 실제로 무엇이 왔는지
+        # 그대로 찍어야 매핑을 고칠 수 있습니다.
+        print("\n  [진단] 응답은 정상인데 아는 계정이 없습니다.")
+        print(f"  {diag['종목코드']} · {diag['연도']}년 · 보고서 {diag['보고서']} "
+              f"· 총 {diag['행수']}행")
+        print(f"  {'account_id':<45} {'sj':<4} {'account_nm':<22} 금액")
+        for r in diag["예시"]:
+            print(f"  {str(r.get('account_id'))[:45]:<45} "
+                  f"{str(r.get('sj_div'))[:4]:<4} "
+                  f"{str(r.get('account_nm'))[:22]:<22} "
+                  f"{str(r.get('thstrm_amount'))[:18]} | "
+                  f"{str(r.get('thstrm_add_amount'))[:18]} | "
+                  f"{str(r.get('thstrm_dt'))[:24]}")
+        print("\n  위 표를 그대로 복사해서 보내주세요.")
     print(f"\n  수집 전: {before.iloc[0]['처음']} ~ {before.iloc[0]['마지막']} "
           f"({int(before.iloc[0]['행']):,}행)")
     print("\n  연도별 종목 수:")

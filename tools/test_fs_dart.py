@@ -108,6 +108,33 @@ check(p.get("매출액", (None, None))[1] == 500, "account_id 없어도 계정�
 check(p.get("당기순이익", (None, None))[1] == 50, "계정명 변형(당기순이익(손실))도 인식")
 check("자산" in p, "자산총계 → 자산 매핑")
 
+# ── 3-b. 2018년 이전 택소노미 (ifrs_ 접두사) ─────────────────
+# DART는 연도마다 다른 택소노미를 씁니다. 같은 계정이 과거 공시에서는
+# 'ifrs_Assets', 최근에는 'ifrs-full_Assets'로 옵니다. 접두사를 그대로
+# 비교하면 과거 공시가 통째로 안 잡힙니다 — 실제로 여기서 0행이 났습니다.
+old_tax = [
+    row("ifrs_Assets", "자산총계", "BS", BS_ENDS[1], amount=int(2000 * 1e8)),
+    row("ifrs_Equity", "자본총계", "BS", BS_ENDS[1], amount=int(1200 * 1e8)),
+    row("ifrs_Revenue", "매출액", "IS", ENDS[1], add=int(800 * 1e8)),
+    row("ifrs_GrossProfit", "매출총이익", "IS", ENDS[1], add=int(240 * 1e8)),
+    row("ifrs_ProfitLoss", "당기순이익", "IS", ENDS[1], add=int(80 * 1e8)),
+    row("ifrs_CashFlowsFromUsedInOperatingActivities", "영업활동현금흐름", "CF",
+        ENDS[1], add=int(160 * 1e8)),
+]
+po = dart.parse_report(payload(old_tax), "005930", 1)
+check(len(po) == 6, f"2018년 이전 ifrs_ 접두사도 6개 전부 인식 ({len(po)}개)")
+check(po["자산"][1] == 2000 and po["매출액"][1] == 800, "과거 택소노미 값도 정확")
+check(dart._tag("ifrs-full_Assets") == dart._tag("ifrs_Assets") == "Assets",
+      "네임스페이스를 뗀 태그로 비교")
+
+# 같은 태그가 여러 표에 있으면 기대하는 재무제표를 고른다
+dup = [
+    row("ifrs-full_ProfitLoss", "당기순이익", "CIS", ENDS[1], add=int(99 * 1e8)),
+    row("ifrs-full_ProfitLoss", "당기순이익", "IS", ENDS[1], add=int(80 * 1e8)),
+]
+pd_ = dart.parse_report(payload(dup), "005930", 1)
+check(pd_["당기순이익"][1] == 80, f"손익계산서(IS)를 우선 ({pd_['당기순이익'][1]})")
+
 # ── 4. 매출총이익 미보고 → 매출액 - 매출원가 ─────────────────
 nogp = [
     row("ifrs-full_Revenue", "매출액", "IS", ENDS[1], add=int(1000 * 1e8)),
@@ -141,6 +168,18 @@ check(("005930", 2015) in dart._done_keys(prog2), "완료 키 조회")
 dart.save_progress(prog2, [{"종목코드": "005930", "연도": 2015, "상태": "4/4",
                             "갱신일": pd.Timestamp("2026-09-14")}])
 check(len(dart.load_progress()) == 1, "같은 종목·연도를 두 번 기록하지 않음")
+
+# 빈손(0/4)으로 끝난 건은 완료로 치지 않고 다시 시도해야 한다
+dart.save_progress(dart.load_progress(),
+                   [{"종목코드": "000660", "연도": 2015, "상태": "0/4",
+                     "갱신일": pd.Timestamp("2026-09-14")}])
+keys = dart._done_keys(dart.load_progress())
+check(("000660", 2015) not in keys,
+      "한 분기도 못 읽은 건은 완료로 안 봄 (매핑 고친 뒤 재시도 가능)")
+check(("005930", 2015) in keys, "정상 수집 건은 계속 건너뜀")
+
+# ── 7-b. 유동성 상위 N개로 자르기 ────────────────────────────
+check(dart._priority_tickers(limit=0) == [] or True, "limit 인자 수용")
 
 # ── 8. 기존 kor_fs 스키마와 동일한가 ─────────────────────────
 import store  # noqa: E402

@@ -47,28 +47,46 @@ PROGRESS = "kor_dart_progress"
 # (보고서코드, 분기, 누적개월)
 REPORTS = [("11013", 1, 3), ("11012", 2, 6), ("11014", 3, 9), ("11011", 4, 12)]
 
-# 기존 kor_fs 계정명 → (IFRS 표준 account_id, 계정명 대체 후보)
-# account_id가 먼저입니다. 회사가 계정명을 제멋대로 붙여도 표준 ID는 같습니다.
+# 기존 kor_fs 계정명 → (IFRS 태그 이름, 계정명 대체 후보)
+#
+# 태그는 네임스페이스를 뗀 뒤 비교합니다. DART가 연도마다 다른 택소노미를 쓰기
+# 때문입니다 — 2018년 이전 공시는 'ifrs_Assets', 이후는 'ifrs-full_Assets'로
+# 같은 계정에 다른 접두사가 붙습니다. 접두사를 그대로 비교하면 과거 공시가
+# 통째로 안 잡힙니다.
 TARGETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "자산": (("ifrs-full_Assets",), ("자산총계",)),
-    "자본": (("ifrs-full_Equity",), ("자본총계",)),
-    "매출액": (("ifrs-full_Revenue", "ifrs-full_RevenueFromContractsWithCustomers"),
-             ("매출액", "수익(매출액)", "영업수익", "매출")),
-    "매출총이익": (("ifrs-full_GrossProfit",), ("매출총이익",)),
-    "당기순이익": (("ifrs-full_ProfitLoss",),
-               ("당기순이익", "당기순이익(손실)", "분기순이익", "반기순이익",
-                "당기순손익")),
+    "자산": (("Assets",), ("자산총계", "자산총계계", "자산")),
+    "자본": (("Equity",), ("자본총계", "자본")),
+    "매출액": (("Revenue", "RevenueFromContractsWithCustomers",
+             "RevenueFromSaleOfGoods", "RevenueFromRenderingOfServices"),
+             ("매출액", "수익(매출액)", "영업수익", "매출", "수익",
+              "매출및지분법손익", "영업수익(매출액)")),
+    "매출총이익": (("GrossProfit",), ("매출총이익", "매출총이익(손실)")),
+    "당기순이익": (("ProfitLoss",),
+               ("당기순이익", "당기순이익(손실)", "당기순손익", "분기순이익",
+                "반기순이익", "연결당기순이익", "당기순이익(손실)합계")),
     "영업활동으로인한현금흐름": (
-        ("ifrs-full_CashFlowsFromUsedInOperatingActivities",),
-        ("영업활동현금흐름", "영업활동으로인한현금흐름", "영업활동 현금흐름")),
+        ("CashFlowsFromUsedInOperatingActivities",),
+        ("영업활동현금흐름", "영업활동으로인한현금흐름", "영업활동으로인한순현금흐름",
+         "영업활동순현금흐름")),
 }
 
 # 잔액 계정 — 시점의 값이라 차분하지 않습니다. 나머지는 전부 흐름 계정.
 STOCK_ACCOUNTS = {"자산", "자본"}
 
+# 재무제표 구분 — 같은 이름이 여러 표에 나올 때 우선순위를 줍니다.
+PREFERRED_SJ = {"자산": ("BS",), "자본": ("BS",),
+                "매출액": ("IS", "CIS"), "매출총이익": ("IS", "CIS"),
+                "당기순이익": ("IS", "CIS"), "영업활동으로인한현금흐름": ("CF",)}
+
 # 매출총이익을 따로 안 내는 회사가 많습니다 (매출액 - 매출원가로 만듭니다)
-COST_OF_SALES = ("ifrs-full_CostOfSales",)
+COST_OF_SALES = ("CostOfSales",)
 COST_OF_SALES_NM = ("매출원가",)
+
+
+def _tag(account_id) -> str:
+    """'ifrs-full_Assets' / 'ifrs_Assets' / 'dart_Assets' → 'Assets'."""
+    s = str(account_id or "").strip()
+    return s.rsplit("_", 1)[-1] if "_" in s else s
 
 
 def _norm(s) -> str:
@@ -108,17 +126,29 @@ def _period_end(row: dict):
         return None
 
 
-def _pick(rows: list, ids: tuple, names: tuple):
-    """account_id 우선, 없으면 계정명으로 한 행을 고릅니다."""
+def _pick(rows: list, ids: tuple, names: tuple, sj: tuple = ()):
+    """표준 태그 우선, 없으면 계정명으로 한 행을 고릅니다.
+
+    같은 태그가 여러 표에 나올 수 있어(당기순이익은 손익계산서와 포괄손익
+    계산서 양쪽에 있습니다) 기대하는 재무제표 구분을 먼저 봅니다.
+    """
     wanted_nm = {_norm(n) for n in names}
-    by_name = None
-    for r in rows:
-        rid = str(r.get("account_id") or "").strip()
-        if rid in ids:
-            return r
-        if by_name is None and _norm(r.get("account_nm")) in wanted_nm:
-            by_name = r
-    return by_name
+
+    def matches(r, by_tag: bool):
+        return (_tag(r.get("account_id")) in ids if by_tag
+                else _norm(r.get("account_nm")) in wanted_nm)
+
+    # 태그 > 계정명, 그리고 sj_div는 지정한 순서대로 (손익계산서 > 포괄손익)
+    for by_tag in (True, False):
+        for div in sj:
+            for r in rows:
+                if (str(r.get("sj_div") or "").strip().upper() == div
+                        and matches(r, by_tag)):
+                    return r
+        for r in rows:                      # sj를 못 맞추면 아무 표에서나
+            if matches(r, by_tag):
+                return r
+    return None
 
 
 def parse_report(payload: dict, ticker: str, quarter: int) -> dict:
@@ -131,7 +161,7 @@ def parse_report(payload: dict, ticker: str, quarter: int) -> dict:
 
     out: dict[str, tuple] = {}
     for account, (ids, names) in TARGETS.items():
-        row = _pick(rows, ids, names)
+        row = _pick(rows, ids, names, PREFERRED_SJ.get(account, ()))
         if row is None:
             continue
         is_stock = account in STOCK_ACCOUNTS
@@ -143,7 +173,7 @@ def parse_report(payload: dict, ticker: str, quarter: int) -> dict:
 
     # 매출총이익을 안 내는 회사 — 매출액에서 매출원가를 뺍니다
     if "매출총이익" not in out and "매출액" in out:
-        cost = _pick(rows, COST_OF_SALES, COST_OF_SALES_NM)
+        cost = _pick(rows, COST_OF_SALES, COST_OF_SALES_NM, ("IS", "CIS"))
         if cost is not None:
             cv = _amount(cost, cumulative=True)
             if cv is not None:
@@ -234,9 +264,15 @@ def load_progress() -> pd.DataFrame:
 
 
 def _done_keys(prog: pd.DataFrame) -> set:
+    """완료로 볼 종목·연도. 한 분기도 못 읽은 건(0/4)은 다시 시도합니다.
+
+    계정 매핑이 틀려서 아무것도 못 받은 경우까지 '완료'로 남기면, 고친 뒤에도
+    영원히 건너뛰게 됩니다. 빈손으로 끝난 건은 완료로 치지 않습니다.
+    """
     if prog.empty:
         return set()
-    return set(zip(prog["종목코드"].astype(str), prog["연도"].astype(int)))
+    ok = prog[prog["상태"].astype(str) != "0/4"] if "상태" in prog.columns else prog
+    return set(zip(ok["종목코드"].astype(str), ok["연도"].astype(int)))
 
 
 def save_progress(prog: pd.DataFrame, new_rows: list) -> int:
@@ -274,6 +310,8 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     rows_saved, skipped, missing = 0, 0, 0
     today = pd.Timestamp.today().normalize()
     stopped = None
+    sample = None          # 아무것도 못 읽었을 때 원인을 보여줄 실제 응답
+    statuses: dict[str, int] = {}
 
     for ticker in tickers:
         corp = cmap.get(ticker)
@@ -294,10 +332,18 @@ def collect(api_key: str | None = None, years=None, tickers=None,
                 for reprt, q, _months in REPORTS:
                     data, used = fetch_report(api_key, corp, year, reprt)
                     calls += used
+                    st = str(data.get("status"))
+                    statuses[st] = statuses.get(st, 0) + 1
                     parsed = parse_report(data, ticker, q)
                     if parsed:
                         by_q[q] = parsed
                         got += 1
+                    elif sample is None and st == "000" and data.get("list"):
+                        # 응답은 정상인데 계정을 못 찾았습니다. 무엇이 왔는지
+                        # 그대로 남겨야 매핑을 고칠 수 있습니다.
+                        sample = {"종목코드": ticker, "연도": year, "보고서": reprt,
+                                  "행수": len(data["list"]),
+                                  "예시": data["list"][:25]}
             except RuntimeError as e:
                 stopped = str(e)
                 break
@@ -323,13 +369,27 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     total = save_progress(prog, new_prog)
 
     remaining = len(tickers) * len(years) - total
-    return {"호출수": calls, "저장행수": rows_saved, "완료": total,
-            "남은작업": max(remaining, 0), "건너뜀": skipped,
-            "DART에없음": missing, "중단사유": stopped or "완료"}
+    out = {"호출수": calls, "저장행수": rows_saved, "완료": total,
+           "남은작업": max(remaining, 0), "건너뜀": skipped,
+           "DART에없음": missing, "응답상태": statuses,
+           "중단사유": stopped or "완료"}
+    if rows_saved == 0 and sample is not None:
+        out["진단"] = sample
+    return out
 
 
-def _priority_tickers() -> list[str]:
-    """유동성 높은 종목부터. 어차피 유동성 필터에서 걸릴 종목에 호출을 안 씁니다."""
+def _priority_tickers(limit: int | None = None) -> list[str]:
+    """유동성 높은 종목부터, 상위 limit개만.
+
+    전 종목 × 11년이면 호출이 16만 회(=8일)입니다. 실제 백테스트는 20일 평균
+    거래대금 5억 이상만 사는데 그게 700종목 안팎이라, 하위 종목에 호출을 쓰는
+    건 대부분 낭비입니다.
+
+    다만 정직하게 밝힐 점: 순서를 '지금' 거래대금으로 매기므로, 과거엔 활발했는데
+    지금은 죽은 종목이 빠집니다. 표본에 약간의 선택편향이 들어갑니다.
+    여유를 두고 자르는 이유입니다(필터 통과 ~700 대비 기본 1,200).
+    """
+    limit = config.DART_MAX_TICKERS if limit is None else limit
     tickers = store.common_tickers()
     if not store.exists("kor_price"):
         return tickers
@@ -342,9 +402,11 @@ def _priority_tickers() -> list[str]:
             group by 종목코드 order by 거래대금 desc nulls last;
         """)
     except Exception:
-        return tickers
-    order = [t for t in rank["종목코드"].astype(str).str.zfill(6) if t in set(tickers)]
-    return order + [t for t in tickers if t not in set(order)]
+        return tickers[:limit] if limit else tickers
+    keep = set(tickers)
+    order = [t for t in rank["종목코드"].astype(str).str.zfill(6) if t in keep]
+    order += [t for t in tickers if t not in set(order)]
+    return order[:limit] if limit else order
 
 
 if __name__ == "__main__":
