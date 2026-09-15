@@ -26,8 +26,11 @@ FS_SLEEP = float(os.getenv("QUANT_FS_SLEEP", "0.8"))
 
 DAILY_PRICE_DAYS = int(os.getenv("QUANT_DAILY_PRICE_DAYS", "10"))
 MONTHLY_PRICE_YEARS = int(os.getenv("QUANT_MONTHLY_PRICE_YEARS", "2"))
-# 팩터 모델은 최근 1년 주가만 사용합니다. 2년치만 보관해 저장소를 가볍게 유지.
-PRICE_KEEP_YEARS = int(os.getenv("QUANT_PRICE_KEEP_YEARS", "2"))
+# 팩터 모델 자체는 최근 1년 주가면 되지만, 백테스트 기간이 곧 통계적 신뢰도라
+# (t = IR x √기간) 주가는 길게 보관합니다. DART로 재무를 2015년까지 끌어와도
+# 주가가 2년치면 백테스트는 여전히 1년밖에 못 돕니다.
+# 12년치 kor_price는 약 85MB로 릴리스 용량(2GB)에 한참 못 미칩니다.
+PRICE_KEEP_YEARS = int(os.getenv("QUANT_PRICE_KEEP_YEARS", "12"))
 
 HTTP_TIMEOUT = int(os.getenv("QUANT_HTTP_TIMEOUT", "20"))
 HTTP_RETRIES = int(os.getenv("QUANT_HTTP_RETRIES", "3"))
@@ -59,6 +62,14 @@ MAX_SECTOR_PCT = float(os.getenv("QUANT_MAX_SECTOR_PCT", "0.25"))
 LIQUIDITY_WINDOW = int(os.getenv("QUANT_LIQUIDITY_WINDOW", "20"))
 MIN_TURNOVER_KR = float(os.getenv("QUANT_MIN_TURNOVER_KR", "500000000"))   # 5억원
 MIN_TURNOVER_US = float(os.getenv("QUANT_MIN_TURNOVER_US", "5000000"))     # 500만 달러
+
+# ── DART (과거 재무제표 확장) ────────────────────────────────
+# FnGuide는 최근 분기만 줍니다. 백테스트 기간이 곧 통계적 신뢰도라
+# (t = IR × √기간) DART로 2015년까지 끌어옵니다.
+DART_API_KEY = os.getenv("DART_API_KEY", "")
+DART_START_YEAR = int(os.getenv("QUANT_DART_START_YEAR", "2015"))
+DART_DAILY_BUDGET = int(os.getenv("QUANT_DART_DAILY_BUDGET", "19000"))
+DART_SLEEP = float(os.getenv("QUANT_DART_SLEEP", "0.05"))   # 예의상 간격
 
 # ── 에이전트 설정 ────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

@@ -1,0 +1,98 @@
+name: DART 과거 재무제표 채우기
+
+# 하루 20,000회 호출 제한이 있어 한 번에 다 못 받습니다.
+# 매일 새벽에 한도만큼 받고, 다음 날 이어서 받습니다.
+# 다 채워지면 "남은작업 0"으로 끝나고 그 뒤로는 금방 끝납니다.
+
+on:
+  schedule:
+    # 18:00 UTC = 03:00 KST (DART 한도가 자정에 초기화된 뒤)
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: "이번 실행에서 쓸 호출 수 (하루 한도 20000)"
+        required: false
+        default: "19000"
+      start_year:
+        description: "몇 년부터 받을지"
+        required: false
+        default: "2015"
+
+concurrency:
+  group: quant-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      TZ: Asia/Seoul
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 인증키 확인
+        run: |
+          if [ -z "$DART_API_KEY" ]; then
+            echo "::error::DART_API_KEY Secret이 없습니다. opendart.fss.or.kr에서 인증키를 발급받아 저장소 Settings > Secrets에 DART_API_KEY로 넣어주세요."
+            exit 1
+          fi
+          echo "인증키 확인됨 (앞 4자리 ${DART_API_KEY:0:4}...)"
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 데이터 내려받기
+        run: |
+          mkdir -p data output logs
+          gh release download data-store -D data -p 'kor_*.parquet' --clobber
+          ls -lh data
+
+      - name: DART 수집
+        run: |
+          python run_dart.py \
+            "${{ github.event.inputs.budget || '19000' }}" \
+            "${{ github.event.inputs.start_year || '2015' }}"
+
+      - name: 데이터 올리기
+        if: always()
+        run: |
+          shopt -s nullglob
+          files=(data/kor_*.parquet)
+          fail=0
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || continue
+            ok=0
+            for try in 1 2 3; do
+              if gh release upload data-store "$f" --clobber; then ok=1; break; fi
+              echo "::warning::업로드 재시도 $try - $f"
+              sleep $((try * 5))
+            done
+            if [ $ok -ne 1 ]; then
+              echo "::error::업로드 실패 - $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: 실행 기록 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dart-backfill-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
