@@ -228,6 +228,53 @@ check(cov["z_value"] > 0 and cov["z_momentum"] > 0,
       f"멀쩡한 팩터는 살아 있음 (z_value {cov['z_value']}, z_momentum {cov['z_momentum']})")
 
 print(f"\n저장소 현황: {store.summary()}")
+# ── FnGuide 인코딩 (실패율 100%의 진짜 원인) ─────────────────
+# FnGuide가 UTF-8(BOM)로 바뀌었는데 코드가 EUC-KR로 고정돼 있어 본문이
+# 통째로 깨졌고, 깨진 HTML에서 표를 못 찾아 전 종목이 실패했습니다.
+# 로그의 '癤�'가 UTF-8 BOM을 EUC-KR로 읽은 결과입니다.
+import codecs as _codecs  # noqa: E402
+
+import kor_fs as _kor_fs  # noqa: E402
+
+
+class _Resp:
+    def __init__(self, b):
+        self.content = b
+
+
+_HTML = "<html><body>재무제표 매출액</body></html>"
+check(_kor_fs._decode(_Resp(_codecs.BOM_UTF8 + _HTML.encode("utf-8"))) == _HTML,
+      "UTF-8 BOM 응답을 제대로 읽음 (이번 실패의 원인)")
+check(_kor_fs._decode(_Resp(_HTML.encode("utf-8"))) == _HTML,
+      "BOM 없는 UTF-8도 제대로 읽음")
+check(_kor_fs._decode(_Resp(_HTML.encode("euc-kr"))) == _HTML,
+      "예전 EUC-KR 응답도 계속 읽음 (되돌아가도 안전)")
+check("癤" not in _kor_fs._decode(_Resp(_codecs.BOM_UTF8 + _HTML.encode("utf-8"))),
+      "BOM이 글자로 새어나오지 않음")
+
+# ── 섹터 수집 실패 시 기존 데이터로 버티는가 ─────────────────
+import kor_sector  # noqa: E402
+
+store.write("kor_sector", pd.DataFrame([
+    {"IDX_CD": "G25", "CMP_CD": "005930", "CMP_KOR": "삼성전자",
+     "SEC_NM_KOR": "IT", "기준일": pd.Timestamp("2026-08-31")}]))
+kor_sector.http_util = type("X", (), {
+    "get": staticmethod(lambda *a, **k: (_ for _ in ()).throw(RuntimeError("차단"))),
+    "polite_sleep": staticmethod(lambda s: None)})()
+res = kor_sector.collect("20260916")
+check(res.get("기존섹터사용", "").startswith("2026-08-31"),
+      f"WISE가 막혀도 기존 섹터로 계속 진행 ({res.get('기존섹터사용')})")
+check(res.get("fail_reasons"), "실패 사유를 리포트에 남김")
+w = pl.check_sector(res)
+check(w and "기존 섹터" in w[0], "경고로만 처리하고 월간 실행을 죽이지 않음")
+
+store.write("kor_sector", pd.DataFrame(columns=list(store.SCHEMAS["kor_sector"])))
+try:
+    kor_sector.collect("20260916")
+    check(False, "기존 섹터도 없으면 막아야 하는데 그냥 통과함")
+except RuntimeError as e:
+    check("기존 데이터도 없습니다" in str(e), "기존 섹터도 없으면 명확히 중단")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

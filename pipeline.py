@@ -39,6 +39,12 @@ def check_ticker(stats: dict) -> list:
 
 def check_sector(stats: dict) -> list:
     warns = []
+    if stats.get("기존섹터사용"):
+        # 새로 못 받았지만 기존 섹터로 계속 돌아갑니다. 섹터는 거의 안 바뀌므로
+        # 당장은 문제가 없지만, 오래 방치하면 신규 상장·섹터 변경이 누락됩니다.
+        warns.append(f"WISE 수집 실패 — 기존 섹터({stats['기존섹터사용']}) 사용 중. "
+                     f"사유: {stats.get('fail_reasons')}")
+        return warns
     if stats["sectors_ok"] < config.MIN_SECTORS:
         warns.append(f"WISE 섹터 {stats['sectors_ok']}/{config.MIN_SECTORS}개만 수집됨"
                      f" (실패: {stats['sectors_failed']})")

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """FnGuide 재무제표 수집 (연간/분기) — 병렬 + 일괄 저장. 월간 실행용."""
+import codecs
 import logging
 import re
 from collections import Counter
@@ -17,6 +18,29 @@ log = logging.getLogger("quant_agent.fs")
 
 REFERER = "https://comp.fnguide.com/"
 CHUNK = 200
+
+
+def _decode(resp) -> str:
+    """FnGuide 응답을 올바른 인코딩으로 읽습니다.
+
+    예전에는 EUC-KR로 고정했는데, FnGuide가 UTF-8(BOM 포함)로 바뀌면서
+    본문이 통째로 깨졌습니다. 깨진 HTML에서는 표를 못 찾아 전 종목이
+    '표 1개'로 실패했습니다(실패율 100%). 로그에 찍힌 '癤�'가 바로
+    UTF-8 BOM(EF BB BF)을 EUC-KR로 읽었을 때 나오는 글자입니다.
+
+    한글 UTF-8 바이트는 EUC-KR로도 '성공'해버리기 때문에(깨진 채로)
+    반드시 UTF-8을 먼저 시도해야 합니다. 반대로 EUC-KR 바이트는
+    UTF-8 해독에서 예외가 나므로 순서만 지키면 안전합니다.
+    """
+    raw = resp.content
+    if raw[:3] == codecs.BOM_UTF8:
+        return raw.decode("utf-8-sig", errors="replace")
+    for enc in ("utf-8", "euc-kr", "cp949"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("euc-kr", errors="replace")
 
 
 def _clean_fs(df, ticker, frequency):
@@ -37,11 +61,7 @@ def _clean_fs(df, ticker, frequency):
 def _fetch_one(ticker: str) -> pd.DataFrame:
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{ticker}"
     page = http_util.get(url, referer=REFERER)
-    # FnGuide는 EUC-KR로 내려옵니다. 자동 추정이 틀리면 본문이 깨져 표를 못 찾습니다.
-    page.encoding = page.encoding or "euc-kr"
-    if (page.encoding or "").lower() in ("iso-8859-1", "ascii"):
-        page.encoding = "euc-kr"
-    html_text = page.text
+    html_text = _decode(page)
 
     # 같은 응답을 재사용 (요청 1회로 표 파싱 + 결산년 추출)
     data = pd.read_html(StringIO(html_text), displayed_only=False)
