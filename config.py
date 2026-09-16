@@ -73,6 +73,9 @@ DART_SLEEP = float(os.getenv("QUANT_DART_SLEEP", "0.05"))   # 예의상 간격
 # 전 종목 x 11년이면 16만 회(8일)라 유동성 상위 N개만 받습니다.
 # 백테스트에서 실제로 사는 건 거래대금 5억 이상 ~700종목이라 여유 있게 자릅니다.
 DART_MAX_TICKERS = int(os.getenv("QUANT_DART_MAX_TICKERS", "1200"))
+# DART 응답 한 건이 3~4초 걸립니다(전체 재무제표라 200행 안팎). 순차로 돌리면
+# 하루 한도(2만 회)를 다 쓰기 전에 Actions 작업 시간(6시간)이 먼저 끝납니다.
+DART_WORKERS = int(os.getenv("QUANT_DART_WORKERS", "6"))
 
 # ── 에이전트 설정 ────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

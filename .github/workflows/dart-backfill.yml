@@ -18,6 +18,10 @@ on:
         description: "몇 년부터 받을지"
         required: false
         default: "2015"
+      workers:
+        description: "동시 요청 수. DART가 막으면 낮추세요(3 정도)"
+        required: false
+        default: "6"
 
 concurrency:
   group: quant-pipeline
@@ -34,6 +38,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      QUANT_DART_WORKERS: ${{ github.event.inputs.workers || '6' }}
       TZ: Asia/Seoul
 
     steps:

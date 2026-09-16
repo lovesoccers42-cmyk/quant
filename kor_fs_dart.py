@@ -19,16 +19,20 @@ factor_core와 backtest가 코드 수정 없이 그대로 씁니다.
 1. DART의 손익·현금흐름은 '누적'입니다. 1분기 3개월, 반기 6개월, 3분기 9개월,
    사업보고서 12개월. FnGuide처럼 3개월치로 쓰려면 앞 분기를 빼야 합니다.
    중간 분기가 비면 차분이 틀리므로 그 분기는 아예 버립니다(틀린 값보다 빈 값).
-2. 기준일은 reprt_code로 추측하지 않고 응답의 thstrm_dt에서 읽습니다.
-   12월 결산이 아닌 회사가 있기 때문입니다.
+2. 응답에 날짜 컬럼이 없습니다. 사업연도·보고서코드로 분기말을 만들기 때문에
+   12월 결산이 아닌 회사는 아예 건너뜁니다(틀린 날짜는 미래 정보 오염입니다).
 3. 단위가 원이라 억원으로 내립니다(기존 kor_fs가 억원).
 4. 하루 20,000회 호출 제한이 있어 중단·재개가 됩니다.
+5. 응답 한 건이 3~4초라 동시에 여러 건을 받습니다. 순차로는 Actions 작업
+   시간(6시간) 안에 하루 한도를 못 씁니다.
 """
 from __future__ import annotations
 
 import io
 import logging
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from xml.etree import ElementTree
 
 import pandas as pd
@@ -299,6 +303,31 @@ def fetch_report(api_key: str, corp: str, year: int, reprt: str) -> tuple[dict, 
     return {"status": "013", "message": "조회된 데이터 없음"}, used
 
 
+def _fetch_year(api_key: str, ticker: str, corp: str, year: int) -> dict:
+    """한 종목·한 사업연도의 4개 보고서를 받아 정리합니다 (작업 단위)."""
+    by_q, got, used_total = {}, 0, 0
+    statuses: dict[str, int] = {}
+    sample = None
+
+    for reprt, q, _months in REPORTS:
+        data, used = fetch_report(api_key, corp, year, reprt)
+        used_total += used
+        st = str(data.get("status"))
+        statuses[st] = statuses.get(st, 0) + 1
+        parsed = parse_report(data, ticker, q, year, reprt)
+        if parsed:
+            by_q[q] = parsed
+            got += 1
+        elif sample is None and st == "000" and data.get("list"):
+            # 응답은 정상인데 계정을 못 찾았습니다. 무엇이 왔는지 그대로
+            # 남겨야 매핑을 고칠 수 있습니다.
+            sample = {"종목코드": ticker, "연도": year, "보고서": reprt,
+                      "행수": len(data["list"]), "예시": data["list"][:25]}
+
+    return {"종목코드": ticker, "연도": int(year), "분기": by_q, "성공": got,
+            "호출": used_total, "상태": statuses, "진단": sample}
+
+
 # ── 진행 상태 ────────────────────────────────────────────────
 def load_progress() -> pd.DataFrame:
     df = store.read(PROGRESS)
@@ -355,10 +384,11 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     calls, buffer, new_prog = 1, [], []
     rows_saved, skipped, missing = 0, 0, 0
     today = pd.Timestamp.today().normalize()
-    stopped = None
     sample = None          # 아무것도 못 읽었을 때 원인을 보여줄 실제 응답
     statuses: dict[str, int] = {}
 
+    # 받을 목록을 먼저 만듭니다 (이미 받은 건·DART에 없는 종목·비12월 결산 제외)
+    tasks = []
     for ticker in tickers:
         corp = cmap.get(ticker)
         if corp is None:
@@ -373,47 +403,65 @@ def collect(api_key: str | None = None, years=None, tickers=None,
             if (ticker, year) in done:
                 skipped += 1
                 continue
-            # 한 종목·연도는 최대 8회(4보고서 × 연결/별도) 씁니다
-            if calls + len(REPORTS) * 2 > budget:
-                stopped = "호출 한도"
-                break
+            tasks.append((ticker, corp, int(year)))
 
-            by_q, got = {}, 0
-            try:
-                for reprt, q, _months in REPORTS:
-                    data, used = fetch_report(api_key, corp, year, reprt)
-                    calls += used
-                    st = str(data.get("status"))
-                    statuses[st] = statuses.get(st, 0) + 1
-                    parsed = parse_report(data, ticker, q, year, reprt)
-                    if parsed:
-                        by_q[q] = parsed
-                        got += 1
-                    elif sample is None and st == "000" and data.get("list"):
-                        # 응답은 정상인데 계정을 못 찾았습니다. 무엇이 왔는지
-                        # 그대로 남겨야 매핑을 고칠 수 있습니다.
-                        sample = {"종목코드": ticker, "연도": year, "보고서": reprt,
-                                  "행수": len(data["list"]),
-                                  "예시": data["list"][:25]}
-            except RuntimeError as e:
-                stopped = str(e)
-                break
+    # DART 응답이 한 건에 3~4초씩 걸립니다(전체 재무제표라 200행 안팎).
+    # 순차로 돌리면 하루 한도를 다 쓰기도 전에 작업 시간(6시간)이 먼저 끝납니다.
+    # 동시에 여러 건을 받아 시간 안에 한도를 다 쓰도록 합니다.
+    lock = threading.Lock()
+    stop = {"why": None}
+    MAX_PER_TASK = len(REPORTS) * 2      # 4보고서 × (연결 실패 시 별도)
 
-            if by_q:
-                df = to_quarterly(by_q, ticker)
+    def work(task):
+        nonlocal calls
+        ticker, corp, year = task
+        with lock:
+            if stop["why"]:
+                return None
+            if calls + MAX_PER_TASK > budget:
+                stop["why"] = "호출 한도"
+                return None
+            calls += MAX_PER_TASK              # 최악을 먼저 잡아둡니다
+        try:
+            res = _fetch_year(api_key, ticker, corp, year)
+        except RuntimeError as e:              # 한도 초과·인증키 오류
+            with lock:
+                calls -= MAX_PER_TASK
+                stop["why"] = str(e)
+            return None
+        except Exception as e:                 # 네트워크 등 개별 실패는 건너뜁니다
+            with lock:
+                calls -= MAX_PER_TASK
+            log.warning("DART 수집 실패 %s %s: %s", ticker, year, e)
+            return None
+        with lock:
+            calls -= MAX_PER_TASK - res["호출"]   # 안 쓴 만큼 돌려놓습니다
+        return res
+
+    with ThreadPoolExecutor(max_workers=config.DART_WORKERS) as pool:
+        for res in pool.map(work, tasks):
+            if res is None:
+                continue
+            for k, v in res["상태"].items():
+                statuses[k] = statuses.get(k, 0) + v
+            if sample is None and res["진단"]:
+                sample = res["진단"]
+            if res["분기"]:
+                df = to_quarterly(res["분기"], res["종목코드"])
                 if len(df):
                     buffer.append(df)
-            new_prog.append({"종목코드": ticker, "연도": int(year),
-                             "상태": f"{got}/4", "갱신일": today})
+            new_prog.append({"종목코드": res["종목코드"], "연도": res["연도"],
+                             "상태": f"{res['성공']}/4", "갱신일": today})
 
             if len(buffer) >= chunk:
                 rows_saved += store.upsert("kor_fs", pd.concat(buffer, ignore_index=True))
                 buffer = []
                 save_progress(prog, new_prog)
                 prog, new_prog = load_progress(), []
-                log.info("DART 수집 %d회 호출 · %d행 누적", calls, rows_saved)
-        if stopped:
-            break
+                log.info("DART 수집 %d회 호출 · %d행 누적 · 남은작업 %d",
+                         calls, rows_saved, len(tasks) - len(new_prog))
+
+    stopped = stop["why"]
 
     if buffer:
         rows_saved += store.upsert("kor_fs", pd.concat(buffer, ignore_index=True))

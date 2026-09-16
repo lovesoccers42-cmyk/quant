@@ -275,6 +275,53 @@ again = store.upsert("kor_fs", df)
 check(len(store.read("kor_fs")) == len(df),
       f"같은 데이터를 다시 넣어도 중복되지 않음 ({again}행 시도 → {len(store.read('kor_fs'))}행)")
 
+# ── 9. 병렬 수집 · 호출 예산 (네트워크 없이) ─────────────────
+# 동시에 여러 건을 받으면서도 하루 한도를 절대 넘지 않아야 합니다.
+# 실제 호출 대신 가짜 응답을 물려서 예산 계산과 재시작을 검증합니다.
+import threading  # noqa: E402
+
+store.write("kor_fs", pd.DataFrame(columns=list(store.SCHEMAS["kor_fs"])))
+store.write("kor_dart_progress", pd.DataFrame(
+    columns=["종목코드", "연도", "상태", "갱신일"]))
+
+TICKERS = [f"{i:06d}" for i in range(1, 41)]
+seen, seen_lock = [], threading.Lock()
+
+
+def fake_fetch(api_key, corp, year, reprt):
+    with seen_lock:
+        seen.append((corp, year, reprt))
+    return payload([
+        row("ifrs_Assets", "자산총계", "BS", reprt,
+            amount=int(1000 * 1e8), year=year),
+        row("ifrs_Revenue", "매출액", "IS", reprt,
+            add=int(100 * dart.REPRT_QUARTER[reprt] * 1e8), year=year),
+    ]), 1
+
+
+dart.corp_map = lambda k: {t: f"C{t}" for t in TICKERS}
+dart.december_filers = lambda: set(TICKERS)
+dart.fetch_report = fake_fetch
+dart._priority_tickers = lambda limit=None: TICKERS
+
+r1 = dart.collect(api_key="TEST", years=range(2015, 2021), budget=100, chunk=10)
+check(r1["호출수"] <= 100, f"예산 100회를 넘지 않음 (실제 {r1['호출수']}회)")
+check(r1["중단사유"] == "호출 한도", f"한도에서 멈춤 ({r1['중단사유']})")
+check(r1["저장행수"] > 0, f"병렬로 실제 저장됨 ({r1['저장행수']}행)")
+check(len(seen) == len(set(seen)), "같은 보고서를 두 번 받지 않음")
+
+done_after_1 = r1["완료"]
+n1 = len(seen)
+r2 = dart.collect(api_key="TEST", years=range(2015, 2021), budget=100, chunk=10)
+check(r2["건너뜀"] == done_after_1,
+      f"다시 돌리면 받은 건은 건너뜀 ({r2['건너뜀']}건)")
+check(len(seen) > n1, "이어서 새 구간을 받음")
+check(len(seen) == len(set(seen)), "재시작 후에도 중복 호출 없음")
+
+rows = store.read("kor_fs")
+rev = rows[(rows["계정"] == "매출액") & (rows["종목코드"] == rows["종목코드"].iloc[0])]
+check(set(rev["값"].round(0)) <= {100.0}, f"병렬 경로도 3개월치로 정확히 환산 {sorted(set(rev['값'].round(0)))}")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:
