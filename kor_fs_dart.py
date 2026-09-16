@@ -94,35 +94,68 @@ def _norm(s) -> str:
     return "".join(str(s or "").split())
 
 
-def _amount(row: dict, *, cumulative: bool):
-    """흐름 계정은 누적(thstrm_add_amount)을 우선합니다.
-
-    반기보고서의 thstrm_amount를 '4~6월 3개월'로 내는 회사와 '1~6월 누적'으로
-    내는 회사가 섞여 있습니다. 누적 컬럼은 정의가 하나뿐이라 안전합니다.
-    """
-    keys = (["thstrm_add_amount", "thstrm_amount"] if cumulative
-            else ["thstrm_amount"])
-    for k in keys:
-        v = str(row.get(k) or "").replace(",", "").strip()
-        if v in ("", "-"):
-            continue
-        try:
-            return float(v)
-        except ValueError:
-            continue
-    return None
-
-
-def _period_end(row: dict):
-    """thstrm_dt에서 기간 종료일. '2023.01.01 ~ 2023.03.31' / '2023.03.31 현재'."""
-    import re
-    found = re.findall(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})", str(row.get("thstrm_dt") or ""))
-    if not found:
+def _num(row: dict, key: str):
+    v = str(row.get(key) or "").replace(",", "").strip()
+    if v in ("", "-", "None"):
         return None
-    y, m, d = found[-1]
     try:
-        return pd.Timestamp(int(y), int(m), int(d))
+        return float(v)
     except ValueError:
+        return None
+
+
+# 보고서코드 → 그 보고서가 덮는 분기
+REPRT_QUARTER = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
+
+
+def _amount(row: dict, *, stock: bool, reprt: str = ""):
+    """(값, 기준) 반환. 기준은 'q3m'(그 분기 3개월) 또는 'cum'(연초부터 누적).
+
+    fnlttSinglAcntAll은 금액 컬럼이 둘입니다.
+      · thstrm_add_amount — 손익·현금흐름의 연초부터 누적
+      · thstrm_amount     — 분기보고서에서는 그 분기 3개월, 사업보고서에서는 1년
+    둘 중 무엇을 읽었는지 기억해둬야 나중에 3개월치로 환산할 때 틀리지 않습니다.
+    (누적을 3개월로 착각해 빼면 완전히 엉뚱한 값이 나옵니다.)
+    """
+    if stock:
+        v = _num(row, "thstrm_amount")
+        return (v, "point") if v is not None else (None, None)
+
+    v = _num(row, "thstrm_add_amount")
+    if v is not None:
+        return v, "cum"
+    v = _num(row, "thstrm_amount")
+    if v is None:
+        return None, None
+    # 사업보고서의 thstrm_amount는 1년치 = 4분기 누적
+    return v, ("cum" if str(reprt) == "11011" else "q3m")
+
+
+def _period_end(row: dict, year: int | None = None, quarter: int | None = None):
+    """기간 종료일.
+
+    fnlttSinglAcntAll 응답에는 날짜 컬럼이 없습니다(thstrm_dt는 '주요계정' API에만
+    있습니다). 그래서 응답이 들고 있는 사업연도·보고서코드로 분기말을 만듭니다.
+    12월 결산이 아닌 회사는 이 계산이 틀리므로, 호출하는 쪽에서 미리 걸러냅니다.
+    """
+    import re
+    found = re.findall(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})",
+                       str(row.get("thstrm_dt") or ""))
+    if found:
+        y, m, d = found[-1]
+        try:
+            return pd.Timestamp(int(y), int(m), int(d))
+        except ValueError:
+            pass
+
+    y = row.get("bsns_year") or year
+    q = REPRT_QUARTER.get(str(row.get("reprt_code") or ""), quarter)
+    if not y or not q:
+        return None
+    try:
+        return (pd.Timestamp(int(y), int(q) * 3, 1)
+                + pd.offsets.MonthEnd(0)).normalize()
+    except (ValueError, TypeError):
         return None
 
 
@@ -151,8 +184,12 @@ def _pick(rows: list, ids: tuple, names: tuple, sj: tuple = ()):
     return None
 
 
-def parse_report(payload: dict, ticker: str, quarter: int) -> dict:
-    """DART 응답 하나 → {계정: (기준일, 값)}. 값은 억원, 흐름은 아직 누적입니다."""
+def parse_report(payload: dict, ticker: str, quarter: int,
+                 year: int | None = None, reprt: str = "") -> dict:
+    """DART 응답 하나 → {계정: (기준일, 값, 기준)}. 값은 억원.
+
+    기준은 'point'(잔액) · 'q3m'(그 분기 3개월) · 'cum'(연초부터 누적).
+    """
     if str(payload.get("status")) != "000":
         return {}
     rows = payload.get("list") or []
@@ -164,44 +201,51 @@ def parse_report(payload: dict, ticker: str, quarter: int) -> dict:
         row = _pick(rows, ids, names, PREFERRED_SJ.get(account, ()))
         if row is None:
             continue
-        is_stock = account in STOCK_ACCOUNTS
-        val = _amount(row, cumulative=not is_stock)
-        end = _period_end(row)
+        val, basis = _amount(row, stock=account in STOCK_ACCOUNTS, reprt=reprt)
+        end = _period_end(row, year, quarter)
         if val is None or end is None:
             continue
-        out[account] = (end, val / UNIT)
+        out[account] = (end, val / UNIT, basis)
 
     # 매출총이익을 안 내는 회사 — 매출액에서 매출원가를 뺍니다
     if "매출총이익" not in out and "매출액" in out:
         cost = _pick(rows, COST_OF_SALES, COST_OF_SALES_NM, ("IS", "CIS"))
         if cost is not None:
-            cv = _amount(cost, cumulative=True)
-            if cv is not None:
-                end, rev = out["매출액"]
-                out["매출총이익"] = (end, rev - cv / UNIT)
+            cv, cbasis = _amount(cost, stock=False, reprt=reprt)
+            end, rev, rbasis = out["매출액"]
+            if cv is not None and cbasis == rbasis:   # 같은 기준일 때만
+                out["매출총이익"] = (end, rev - cv / UNIT, rbasis)
     return out
 
 
 def to_quarterly(by_quarter: dict, ticker: str) -> pd.DataFrame:
-    """{분기: {계정: (기준일, 누적값)}} → 3개월치 kor_fs 행.
+    """{분기: {계정: (기준일, 값, 기준)}} → 3개월치 kor_fs 행.
 
-    흐름 계정은 직전 분기 누적을 뺍니다. 직전 분기가 없으면 그 분기는 버립니다.
+    누적으로 받은 값은 직전 분기 누적을 빼서 3개월치로 만듭니다. 보고서마다
+    누적으로 오기도 하고 3개월로 오기도 해서, 일단 전부 누적으로 환산한 뒤
+    차분합니다. 앞 분기를 모르면 그 분기는 버립니다(틀린 값보다 빈 값).
     """
     recs = []
+    cum: dict[str, dict[int, float]] = {}      # 계정 → {분기: 연초부터 누적}
+
     for q in (1, 2, 3, 4):
         cur = by_quarter.get(q)
         if not cur:
             continue
-        prev = by_quarter.get(q - 1) if q > 1 else {}
-        for account, (end, val) in cur.items():
-            if account in STOCK_ACCOUNTS:
+        for account, (end, val, basis) in cur.items():
+            if basis == "point":               # 잔액 — 차분 안 함
                 amount = val
-            elif q == 1:
+            elif basis == "q3m":               # 이미 3개월치
                 amount = val
-            else:
-                if not prev or account not in prev:
-                    continue            # 차분할 앞 분기가 없음 → 버림
-                amount = val - prev[account][1]
+                prev_cum = cum.get(account, {}).get(q - 1, 0.0 if q == 1 else None)
+                if prev_cum is not None:
+                    cum.setdefault(account, {})[q] = prev_cum + val
+            else:                              # 누적
+                cum.setdefault(account, {})[q] = val
+                prev_cum = 0.0 if q == 1 else cum.get(account, {}).get(q - 1)
+                if prev_cum is None:
+                    continue                   # 차분할 앞 분기가 없음
+                amount = val - prev_cum
             recs.append({"종목코드": ticker, "기준일": end, "계정": account,
                          "값": float(amount), "공시구분": "q"})
     return pd.DataFrame(recs)
@@ -303,8 +347,10 @@ def collect(api_key: str | None = None, years=None, tickers=None,
         raise RuntimeError("수집할 종목이 없습니다 (kor_ticker가 비었습니다).")
 
     cmap = corp_map(api_key)
+    dec_fye = december_filers()
     prog = load_progress()
     done = _done_keys(prog)
+    odd_fiscal = 0
 
     calls, buffer, new_prog = 1, [], []
     rows_saved, skipped, missing = 0, 0, 0
@@ -317,6 +363,11 @@ def collect(api_key: str | None = None, years=None, tickers=None,
         corp = cmap.get(ticker)
         if corp is None:
             missing += 1
+            continue
+        if dec_fye is not None and ticker not in dec_fye:
+            # 응답에 날짜가 없어 사업연도·보고서코드로 분기말을 계산합니다.
+            # 12월 결산이 아니면 그 계산이 틀리므로 아예 건너뜁니다.
+            odd_fiscal += 1
             continue
         for year in years:
             if (ticker, year) in done:
@@ -334,7 +385,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
                     calls += used
                     st = str(data.get("status"))
                     statuses[st] = statuses.get(st, 0) + 1
-                    parsed = parse_report(data, ticker, q)
+                    parsed = parse_report(data, ticker, q, year, reprt)
                     if parsed:
                         by_q[q] = parsed
                         got += 1
@@ -371,11 +422,34 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     remaining = len(tickers) * len(years) - total
     out = {"호출수": calls, "저장행수": rows_saved, "완료": total,
            "남은작업": max(remaining, 0), "건너뜀": skipped,
-           "DART에없음": missing, "응답상태": statuses,
-           "중단사유": stopped or "완료"}
+           "DART에없음": missing, "12월결산아님": odd_fiscal,
+           "응답상태": statuses, "중단사유": stopped or "완료"}
     if rows_saved == 0 and sample is not None:
         out["진단"] = sample
     return out
+
+
+def december_filers() -> set | None:
+    """12월 결산 종목 집합. 기존 FnGuide 데이터의 분기말 월로 판정합니다.
+
+    DART 호출을 한 번도 더 쓰지 않는 방법입니다 — 이미 받아둔 kor_fs에
+    각 종목의 분기 기준일이 들어 있고, 12월 결산이면 3·6·9·12월에만 찍힙니다.
+    판정할 근거가 없으면 None(=전부 허용)을 돌려줍니다.
+    """
+    if not store.exists("kor_fs"):
+        return None
+    try:
+        df = store.read_sql("""
+            select 종목코드, month(기준일) 월 from kor_fs
+            where 공시구분 = 'q' group by 1, 2;
+        """)
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    months = df.groupby("종목코드")["월"].apply(set)
+    ok = {str(t).zfill(6) for t, ms in months.items() if ms <= {3, 6, 9, 12}}
+    return ok or None
 
 
 def _priority_tickers(limit: int | None = None) -> list[str]:

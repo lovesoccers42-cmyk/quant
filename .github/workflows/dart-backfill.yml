@@ -55,6 +55,12 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
+      - name: 오프라인 테스트 (수집 전 자체 점검)
+        run: |
+          # 파일이 옛 버전으로 되돌아간 채 돌아가는 사고를 막습니다.
+          # 계정 매핑과 분기 환산을 인증키 없이 검증하고, 틀리면 여기서 멈춥니다.
+          python tools/test_fs_dart.py
+
       - name: 데이터 내려받기
         run: |
           mkdir -p data output logs
