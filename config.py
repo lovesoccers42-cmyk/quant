@@ -76,6 +76,11 @@ DART_MAX_TICKERS = int(os.getenv("QUANT_DART_MAX_TICKERS", "1200"))
 # DART 응답 한 건이 3~4초 걸립니다(전체 재무제표라 200행 안팎). 순차로 돌리면
 # 하루 한도(2만 회)를 다 쓰기 전에 Actions 작업 시간(6시간)이 먼저 끝납니다.
 DART_WORKERS = int(os.getenv("QUANT_DART_WORKERS", "6"))
+# 올해치는 분기가 계속 새로 나오므로 이 일수가 지나면 다시 받습니다.
+DART_REFRESH_DAYS = int(os.getenv("QUANT_DART_REFRESH_DAYS", "20"))
+# 월간 실행에서 최신 분기를 받는 데 쓸 호출 수. 과거 채우기(하루 19,000)와
+# 같은 날 겹치면 한도에 걸릴 수 있는데, 그때는 기존 재무제표로 그냥 돌아갑니다.
+DART_MONTHLY_BUDGET = int(os.getenv("QUANT_DART_MONTHLY_BUDGET", "8000"))
 
 # ── 에이전트 설정 ────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

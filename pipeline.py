@@ -3,6 +3,10 @@
 from dataclasses import dataclass, field
 from typing import Callable
 
+from datetime import date
+
+import pandas as pd
+
 import config
 import factor_global
 import factor_kor
@@ -12,6 +16,7 @@ import global_ticker
 import global_value
 import kor_fs
 import kor_price
+import kor_fs_dart
 import kor_sector
 import kor_ticker
 import kor_value
@@ -48,6 +53,31 @@ def check_sector(stats: dict) -> list:
     if stats["sectors_ok"] < config.MIN_SECTORS:
         warns.append(f"WISE 섹터 {stats['sectors_ok']}/{config.MIN_SECTORS}개만 수집됨"
                      f" (실패: {stats['sectors_failed']})")
+    return warns
+
+
+def check_fs_dart(stats: dict) -> list:
+    """DART 재무제표 최신화 점검.
+
+    호출 한도에 걸린 건 실패가 아닙니다 — 과거 채우기 작업이 그날 한도를 먼저
+    쓴 경우이고, 기존 재무제표로 모델은 그대로 돌아갑니다. 정말 위험한 건
+    저장된 재무제표가 오래돼서 낡은 숫자로 종목을 고르는 상황입니다.
+    """
+    warns = []
+    why = stats.get("중단사유", "")
+    if why and why != "완료" and stats.get("저장행수", 0) == 0:
+        warns.append(f"DART 최신화 못 함({why}) — 기존 재무제표로 진행합니다")
+
+    try:
+        latest = store.read_sql(
+            "select max(기준일) 최신 from kor_fs where 공시구분 = 'q';")
+        last = pd.to_datetime(latest.iloc[0]["최신"])
+        age = (pd.Timestamp.today().normalize() - last).days
+        if age > 150:
+            warns.append(f"재무제표가 {age}일 전({last:%Y-%m-%d})까지만 있습니다 — "
+                         f"분기 공시가 안 들어오고 있습니다")
+    except Exception as e:
+        warns.append(f"재무제표 최신 시점을 확인하지 못함: {e}")
     return warns
 
 
@@ -145,8 +175,13 @@ def monthly_steps() -> list[Step]:
              validator=check_sector),
         Step(f"주가 수집({config.MONTHLY_PRICE_YEARS}년)", kor_price.collect,
              {"years": config.MONTHLY_PRICE_YEARS}, critical=True, validator=check_crawl),
-        Step("재무제표 수집(FnGuide)", kor_fs.collect, critical=True,
-             validator=check_crawl),
+        # FnGuide는 2026-09 기준 해당 URL이 사라졌습니다("페이지가 없습니다").
+        # 긁어오는 2차 출처라 이번을 포함해 두 번 깨졌습니다. 원출처인 DART로
+        # 바꿨습니다 — 백테스트 과거 확장에 쓰는 바로 그 수집기입니다.
+        # (kor_fs.py는 지워두지 않았습니다. FnGuide가 살아나면 다시 쓸 수 있습니다.)
+        Step("재무제표 최신화(DART)", kor_fs_dart.collect,
+             {"years": [date.today().year], "budget": config.DART_MONTHLY_BUDGET},
+             validator=check_fs_dart),
         Step("밸류 지표 계산", kor_value.build),
         Step("QVM 팩터 모델", factor_kor.run, validator=check_factor),
     ]

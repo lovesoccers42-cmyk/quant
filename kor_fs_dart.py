@@ -336,15 +336,27 @@ def load_progress() -> pd.DataFrame:
     return df
 
 
-def _done_keys(prog: pd.DataFrame) -> set:
-    """완료로 볼 종목·연도. 한 분기도 못 읽은 건(0/4)은 다시 시도합니다.
+def _done_keys(prog: pd.DataFrame, now=None) -> set:
+    """완료로 볼 종목·연도.
 
-    계정 매핑이 틀려서 아무것도 못 받은 경우까지 '완료'로 남기면, 고친 뒤에도
-    영원히 건너뛰게 됩니다. 빈손으로 끝난 건은 완료로 치지 않습니다.
+    두 가지는 완료로 치지 않습니다.
+      1. 한 분기도 못 읽은 건(0/4) — 매핑이 틀려 빈손이었던 건을 '완료'로
+         남기면 고친 뒤에도 영원히 건너뜁니다.
+      2. 올해치 중 받아둔 지 오래된 건 — 올해는 분기가 계속 새로 나옵니다.
+         한 번 받고 끝내면 최신 분기가 영영 안 들어옵니다.
     """
     if prog.empty:
         return set()
     ok = prog[prog["상태"].astype(str) != "0/4"] if "상태" in prog.columns else prog
+    if ok.empty:
+        return set()
+
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.today()
+    this_year = now.year
+    if "갱신일" in ok.columns:
+        age = (now.normalize() - pd.to_datetime(ok["갱신일"], errors="coerce")).dt.days
+        stale_now = (ok["연도"].astype(int) == this_year) & (age >= config.DART_REFRESH_DAYS)
+        ok = ok[~stale_now.fillna(True)]
     return set(zip(ok["종목코드"].astype(str), ok["연도"].astype(int)))
 
 

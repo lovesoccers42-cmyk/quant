@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd  # noqa: E402
 
+import config  # noqa: E402
 import kor_fs_dart as dart  # noqa: E402
 
 fails = []
@@ -247,6 +248,24 @@ keys = dart._done_keys(dart.load_progress())
 check(("000660", 2015) not in keys,
       "한 분기도 못 읽은 건은 완료로 안 봄 (매핑 고친 뒤 재시도 가능)")
 check(("005930", 2015) in keys, "정상 수집 건은 계속 건너뜀")
+
+# ── 7-c. 올해치는 오래되면 다시 받는가 ──────────────────────
+# 올해는 분기가 계속 새로 나옵니다. 한 번 받고 '완료'로 박아두면 최신 분기가
+# 영영 안 들어옵니다(FnGuide가 죽은 뒤로는 이게 유일한 재무 공급원입니다).
+NOW = pd.Timestamp("2026-09-16")
+prog3 = pd.DataFrame([
+    {"종목코드": "005930", "연도": 2026, "상태": "4/4",
+     "갱신일": NOW - pd.Timedelta(days=1)},     # 올해 · 최근 → 건너뜀
+    {"종목코드": "000660", "연도": 2026, "상태": "4/4",
+     "갱신일": NOW - pd.Timedelta(days=40)},    # 올해 · 오래됨 → 다시 받음
+    {"종목코드": "035720", "연도": 2018, "상태": "4/4",
+     "갱신일": NOW - pd.Timedelta(days=400)},   # 과거 연도 → 안 건드림
+])
+k3 = dart._done_keys(prog3, now=NOW)
+check(("005930", 2026) in k3, "올해치라도 최근에 받았으면 건너뜀")
+check(("000660", 2026) not in k3,
+      f"올해치가 {config.DART_REFRESH_DAYS}일 넘으면 다시 받음 (최신 분기 반영)")
+check(("035720", 2018) in k3, "지나간 연도는 다시 안 받음 (더 안 바뀌므로)")
 
 # ── 7-b. 12월 결산 판정 (기존 kor_fs로, DART 호출 없이) ──────
 import store  # noqa: E402

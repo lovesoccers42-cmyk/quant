@@ -40,6 +40,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       KRX_ID: ${{ secrets.KRX_ID }}
       KRX_PW: ${{ secrets.KRX_PW }}
+      DART_API_KEY: ${{ secrets.DART_API_KEY }}
       QUANT_SMTP_USER: ${{ secrets.QUANT_SMTP_USER }}
       QUANT_SMTP_PASS: ${{ secrets.QUANT_SMTP_PASS }}
       QUANT_REPORT_EMAIL: ${{ secrets.QUANT_REPORT_EMAIL }}
