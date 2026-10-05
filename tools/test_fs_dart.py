@@ -327,7 +327,10 @@ r1 = dart.collect(api_key="TEST", years=range(2015, 2021), budget=100, chunk=10)
 check(r1["호출수"] <= 100, f"예산 100회를 넘지 않음 (실제 {r1['호출수']}회)")
 check(r1["중단사유"] == "호출 한도", f"한도에서 멈춤 ({r1['중단사유']})")
 check(r1["저장행수"] > 0, f"병렬로 실제 저장됨 ({r1['저장행수']}행)")
-check(len(seen) == len(set(seen)), "같은 보고서를 두 번 받지 않음")
+PROBE = "00126380"   # 시작 전 한 번 찔러보는 기준 종목 — 중복 검사에서 제외
+real = [x for x in seen if x[0] != PROBE]
+check(len(real) == len(set(real)), "같은 보고서를 두 번 받지 않음")
+check(any(x[0] == PROBE for x in seen), "수집 전에 한 번 찔러보고 시작함")
 
 done_after_1 = r1["완료"]
 n1 = len(seen)
@@ -335,7 +338,50 @@ r2 = dart.collect(api_key="TEST", years=range(2015, 2021), budget=100, chunk=10)
 check(r2["건너뜀"] == done_after_1,
       f"다시 돌리면 받은 건은 건너뜀 ({r2['건너뜀']}건)")
 check(len(seen) > n1, "이어서 새 구간을 받음")
-check(len(seen) == len(set(seen)), "재시작 후에도 중복 호출 없음")
+real = [x for x in seen if x[0] != PROBE]
+check(len(real) == len(set(real)), "재시작 후에도 중복 호출 없음")
+
+# ── 9-b. 막혔을 때 두드리지 않고 멈추는가 ───────────────────
+# 2026-10-05에 DART가 연결을 끊기 시작했는데, 실패해도 다음 건으로 넘어가는
+# 구조라 두 시간 동안 4,488건을 전부 실패하며 계속 두드렸습니다.
+tries = {"n": 0}
+
+
+def dead_fetch(api_key, corp, year, reprt):
+    tries["n"] += 1
+    raise ConnectionError("Remote end closed connection without response")
+
+
+dart.fetch_report = dead_fetch
+try:
+    dart.collect(api_key="TEST", years=range(2015, 2021), budget=5000, chunk=10)
+    check(False, "서버가 죽었는데 그냥 진행함 — 시작 전 점검이 안 됨")
+except RuntimeError as e:
+    check("수집을 시작하지 않습니다" in str(e),
+          "연결이 안 되면 아예 시작하지 않음 (두 시간 두드리기 방지)")
+check(tries["n"] <= 2, f"막힌 서버를 한 번만 찔러보고 포기 ({tries['n']}회)")
+
+# 중간에 막히기 시작하면 연속 실패 한도에서 멈춘다
+calls2 = {"n": 0}
+
+
+def flaky_fetch(api_key, corp, year, reprt):
+    calls2["n"] += 1
+    if calls2["n"] <= 4:                    # 처음 한 건만 성공 (= probe 통과)
+        return payload([row("ifrs_Assets", "자산총계", "BS", reprt,
+                            amount=int(1000 * 1e8), year=year)]), 1
+    raise ConnectionError("Remote end closed connection without response")
+
+
+dart.fetch_report = flaky_fetch
+store.write("kor_dart_progress", pd.DataFrame(
+    columns=["종목코드", "연도", "상태", "갱신일"]))
+r3 = dart.collect(api_key="TEST", years=range(2015, 2021), budget=99999, chunk=50)
+check("연속" in str(r3["중단사유"]),
+      f"연속 실패가 쌓이면 중단 ({str(r3['중단사유'])[:50]})")
+check(calls2["n"] < 200,
+      f"수천 번 두드리지 않고 일찍 멈춤 ({calls2['n']}회 시도)")
+check(r3.get("연결실패", 0) > 0, "연결 실패 건수를 리포트에 남김")
 
 rows = store.read("kor_fs")
 rev = rows[(rows["계정"] == "매출액") & (rows["종목코드"] == rows["종목코드"].iloc[0])]

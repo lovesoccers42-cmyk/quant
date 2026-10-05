@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
 import config
+import http_util
 import notify
 import store
 from pipeline import Step, build_steps
@@ -140,6 +141,8 @@ def run(mode: str = "daily", market: str = "kr") -> int:
         ],
         force=True,
     )
+    # 월간 실행도 DART를 부르므로 인증키가 로그에 남지 않게 합니다
+    http_util.install_log_redaction()
 
     started = datetime.now()
 

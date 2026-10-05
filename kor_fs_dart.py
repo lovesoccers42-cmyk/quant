@@ -303,6 +303,30 @@ def fetch_report(api_key: str, corp: str, year: int, reprt: str) -> tuple[dict, 
     return {"status": "013", "message": "조회된 데이터 없음"}, used
 
 
+def probe(api_key: str, cmap: dict | None = None) -> tuple[bool, str]:
+    """수집을 시작하기 전에 딱 한 번 찔러봅니다.
+
+    2026-10-05에 DART가 연결을 끊기 시작했는데, 실패해도 다음 건으로 넘어가는
+    구조라 두 시간 동안 4,488건을 전부 실패하며 계속 두드렸습니다. 한 번 찔러
+    보고 안 되면 바로 멈추는 게 서버에도, 로그에도, 사람에게도 낫습니다.
+    """
+    corp = "00126380"        # 삼성전자 — 어느 해든 반드시 있는 기준점
+    if cmap:
+        corp = cmap.get("005930", corp)
+    year = pd.Timestamp.today().year - 1
+    try:
+        data, _ = fetch_report(api_key, corp, year, "11011")
+    except RuntimeError as e:                 # 한도 초과·인증키 오류
+        return False, str(e)
+    except Exception as e:
+        return False, (f"연결 실패({type(e).__name__}). DART가 연결을 끊고 있거나 "
+                       f"네트워크가 막혀 있습니다: {str(e)[:160]}")
+    st = str(data.get("status"))
+    if st == "000" and data.get("list"):
+        return True, "정상"
+    return False, f"status {st} · {str(data.get('message'))[:80]}"
+
+
 def _fetch_year(api_key: str, ticker: str, corp: str, year: int) -> dict:
     """한 종목·한 사업연도의 4개 보고서를 받아 정리합니다 (작업 단위)."""
     by_q, got, used_total = {}, 0, 0
@@ -388,6 +412,11 @@ def collect(api_key: str | None = None, years=None, tickers=None,
         raise RuntimeError("수집할 종목이 없습니다 (kor_ticker가 비었습니다).")
 
     cmap = corp_map(api_key)
+
+    ok, why = probe(api_key, cmap)
+    if not ok:
+        raise RuntimeError(f"DART 응답을 받지 못해 수집을 시작하지 않습니다. {why}")
+
     dec_fye = december_filers()
     prog = load_progress()
     done = _done_keys(prog)
@@ -422,6 +451,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     # 동시에 여러 건을 받아 시간 안에 한도를 다 쓰도록 합니다.
     lock = threading.Lock()
     stop = {"why": None}
+    fails = {"연속": 0, "전체": 0, "사유": {}}
     MAX_PER_TASK = len(REPORTS) * 2      # 4보고서 × (연결 실패 시 별도)
 
     def work(task):
@@ -441,13 +471,25 @@ def collect(api_key: str | None = None, years=None, tickers=None,
                 calls -= MAX_PER_TASK
                 stop["why"] = str(e)
             return None
-        except Exception as e:                 # 네트워크 등 개별 실패는 건너뜁니다
+        except Exception as e:                 # 네트워크 등 개별 실패
             with lock:
                 calls -= MAX_PER_TASK
-            log.warning("DART 수집 실패 %s %s: %s", ticker, year, e)
+                fails["연속"] += 1
+                fails["전체"] += 1
+                fails["사유"][f"{type(e).__name__}"] = \
+                    fails["사유"].get(f"{type(e).__name__}", 0) + 1
+                # 서버가 막기 시작하면 멈춰야 합니다. 예전에는 실패해도 예산을
+                # 되돌려주고 바로 다음 건으로 넘어가서, 한 번 막히면 두 시간 동안
+                # 초당 수십 번씩 두드렸습니다. 그게 차단을 더 키웠을 겁니다.
+                if fails["연속"] >= config.DART_MAX_FAILS:
+                    stop["why"] = (
+                        f"연속 {fails['연속']}건 실패 — DART가 연결을 끊고 있습니다. "
+                        f"동시 요청 수를 줄이거나 시간을 두고 다시 시도하세요")
+            log.warning("DART 수집 실패 %s %s: %s", ticker, year, str(e)[:160])
             return None
         with lock:
             calls -= MAX_PER_TASK - res["호출"]   # 안 쓴 만큼 돌려놓습니다
+            fails["연속"] = 0                      # 하나라도 되면 초기화
         return res
 
     with ThreadPoolExecutor(max_workers=config.DART_WORKERS) as pool:
@@ -483,7 +525,8 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     out = {"호출수": calls, "저장행수": rows_saved, "완료": total,
            "남은작업": max(remaining, 0), "건너뜀": skipped,
            "DART에없음": missing, "12월결산아님": odd_fiscal,
-           "응답상태": statuses, "중단사유": stopped or "완료"}
+           "응답상태": statuses, "연결실패": fails["전체"],
+           "실패사유": fails["사유"], "중단사유": stopped or "완료"}
     if rows_saved == 0 and sample is not None:
         out["진단"] = sample
     return out
