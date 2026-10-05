@@ -68,6 +68,25 @@ LIQUIDITY_WINDOW = int(os.getenv("QUANT_LIQUIDITY_WINDOW", "20"))
 MIN_TURNOVER_KR = float(os.getenv("QUANT_MIN_TURNOVER_KR", "500000000"))   # 5억원
 MIN_TURNOVER_US = float(os.getenv("QUANT_MIN_TURNOVER_US", "5000000"))     # 500만 달러
 
+# ── 종목별 비중 방식 ─────────────────────────────────────────
+# 지금까지는 100종목을 1%씩 똑같이 담았습니다(equal). 그 결과 9.5년 동안
+# 삼성전자를 114회차 중 91회차나 들고 있었는데도 비중이 계속 1%였고,
+# 코스피 지수에 +103% vs +224%로 졌습니다. 지수를 못 이긴 가장 큰 원인이
+# 종목 선택이 아니라 '비중'이었을 수 있어서 방식을 바꿔 끼울 수 있게 했습니다.
+#
+#   equal   동일가중 — 지금까지의 방식, 비교 기준
+#   mcap    시총가중 — 큰 회사를 크게. 지수에 가까워집니다
+#   score   점수가중 — qvm 순위에 선형. 상위 종목에 더 싣습니다
+#   invvol  역변동성 — 덜 흔들리는 종목을 크게. 낙폭·샤프 개선 목적
+#
+# MAX_WEIGHT는 한 종목 상한입니다. 0이면 방식별 기본값(_DEFAULT_CAP)을 씁니다.
+# 시총가중에 상한이 없으면 삼성전자 하나가 20%를 넘어 '한 종목 베팅'이 됩니다.
+WEIGHTING = os.getenv("QUANT_WEIGHTING", "equal")
+MAX_WEIGHT = float(os.getenv("QUANT_MAX_WEIGHT", "0"))
+
+# 역변동성 가중에서 변동성을 재는 기간(거래일).
+VOL_WINDOW = int(os.getenv("QUANT_VOL_WINDOW", "60"))
+
 # 리스크 오버레이에서 주식을 비웠을 때 현금에 붙는 이자(연). 0으로 두면
 # 오버레이 효과를 과소평가하고, 높게 잡으면 과대평가합니다. 한국 예금금리
 # 수준으로 보수적으로 잡았습니다.

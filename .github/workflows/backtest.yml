@@ -41,6 +41,16 @@ on:
         description: "이동평균 아래일 때 주식비중. 0이면 전량 현금, 0.5면 절반"
         required: false
         default: "0"
+      weighting:
+        description: "종목별 비중 — equal(동일) / mcap(시총) / score(점수순위) / invvol(역변동성)"
+        required: false
+        default: "equal"
+        type: choice
+        options: ["equal", "mcap", "score", "invvol"]
+      max_weight:
+        description: "한 종목 최대 비중. 0이면 방식별 기본값(mcap 8%, score·invvol 3%)"
+        required: false
+        default: "0"
 
 concurrency:
   group: quant-backtest
@@ -77,6 +87,9 @@ jobs:
           gh release download data-store -D data -p "${prefix}_*.parquet" --clobber
           ls -lh data
 
+      - name: 오프라인 점검 (커밋 누락 잡기)
+        run: python tools/test_weighting.py
+
       - name: 백테스트 실행
         run: |
           python run_backtest.py \
@@ -88,7 +101,9 @@ jobs:
             "${{ github.event.inputs.min_turnover }}" \
             "${{ github.event.inputs.tranches }}" \
             "${{ github.event.inputs.trend_ma || '0' }}" \
-            "${{ github.event.inputs.risk_off || '0' }}"
+            "${{ github.event.inputs.risk_off || '0' }}" \
+            "${{ github.event.inputs.weighting || 'equal' }}" \
+            "${{ github.event.inputs.max_weight || '0' }}"
 
       - name: 결과 올리기
         if: always()

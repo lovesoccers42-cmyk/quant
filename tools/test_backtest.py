@@ -342,6 +342,53 @@ half = backtest.run(market="kr", top_n=30, rebalance="QE",
 check(set(half["perf"]["주식비중"].unique()) <= {0.5, 1.0},
       "risk_off=0.5면 비중이 0.5/1.0로만 움직임")
 
+# ── 4b. 비중 방식이 엔진에서 끝까지 돌아가는지 ───────────────
+print("\n[비중 방식]")
+_w = {}
+for scheme in backtest.WEIGHTINGS:
+    r = backtest.run(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+                     min_turnover=0, tranches=4, weighting=scheme)
+    p = r["perf"]
+    _w[scheme] = r
+    check(len(p) > 3, f"{scheme}: 리밸런싱이 돌아감 ({len(p)}회차)")
+    check(bool((p["최대종목비중"] > 0).all()) and bool((p["최대종목비중"] <= 1).all()),
+          f"{scheme}: 최대종목비중이 0~1 범위")
+    check(bool((p["상위10비중"] <= 1 + 1e-9).all()),
+          f"{scheme}: 상위10비중이 100%를 넘지 않음")
+    check(bool((p["턴오버"] >= -1e-12).all()) and bool((p["턴오버"] <= 1 + 1e-9).all()),
+          f"{scheme}: 회전율이 0~100% 범위")
+    print(f"    {scheme:7} 최대비중 평균 {p['최대종목비중'].mean():.2%}"
+          f" · 회전율 평균 {p['턴오버'].mean():.1%}")
+
+# 동일가중이라도 '안 건드리는 등분'은 주가대로 흘러가므로 최대비중이
+# 1/종목수보다 커집니다. 그게 실제로 벌어지는 일입니다. 다만 몇 배씩
+# 벌어지면 분할 로직이 비중을 잃어버린 것이니 상한을 둡니다.
+_eq_max = float(_w["equal"]["perf"]["최대종목비중"].mean())
+check(1 / 30 <= _eq_max < 3 / 30,
+      f"동일가중 최대비중이 1/종목수 이상이지만 과하지 않음 ({_eq_max:.2%})")
+check(float(_w["mcap"]["perf"]["최대종목비중"].mean()) > _eq_max,
+      "시총가중은 동일가중보다 한 종목에 더 쏠림")
+# 상한은 손보는 회차에 맞추는 값이라 드리프트로 넘을 수 있지만,
+# 상한 × CAP_BREACH_MULT 는 어떤 회차에서도 넘어서는 안 됩니다.
+_mc_worst = float(_w["mcap"]["perf"]["최대종목비중"].max())
+check(_mc_worst <= 0.08 * backtest.CAP_BREACH_MULT + 1e-9,
+      f"시총가중이 상한×{backtest.CAP_BREACH_MULT}를 넘지 않음 ({_mc_worst:.2%})")
+check(int(_w["mcap"]["perf"]["상한초과정리"].sum()) >= 0
+      and bool((_w["mcap"]["perf"]["최대종목비중"] <= 0.12 + 1e-9).all()),
+      "상한을 크게 넘으면 차례를 기다리지 않고 정리됨")
+
+# 분할 리밸런싱이 실제로 비중을 보존하는가 — 4등분이면 한 회차 회전율이
+# 1/4 + 약간(흐트러진 비중 되돌리기)을 크게 넘지 않아야 합니다.
+_to = float(_w["equal"]["perf"]["턴오버"].iloc[1:].mean())
+check(_to < 0.45, f"4등분에서 회차당 회전율이 과하지 않음 ({_to:.1%})")
+
+# 잘못된 방식 이름은 조용히 동일가중으로 넘어가면 안 됩니다
+try:
+    backtest.run(market="kr", top_n=30, rebalance="QE", weighting="시총")
+    check(False, "모르는 비중 방식을 그냥 받아들임")
+except ValueError as e:
+    check("weighting" in str(e), "모르는 비중 방식은 명확히 거부")
+
 # ── 5. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
 store.write("kor_price", store.read("kor_price").query("날짜 >= '2025-10-01'"))
 try:

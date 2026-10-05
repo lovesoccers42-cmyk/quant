@@ -130,6 +130,86 @@ def _shares(ticker: pd.DataFrame, spec: Spec) -> pd.Series:
     return pd.Series(sh.values, index=ticker[spec.t_sym].values)
 
 
+# ── 종목별 비중 ──────────────────────────────────────────────
+WEIGHTINGS = ("equal", "mcap", "score", "invvol")
+
+# 방식별 한 종목 상한 기본값. 시총가중은 삼성전자 하나로 쏠리므로 8%,
+# 점수·역변동성은 상위 쏠림이 덜해 3%로 둡니다. 동일가중은 상한이 무의미.
+_DEFAULT_CAP = {"equal": 0.0, "mcap": 0.08, "score": 0.03, "invvol": 0.03}
+
+# 상한은 '손보는 회차에 맞추는 값'입니다. 분할 리밸런싱에서는 안 건드리는
+# 등분이 주가대로 흘러가므로, 많이 오른 종목은 다음 차례가 올 때까지 상한을
+# 넘어 있을 수 있습니다. 그게 실제로 벌어지는 일이고 일부러 그렇게 뒀습니다.
+# 다만 한 종목이 상한의 이 배수를 넘으면 차례를 기다리지 않고 바로 깎습니다.
+# 상한을 둔 이유가 '한 종목 베팅을 막는 것'인데, 기다리는 동안 그게 깨지면
+# 상한이 있으나 마나이기 때문입니다.
+CAP_BREACH_MULT = 1.5
+
+
+def _cap_weights(raw: pd.Series, cap: float) -> pd.Series:
+    """합이 1이 되게 정규화하고, 한 종목이 cap을 넘으면 눌러 나머지에 비례 배분."""
+    w = pd.to_numeric(raw, errors="coerce").astype(float).clip(lower=0.0)
+    w = w.fillna(0.0)
+    total = float(w.sum())
+    if total <= 0 or len(w) == 0:
+        return pd.Series(1.0 / max(len(w), 1), index=w.index, dtype="float64")
+    w = w / total
+    # cap × 종목수 < 1 이면 상한을 지키면서 100%를 채울 수 없습니다 → 동일가중
+    if not (0 < cap < 1) or len(w) * cap < 1 - 1e-12:
+        return w
+    for _ in range(100):
+        over = w > cap + 1e-12
+        if not over.any():
+            break
+        excess = float((w[over] - cap).sum())
+        w[over] = cap
+        free = ~over
+        base = float(w[free].sum())
+        if base <= 0:
+            w[free] = excess / max(int(free.sum()), 1)
+            break
+        w[free] = w[free] + excess * (w[free] / base)
+    s = float(w.sum())
+    return w / s if s > 0 else w
+
+
+def _target_weights(codes, scheme: str, *, shares, price_pivot, t,
+                    order, cap: float, vol_window: int) -> pd.Series:
+    """이번 회차의 목표 비중. order는 그 시점 점수 순위(좋은 종목이 앞)."""
+    idx = pd.Index([str(c) for c in codes])
+    if scheme == "mcap" and len(shares):
+        px = price_pivot.loc[:t].ffill().iloc[-1]
+        raw = pd.to_numeric(px.reindex(idx), errors="coerce") * \
+            pd.to_numeric(shares.reindex(idx), errors="coerce")
+    elif scheme == "score":
+        # 점수값 자체가 아니라 '순위'에 선형 가중을 줍니다. qvm은 z점수 합이라
+        # 회차마다 척도가 달라져서, 값으로 비중을 매기면 비중이 시점마다 들쭉
+        # 날쭉해집니다. 순위는 척도가 고정돼 있습니다.
+        rank = {str(c): i for i, c in enumerate(order)}
+        worst = len(order) + 1
+        n = max(len(order), 1)
+        raw = pd.Series([float(n - rank.get(c, worst) + 1) for c in idx],
+                        index=idx, dtype="float64").clip(lower=1.0)
+    elif scheme == "invvol":
+        have = [c for c in idx if c in price_pivot.columns]
+        dr = (price_pivot.loc[:t, have].tail(vol_window + 1).ffill()
+              .pct_change(fill_method=None))
+        sd = dr.std(ddof=1).reindex(idx)
+        raw = (1.0 / sd).replace([np.inf, -np.inf], np.nan)
+    else:
+        raw = pd.Series(1.0, index=idx, dtype="float64")
+
+    raw = pd.to_numeric(raw, errors="coerce")
+    pos = raw[raw > 0]
+    # 데이터가 절반도 안 채워지면 그 회차는 동일가중으로 물러섭니다.
+    # 억지로 추정해 비중을 매기면 어느 회차가 추정값인지 알 수 없게 됩니다.
+    if len(pos) < max(5, len(idx) // 2):
+        raw = pd.Series(1.0, index=idx, dtype="float64")
+    else:
+        raw = raw.where(raw > 0).fillna(float(pos.median()))
+    return _cap_weights(raw, cap)
+
+
 # ── 시점별 점수 ──────────────────────────────────────────────
 def _ttm_pivot(fs, cutoff, spec, cache):
     """공시지연을 반영한 TTM 피벗. 분기마다만 바뀌므로 캐시합니다.
@@ -239,7 +319,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         cost_bps: float = 25.0, lag_days: int = 90,
         max_sector_pct: float = 1.0, min_turnover: float = 0.0,
         tranches: int = 1, trend_ma: int = 0, risk_off: float = 0.0,
-        cash_rate: float = 0.02) -> dict:
+        cash_rate: float = 0.02, weighting: str = "equal",
+        max_weight: float = 0.0) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -256,8 +337,23 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
     파라미터는 일부러 표준값(200일)만 쓰고 튜닝하지 않습니다. 여러 값을
     돌려 제일 좋은 걸 고르면 그 숫자는 과거에만 맞습니다.
+
+    weighting은 종목별 비중 방식입니다(equal/mcap/score/invvol). max_weight는
+    한 종목 상한이고 0이면 방식별 기본값을 씁니다.
+
+    ※ 회전율 정의가 바뀌었습니다. 예전에는 '교체된 종목 수 ÷ 보유 종목 수'
+    였는데, 지금은 비중 변화량(Σ|Δw|÷2)입니다. 들고 있는 종목을 목표 비중으로
+    되돌리는 거래가 예전 정의에서는 공짜였습니다. 그래서 같은 설정이라도
+    예전 실행보다 회전율과 비용이 높게 나옵니다. 예전 숫자와는 비교하지 말고
+    equal 기준선을 다시 돌려서 비교하세요.
     """
     spec = SPECS[market]
+    weighting = str(weighting or "equal").lower()
+    if weighting not in WEIGHTINGS:
+        raise ValueError(f"weighting은 {WEIGHTINGS} 중 하나여야 합니다 "
+                         f"(받은 값 {weighting!r})")
+    cap = float(max_weight) if max_weight and max_weight > 0 else \
+        _DEFAULT_CAP.get(weighting, 0.0)
     price, fs, ticker, sector = _load(spec)
 
     if price.empty or fs.empty or ticker.empty:
@@ -313,7 +409,6 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
     rows, holdings_log, sel_log, ic_log = [], [], [], []
     ttm_cache = {}
-    prev_holdings: set = set()
 
     # 분할 리밸런싱 상태 — 등분별 보유 종목
     n_tr = max(1, int(tranches))
@@ -321,7 +416,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     sleeves: list[list[str]] = [[] for _ in range(n_tr)]
     started = False
     prev_expo = 0.0          # 직전 회차의 주식 비중 (거래량 계산용)
-    cash_per = 0.0           # 한 회차당 현금 이자 — 날짜 간격으로 환산
+    w_state = None           # 직전 회차 말 기준 실제 비중 (주가 변동 반영 후)
 
     for i, t in enumerate(dates[:-1]):
         t_next = dates[i + 1]
@@ -345,6 +440,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         if len(target) < 5:
             continue
 
+        slot = None
+        prev_sleeves = [list(s) for s in sleeves]
         if not started:
             # 첫 회차는 전액을 한 번에 넣습니다. 순위를 등분에 번갈아 나눠
             # 어느 한 등분만 상위권을 독차지하지 않게 합니다.
@@ -372,7 +469,65 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         rets = (window.iloc[-1] / window.iloc[0] - 1).dropna()
         if rets.empty:
             continue
-        port_ret = float(rets.mean())
+
+        # ── 비중 결정 ────────────────────────────────────────
+        tw = _target_weights(codes, weighting, shares=shares,
+                             price_pivot=price_pivot, t=t, order=target,
+                             cap=cap, vol_window=config.VOL_WINDOW)
+
+        if w_state is None or slot is None:
+            w_new = tw                      # 첫 회차 — 전량을 목표 비중대로
+        else:
+            # 분할 리밸런싱의 핵심: 이번 주에 손보는 등분만 목표 비중으로
+            # 다시 맞추고, 나머지 등분은 주가가 움직인 그대로 둡니다. 매주
+            # 100종목 전부를 목표 비중으로 되돌리면 그게 바로 '전체 리밸런싱'
+            # 이고, 분할로 거래를 줄이려던 목적이 사라집니다.
+            sl = [c for c in sleeves[slot] if c in rets.index]
+            keep_out = [c for c in codes if c not in set(sleeves[slot])]
+            # 이번 등분에 묶여 있던 돈 — 팔 종목까지 포함해 그 몫만 재배분
+            pool = float(w_state.reindex(prev_sleeves[slot]).fillna(0.0).sum())
+            w_new = pd.Series(0.0, index=pd.Index(codes), dtype="float64")
+            if keep_out:
+                w_new.loc[keep_out] = w_state.reindex(keep_out).fillna(0.0).values
+            if sl and pool > 0:
+                sub = tw.reindex(sl).fillna(0.0)
+                ssum = float(sub.sum())
+                sub = (sub / ssum) if ssum > 0 else pd.Series(
+                    1.0 / len(sl), index=pd.Index(sl), dtype="float64")
+                w_new.loc[sl] = (pool * sub).values
+            tot = float(w_new.sum())
+            w_new = (w_new / tot) if tot > 0 else tw
+
+        # 상한을 크게 넘은 종목은 차례를 기다리지 않고 깎습니다.
+        # 깎는 거래는 아래 회전율에 그대로 잡혀 비용을 뭅니다.
+        breach = 0
+        if 0 < cap < 1:
+            hard = cap * CAP_BREACH_MULT
+            if float(w_new.max()) > hard:
+                breach = int((w_new > hard).sum())
+                w_new = _cap_weights(w_new, cap)
+
+        # 회전율 = 비중 변화량의 절반(= 한쪽 방향 거래 비중).
+        if w_state is None:
+            turnover = 1.0
+        else:
+            u = w_new.index.union(w_state.index)
+            turnover = float((w_new.reindex(u).fillna(0.0)
+                              - w_state.reindex(u).fillna(0.0)).abs().sum()) / 2
+
+        wv = w_new.reindex(rets.index).fillna(0.0)
+        wsum = float(wv.sum())
+        if wsum <= 0:
+            continue
+        wv = wv / wsum
+        port_ret = float((rets * wv).sum())
+
+        # 다음 회차를 위한 비중 갱신 — 주가가 움직인 만큼 저절로 바뀝니다
+        grown = wv * (1.0 + rets)
+        gsum = float(grown.sum())
+        w_state = grown / gsum if gsum > 0 else wv
+        top10 = float(wv.sort_values(ascending=False).head(10).sum())
+        wmax = float(wv.max())
 
         # 벤치마크 — 같은 기간 전 종목 동일가중
         bwin = price_pivot.loc[t:t_next].ffill()
@@ -413,9 +568,6 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                        "분위스프레드": q_spread,
                        **{f"{k}분위": v for k, v in sorted(q_means.items())}})
 
-        held = set(codes)
-        turnover = (len(held - prev_holdings) / max(len(held), 1)) if prev_holdings else 1.0
-
         # ── 리스크 오버레이 ──────────────────────────────────
         # 그날까지의 시장지수만 봅니다(미래 미사용). 이동평균 아래면 비중 축소.
         expo = 1.0
@@ -430,7 +582,6 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         traded = abs(expo - prev_expo) + min(expo, prev_expo) * turnover
         cost = traded * (cost_bps / 10000) * 2        # 팔고 사는 왕복
         prev_expo = expo
-        prev_holdings = held
 
         days = max((t_next - t).days, 1)
         cash_ret = (1 + cash_rate) ** (days / 365.25) - 1
@@ -440,7 +591,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                      "종목수": len(codes), "수익률": port_ret,
                      "비용차감수익률": net_ret, "주식비중": expo,
                      "벤치마크": bench_ret, "벤치마크_유동성": bench_liq,
-                     "턴오버": turnover})
+                     "턴오버": turnover, "최대종목비중": wmax,
+                     "상위10비중": top10, "상한초과정리": breach})
 
         info = scored.drop_duplicates("symbol").set_index("symbol")
         info.index = info.index.astype(str)
@@ -461,6 +613,18 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     summary = _metrics(perf, spec, top_n, cost_bps, lag_days)
     summary["통계"] = _stats_block(perf, pd.DataFrame(ic_log))
     summary["제약"] = {
+        "비중방식": {"equal": "동일가중 (전 종목 같은 금액)",
+                 "mcap": "시총가중 (큰 회사를 크게)",
+                 "score": "점수가중 (qvm 순위에 선형)",
+                 "invvol": f"역변동성 ({config.VOL_WINDOW}일 변동성의 역수)",
+                 }[weighting],
+        "종목상한": ("없음" if cap <= 0 or cap >= 1
+                  else (f"한 종목 최대 {cap:.1%}" if top_n * cap >= 1
+                        # 상한 × 종목수 < 1 이면 상한을 지키면서 100%를 채울 수
+                        # 없습니다. 조용히 무시되면 '상한을 걸었다'고 착각하게
+                        # 되므로 요약에 그대로 적습니다.
+                        else f"설정 {cap:.1%}인데 {top_n}종목으로는 지킬 수 없어 "
+                             f"무시됨 (상한 × 종목수 = {top_n * cap:.2f} < 1)")),
         "섹터상한": ("없음" if max_sector_pct >= 1
                   else f"한 섹터 최대 {max_sector_pct:.0%}"),
         "유동성기준": ("없음" if min_turnover <= 0
@@ -471,6 +635,13 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                     else f"시장지수 {trend_ma}일 이동평균 아래면 주식비중 {risk_off:.0%}"
                          f" · 현금 이자 연 {cash_rate:.1%}"),
     }
+    if "최대종목비중" in perf.columns:
+        summary["제약"]["실제 최대종목비중 평균"] = f"{perf['최대종목비중'].mean():.2%}"
+        summary["제약"]["실제 최대종목비중 최악"] = f"{perf['최대종목비중'].max():.2%}"
+        summary["제약"]["실제 상위10종목 비중 평균"] = f"{perf['상위10비중'].mean():.1%}"
+        if cap > 0:
+            summary["제약"]["상한 초과로 중간 정리한 회차"] = (
+                f"{int((perf['상한초과정리'] > 0).sum())}/{len(perf)}")
     if trend_ma and trend_ma > 0:
         summary["제약"]["주식비중 평균"] = f"{perf['주식비중'].mean():.0%}"
         summary["제약"]["현금 보유 회차"] = f"{int((perf['주식비중'] < 1).sum())}/{len(perf)}"
@@ -564,11 +735,15 @@ def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
         "초과수익률": round(port["누적수익률"] - bench["누적수익률"], 2),
         "한계": [
             "생존편향: 상장폐지 종목이 데이터에 없어 성과가 과대평가됩니다 (가장 큰 한계)",
-            "과거 시가총액은 '그날 종가 × 현재 주식수' 근사 — 증자·감자·분할 미반영",
+            "과거 시가총액은 '그날 종가 × 현재 주식수' 근사 — 증자·감자·분할 미반영. "
+            "시총가중을 쓰면 이 근사 오차가 성과에 직접 들어갑니다",
             "섹터와 주당배당금은 현재 값을 과거에도 적용",
             "최대낙폭은 리밸런싱 시점에서만 재므로 주기가 다르면 비교할 수 없습니다 "
             "(월말로 재면 월중 낙폭을 건너뜁니다). 주기가 다른 설정끼리는 "
             "'벤치마크 대비 낙폭'으로 비교하세요",
+            "회전율 정의가 '교체 종목 수'에서 '비중 변화량(Σ|Δw|÷2)'으로 바뀌었습니다. "
+            "들고 있는 종목을 목표 비중으로 되돌리는 거래가 예전에는 공짜였습니다. "
+            "같은 설정이라도 예전 실행보다 비용이 높게 나오니 예전 숫자와 비교하지 마세요",
             "과거 성과가 미래 수익을 보장하지 않습니다",
         ],
     }
