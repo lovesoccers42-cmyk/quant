@@ -26,6 +26,7 @@ PRIMARY_KEYS: dict[str, list[str]] = {
     "kor_price": ["날짜", "종목코드"],
     "kor_fs": ["계정", "기준일", "종목코드", "공시구분"],
     "kor_value": ["종목코드", "기준일", "지표"],
+    "kor_portfolio": ["종목코드"],        # 실전 보유 상태 (분할 리밸런싱)
     # 미국장
     "global_ticker": ["Symbol", "country", "date"],
     "global_price": ["Date", "Symbol"],
@@ -55,6 +56,8 @@ SCHEMAS: dict[str, dict[str, str]] = {
                "출처": "VARCHAR"},
     "kor_value": {"종목코드": "VARCHAR", "기준일": "TIMESTAMP", "지표": "VARCHAR",
                   "값": "DOUBLE"},
+    "kor_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
+                      "종목명": "VARCHAR", "섹터": "VARCHAR"},
     "global_ticker": {"Name": "VARCHAR", "Symbol": "VARCHAR", "Exchange": "VARCHAR",
                       "Sector": "VARCHAR", "Market Cap": "DOUBLE",
                       "Dividend": "DOUBLE", "country": "VARCHAR", "date": "TIMESTAMP"},
