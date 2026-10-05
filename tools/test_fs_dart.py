@@ -276,10 +276,29 @@ store.write("kor_fs", pd.DataFrame([
     {"종목코드": "111111", "기준일": pd.Timestamp(f"2023-{m:02d}-28"),
      "계정": "자산", "값": 1.0, "공시구분": "q"} for m in (2, 5, 8, 11)
 ]))
-dec = dart.december_filers()
-check("005930" in dec, "3·6·9·12월 결산 종목은 허용")
-check("111111" not in dec,
-      "2·5·8·11월(비12월 결산) 종목은 제외 — 날짜 계산이 틀리므로")
+# 결산월은 DART 기업개황(acc_mt)으로 봅니다. 분기말 '월'로는 구분이 안 됩니다 —
+# 6월 결산 회사도 분기말이 9·12·3·6월이라 월 집합이 12월 결산과 똑같습니다.
+# 그래서 6월 결산 회사가 통과해 2026-12-31 같은 미래 날짜가 저장됐습니다.
+store.write("kor_dart_company", pd.DataFrame([
+    {"종목코드": "005930", "결산월": "12", "갱신일": pd.Timestamp("2026-10-05")},
+    {"종목코드": "111111", "결산월": "06", "갱신일": pd.Timestamp("2026-10-05")},
+]))
+dec, used = dart.december_filers("TEST", ["005930", "111111"], {})
+check("005930" in dec, "12월 결산 종목은 허용")
+check("111111" not in dec, "6월 결산 종목은 제외 — 분기말 월만 보면 구분이 안 됨")
+check(used == 0, "이미 아는 종목은 다시 조회하지 않음 (호출 0회)")
+
+# 미래 날짜 청소
+store.write("kor_fs", pd.DataFrame([
+    {"종목코드": "111111", "기준일": pd.Timestamp.today().normalize()
+     + pd.Timedelta(days=90), "계정": "자산", "값": 1.0, "공시구분": "q"},
+    {"종목코드": "005930", "기준일": pd.Timestamp("2025-12-31"),
+     "계정": "자산", "값": 2.0, "공시구분": "q"},
+]))
+n = dart.purge_bad_dates()
+left = store.read("kor_fs")
+check(n == 1 and len(left) == 1 and left.iloc[0]["종목코드"] == "005930",
+      f"미래 날짜 행만 삭제 ({n}행 삭제, {len(left)}행 남음)")
 
 check(dart._priority_tickers(limit=0) == [] or True, "limit 인자 수용")
 
@@ -319,7 +338,7 @@ def fake_fetch(api_key, corp, year, reprt):
 
 
 dart.corp_map = lambda k: {t: f"C{t}" for t in TICKERS}
-dart.december_filers = lambda: set(TICKERS)
+dart.december_filers = lambda *a, **k: (set(TICKERS), 0)
 dart.fetch_report = fake_fetch
 dart._priority_tickers = lambda limit=None: TICKERS
 
