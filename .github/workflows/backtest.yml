@@ -33,6 +33,14 @@ on:
         description: "분할 리밸런싱 등분 수. 1이면 매번 전체 교체. 주간 4등분이면 4"
         required: false
         default: "1"
+      trend_ma:
+        description: "리스크 오버레이 — 시장지수 이동평균 일수. 0이면 끔, 표준값 200"
+        required: false
+        default: "0"
+      risk_off:
+        description: "이동평균 아래일 때 주식비중. 0이면 전량 현금, 0.5면 절반"
+        required: false
+        default: "0"
 
 concurrency:
   group: quant-backtest
@@ -78,7 +86,9 @@ jobs:
             "${{ github.event.inputs.cost_bps }}" \
             "${{ github.event.inputs.max_sector_pct }}" \
             "${{ github.event.inputs.min_turnover }}" \
-            "${{ github.event.inputs.tranches }}"
+            "${{ github.event.inputs.tranches }}" \
+            "${{ github.event.inputs.trend_ma || '0' }}" \
+            "${{ github.event.inputs.risk_off || '0' }}"
 
       - name: 결과 올리기
         if: always()

@@ -238,7 +238,8 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
 def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         cost_bps: float = 25.0, lag_days: int = 90,
         max_sector_pct: float = 1.0, min_turnover: float = 0.0,
-        tranches: int = 1) -> dict:
+        tranches: int = 1, trend_ma: int = 0, risk_off: float = 0.0,
+        cash_rate: float = 0.02) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -248,6 +249,13 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
       · 각 종목의 점검 간격은 여전히 4주라 회전율이 안 늘고
       · 진입 시점이 4주에 흩어져 특정 하루의 운을 덜 탑니다.
     K=1이면 예전 동작과 완전히 같습니다.
+
+    trend_ma > 0 이면 리스크 오버레이를 켭니다. 시장지수가 trend_ma일
+    이동평균 아래면 주식 비중을 risk_off(기본 0 = 전량 현금)로 줄이고,
+    남은 돈은 cash_rate(연) 이자를 받습니다. 낙폭을 줄이는 게 목적입니다.
+
+    파라미터는 일부러 표준값(200일)만 쓰고 튜닝하지 않습니다. 여러 값을
+    돌려 제일 좋은 걸 고르면 그 숫자는 과거에만 맞습니다.
     """
     spec = SPECS[market]
     price, fs, ticker, sector = _load(spec)
@@ -265,6 +273,15 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                                     values=spec.p_close, aggfunc="last").sort_index()
 
     shares = _shares(ticker, spec)
+
+    # 리스크 오버레이용 시장지수 — 전 종목 동일가중 일간 수익률의 누적.
+    # 시총가중 대신 동일가중을 쓰는 이유: 소수 대형주가 아니라 '시장 전체가
+    # 내려가고 있는가'를 봐야 위험 신호로 쓸 수 있기 때문입니다.
+    mkt = ma = None
+    if trend_ma and trend_ma > 0:
+        dret = price_pivot.ffill().pct_change(fill_method=None)
+        mkt = (1 + dret.mean(axis=1).fillna(0)).cumprod()
+        ma = mkt.rolling(trend_ma, min_periods=trend_ma // 2).mean()
 
     # 거래대금 피벗을 미리 한 번만 만듭니다. 날짜마다 전체를 정렬하면
     # 일간 리밸런싱에서 같은 정렬을 1,000번 반복하게 됩니다.
@@ -303,6 +320,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     sizes = [top_n // n_tr + (1 if j < top_n % n_tr else 0) for j in range(n_tr)]
     sleeves: list[list[str]] = [[] for _ in range(n_tr)]
     started = False
+    prev_expo = 0.0          # 직전 회차의 주식 비중 (거래량 계산용)
+    cash_per = 0.0           # 한 회차당 현금 이자 — 날짜 간격으로 환산
 
     for i, t in enumerate(dates[:-1]):
         t_next = dates[i + 1]
@@ -396,12 +415,30 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
         held = set(codes)
         turnover = (len(held - prev_holdings) / max(len(held), 1)) if prev_holdings else 1.0
-        cost = turnover * (cost_bps / 10000) * 2      # 팔고 사는 왕복
+
+        # ── 리스크 오버레이 ──────────────────────────────────
+        # 그날까지의 시장지수만 봅니다(미래 미사용). 이동평균 아래면 비중 축소.
+        expo = 1.0
+        if ma is not None:
+            cur = mkt.loc[:t]
+            cur_ma = ma.loc[:t].dropna()
+            if len(cur_ma):
+                expo = 1.0 if float(cur.iloc[-1]) >= float(cur_ma.iloc[-1]) else risk_off
+
+        # 거래량: 비중을 바꾼 만큼은 통째로 사고팔고, 계속 들고 있는 부분에서는
+        # 종목 교체분만 거래합니다.
+        traded = abs(expo - prev_expo) + min(expo, prev_expo) * turnover
+        cost = traded * (cost_bps / 10000) * 2        # 팔고 사는 왕복
+        prev_expo = expo
         prev_holdings = held
+
+        days = max((t_next - t).days, 1)
+        cash_ret = (1 + cash_rate) ** (days / 365.25) - 1
+        net_ret = expo * port_ret + (1 - expo) * cash_ret - cost
 
         rows.append({"리밸런싱일": t, "다음리밸런싱": t_next,
                      "종목수": len(codes), "수익률": port_ret,
-                     "비용차감수익률": port_ret - cost,
+                     "비용차감수익률": net_ret, "주식비중": expo,
                      "벤치마크": bench_ret, "벤치마크_유동성": bench_liq,
                      "턴오버": turnover})
 
@@ -430,7 +467,13 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                    else f"{config.LIQUIDITY_WINDOW}일 평균 거래대금 {min_turnover:,.0f} 이상"),
         "분할리밸런싱": ("없음 (매 회차 전체 교체)" if n_tr <= 1
                     else f"{n_tr}등분 — 매 회차 {sizes[0]}종목만 점검"),
+        "리스크오버레이": ("없음 (항상 100% 투자)" if not trend_ma or trend_ma <= 0
+                    else f"시장지수 {trend_ma}일 이동평균 아래면 주식비중 {risk_off:.0%}"
+                         f" · 현금 이자 연 {cash_rate:.1%}"),
     }
+    if trend_ma and trend_ma > 0:
+        summary["제약"]["주식비중 평균"] = f"{perf['주식비중'].mean():.0%}"
+        summary["제약"]["현금 보유 회차"] = f"{int((perf['주식비중'] < 1).sum())}/{len(perf)}"
     if sel_log:
         sl = pd.DataFrame(sel_log)
         for k in ("유동성탈락", "섹터상한탈락"):

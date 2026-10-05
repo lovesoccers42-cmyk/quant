@@ -4,6 +4,7 @@
     python run_backtest.py kr 30 ME
     python run_backtest.py us 50 QE
     python run_backtest.py kr 100 W-FRI 25 0.25 500000000 4   # 주간 4등분
+    python run_backtest.py kr 100 ME 25 0.25 500000000 1 200 0  # 200일선 아래면 현금
 """
 import json
 import logging
@@ -34,7 +35,8 @@ def _summary_rows(s: dict) -> pd.DataFrame:
 
 def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
          cost_bps: float = 25.0, max_sector_pct: float = -1.0,
-         min_turnover: float = -1.0, tranches: int = 1) -> int:
+         min_turnover: float = -1.0, tranches: int = 1,
+         trend_ma: int = 0, risk_off: float = 0.0) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -52,7 +54,9 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
                        cost_bps=cost_bps, max_sector_pct=max_sector_pct,
-                       min_turnover=min_turnover, tranches=max(1, int(tranches)))
+                       min_turnover=min_turnover, tranches=max(1, int(tranches)),
+                       trend_ma=int(trend_ma), risk_off=float(risk_off),
+                       cash_rate=config.CASH_RATE)
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -120,4 +124,6 @@ if __name__ == "__main__":
     cap = float(sys.argv[5]) if len(sys.argv) > 5 else -1.0
     turn = float(sys.argv[6]) if len(sys.argv) > 6 else -1.0
     tr = int(sys.argv[7]) if len(sys.argv) > 7 else 1
-    sys.exit(main(market, top_n, reb, cost, cap, turn, tr))
+    tma = int(sys.argv[8]) if len(sys.argv) > 8 else 0
+    roff = float(sys.argv[9]) if len(sys.argv) > 9 else 0.0
+    sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff))

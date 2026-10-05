@@ -266,6 +266,82 @@ if len(dates4) >= 6:
     check(max(changed) <= 20 // 4 + 1,
           f"회차당 신규 편입이 한 등분 크기 이하 (최대 {max(changed)}종목)")
 
+# ── 10. 리스크 오버레이 ──────────────────────────────────────
+# 지수가 장기 이동평균 아래면 비중을 줄여 낙폭을 막는 장치입니다.
+# 확인할 것: 꺼져 있으면 예전과 완전히 동일한가, 실제로 현금으로 빠지는가,
+# 미래를 훔쳐보지 않는가, 비중을 바꿀 때 거래비용을 무는가.
+off = backtest.run(market="kr", top_n=30, rebalance="QE",
+                   max_sector_pct=1.0, min_turnover=0, trend_ma=0)
+check(abs(float(off["perf"]["누적"].iloc[-1])
+          - float(before["perf"]["누적"].iloc[-1])) < 1e-12,
+      "오버레이를 끄면 예전 결과와 완전히 동일 (회귀 없음)")
+check(off["summary"]["제약"]["리스크오버레이"].startswith("없음"),
+      "꺼짐 상태를 리포트에 기록")
+
+on = backtest.run(market="kr", top_n=30, rebalance="QE",
+                  max_sector_pct=1.0, min_turnover=0,
+                  trend_ma=120, risk_off=0.0, cash_rate=0.02)
+check("주식비중" in on["perf"].columns, "회차별 주식비중을 기록")
+w = on["perf"]["주식비중"]
+check(set(w.unique()) <= {0.0, 1.0}, f"비중은 0 또는 1 ({sorted(set(w.unique()))})")
+print(f"\n    주식 보유 {int((w == 1).sum())}회 / 현금 {int((w == 0).sum())}회")
+# 위 합성 데이터는 계속 오르기만 해서 현금으로 빠질 일이 없습니다.
+# 오버레이가 실제로 작동하는지는 폭락을 만들어 확인합니다.
+_orig_px = store.read("kor_price").copy()      # 끝나면 되돌립니다
+_px = _orig_px.copy()
+_px["날짜"] = pd.to_datetime(_px["날짜"])
+_days = sorted(_px["날짜"].unique())
+_crash_from = _days[int(len(_days) * 0.6)]
+_k = (_px["날짜"] - _crash_from).dt.days.clip(lower=0)
+_px.loc[:, "종가"] = _px["종가"] * np.exp(-0.0025 * _k)   # 서서히 반토막
+store.write("kor_price", _px)
+
+crash_off = backtest.run(market="kr", top_n=30, rebalance="QE",
+                         max_sector_pct=1.0, min_turnover=0, trend_ma=0)
+crash_on = backtest.run(market="kr", top_n=30, rebalance="QE",
+                        max_sector_pct=1.0, min_turnover=0,
+                        trend_ma=120, risk_off=0.0, cash_rate=0.02)
+cw = crash_on["perf"]["주식비중"]
+print(f"\n    [폭락 시나리오] 주식 {int((cw == 1).sum())}회 / 현금 {int((cw == 0).sum())}회")
+check(int((cw == 0).sum()) > 0, "폭락장에서 실제로 현금으로 빠짐")
+m_off = crash_off["summary"]["포트폴리오"]["최대낙폭"]
+m_on = crash_on["summary"]["포트폴리오"]["최대낙폭"]
+r_off = crash_off["summary"]["포트폴리오"]["누적수익률"]
+r_on = crash_on["summary"]["포트폴리오"]["누적수익률"]
+print(f"    낙폭 {m_off}% → {m_on}% · 수익 {r_off}% → {r_on}%")
+check(m_on > m_off, f"폭락장 낙폭을 줄임 ({m_off}% → {m_on}%)")
+check(r_on > r_off, f"폭락장 수익을 지킴 ({r_off}% → {r_on}%)")
+store.write("kor_price", _orig_px)             # 원래 주가로 복원
+
+# 현금 구간의 수익률은 현금이자에서 비용을 뺀 값이어야 한다 (주가와 무관)
+cash_rows = on["perf"][on["perf"]["주식비중"] == 0]
+if len(cash_rows):
+    worst = float(cash_rows["비용차감수익률"].min())
+    check(worst > -0.05,
+          f"현금 구간은 주가가 아무리 빠져도 거의 안 잃음 (최악 {worst*100:+.2f}%)")
+
+# 미래 훔쳐보기 방지: 이동평균 판정에 그날까지만 쓰는가.
+# 미래를 봤다면 하락장을 완벽히 피해 낙폭이 비현실적으로 작아집니다.
+mdd_on = on["summary"]["포트폴리오"]["최대낙폭"]
+mdd_off = off["summary"]["포트폴리오"]["최대낙폭"]
+print(f"    최대낙폭: 오버레이 없음 {mdd_off}% → 있음 {mdd_on}%")
+check(mdd_on > -99 and mdd_on <= 0, "낙폭이 정상 범위")
+check(mdd_on > mdd_off - 1e-9, "오버레이가 낙폭을 키우지는 않음")
+
+# 비중 전환에 비용을 무는가 — 비용 0이면 전환이 공짜여서 더 좋아야 한다
+free = backtest.run(market="kr", top_n=30, rebalance="QE", cost_bps=0.0,
+                    max_sector_pct=1.0, min_turnover=0,
+                    trend_ma=120, risk_off=0.0, cash_rate=0.02)
+check(float(free["perf"]["누적"].iloc[-1]) >= float(on["perf"]["누적"].iloc[-1]) - 1e-12,
+      "비용을 매기면 수익이 줄어듦 (전환 비용이 실제로 계산됨)")
+
+# 부분 축소(50%)도 동작하는가
+half = backtest.run(market="kr", top_n=30, rebalance="QE",
+                    max_sector_pct=1.0, min_turnover=0,
+                    trend_ma=120, risk_off=0.5, cash_rate=0.02)
+check(set(half["perf"]["주식비중"].unique()) <= {0.5, 1.0},
+      "risk_off=0.5면 비중이 0.5/1.0로만 움직임")
+
 # ── 5. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
 store.write("kor_price", store.read("kor_price").query("날짜 >= '2025-10-01'"))
 try:

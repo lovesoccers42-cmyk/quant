@@ -68,6 +68,11 @@ LIQUIDITY_WINDOW = int(os.getenv("QUANT_LIQUIDITY_WINDOW", "20"))
 MIN_TURNOVER_KR = float(os.getenv("QUANT_MIN_TURNOVER_KR", "500000000"))   # 5억원
 MIN_TURNOVER_US = float(os.getenv("QUANT_MIN_TURNOVER_US", "5000000"))     # 500만 달러
 
+# 리스크 오버레이에서 주식을 비웠을 때 현금에 붙는 이자(연). 0으로 두면
+# 오버레이 효과를 과소평가하고, 높게 잡으면 과대평가합니다. 한국 예금금리
+# 수준으로 보수적으로 잡았습니다.
+CASH_RATE = float(os.getenv("QUANT_CASH_RATE", "0.02"))
+
 # ── DART (과거 재무제표 확장) ────────────────────────────────
 # FnGuide는 최근 분기만 줍니다. 백테스트 기간이 곧 통계적 신뢰도라
 # (t = IR × √기간) DART로 2015년까지 끌어옵니다.
