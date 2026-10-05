@@ -69,6 +69,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         out.to_excel(xw, sheet_name="리밸런싱", index=False)
         if len(holdings):
             holdings.to_excel(xw, sheet_name="보유종목", index=False)
+        if len(res.get("ic", [])):
+            res["ic"].to_excel(xw, sheet_name="신호강도", index=False)
 
     curve = {
         "dates": [f"{d:%Y-%m-%d}" for d in perf["다음리밸런싱"]],
@@ -93,6 +95,10 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         bv = f"{bv}{unit}" if bv is not None else "-"
         print(f"  {k:<14}{pv:>12}{bv:>12}")
     print(f"\n  초과수익률: {s['초과수익률']}%p")
+    if s.get("통계"):
+        print("\n  통계 (t = IR x √기간):")
+        for k, v in s["통계"].items():
+            print(f"   · {k}: {v}")
     print("\n  제약:")
     for k, v in s.get("제약", {}).items():
         print(f"   · {k}: {v}")

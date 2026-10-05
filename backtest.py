@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 import config
 import factor_core as fc
@@ -293,7 +294,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     log.info("%s장 백테스트: %s ~ %s, 리밸런싱 %d회, 상위 %d종목",
              spec.label, dates[0].date(), dates[-1].date(), len(dates), top_n)
 
-    rows, holdings_log, sel_log = [], [], []
+    rows, holdings_log, sel_log, ic_log = [], [], [], []
     ttm_cache = {}
     prev_holdings: set = set()
 
@@ -359,6 +360,40 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         brets = (bwin.iloc[-1] / bwin.iloc[0] - 1).dropna()
         bench_ret = float(brets.mean()) if len(brets) else 0.0
 
+        # 두 번째 벤치마크 — '살 수 있었던 종목'만 동일가중.
+        #
+        # 전 종목 벤치마크에는 거래대금 몇천만원짜리도 들어갑니다. 우리는 그런
+        # 종목을 애초에 못 사는데, 그 차이가 전부 초과수익으로 잡힙니다. 즉
+        # 지금 재고 있는 것은 '모델의 종목 선택 실력'이 아니라 거기에
+        # '소형·비유동주를 피한 효과'가 섞인 값입니다. 추적오차도 그만큼 부풀죠.
+        # 유동성을 통과한 종목만으로 다시 재면 모델이 고른 실력만 남습니다.
+        pool = ([c for c in eligible if c in brets.index] if eligible
+                else list(brets.index))
+        bench_liq = float(brets.reindex(pool).dropna().mean()) if pool else bench_ret
+
+        # 점수가 수익률 순위를 맞추는가 (IC) — 상위 N종목으로 압축하기 전에,
+        # 그 시점 전 종목의 순위 정보를 그대로 씁니다. 관측이 수백 배 많아
+        # 포트폴리오 수익률보다 훨씬 예민하게 신호 유무를 가려냅니다.
+        ic = q_spread = np.nan
+        q_means = {}
+        sc_pool = scored[scored["symbol"].astype(str).isin(pool)] if pool else scored
+        sc_pool = sc_pool.dropna(subset=["qvm"])
+        fwd = sc_pool["symbol"].astype(str).map(brets)
+        ok = fwd.notna()
+        if int(ok.sum()) >= 50:
+            qv, fw = sc_pool.loc[ok, "qvm"], fwd[ok]
+            ic = float(spearmanr(-qv, fw).statistic)
+            try:
+                bucket = pd.qcut(qv.rank(method="first"), 5, labels=[1, 2, 3, 4, 5])
+                q_means = {int(k): float(v) for k, v in fw.groupby(bucket, observed=True).mean().items()}
+                if 1 in q_means and 5 in q_means:
+                    q_spread = q_means[1] - q_means[5]
+            except ValueError:
+                pass
+        ic_log.append({"리밸런싱일": t, "검사종목": int(ok.sum()), "IC": ic,
+                       "분위스프레드": q_spread,
+                       **{f"{k}분위": v for k, v in sorted(q_means.items())}})
+
         held = set(codes)
         turnover = (len(held - prev_holdings) / max(len(held), 1)) if prev_holdings else 1.0
         cost = turnover * (cost_bps / 10000) * 2      # 팔고 사는 왕복
@@ -367,7 +402,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         rows.append({"리밸런싱일": t, "다음리밸런싱": t_next,
                      "종목수": len(codes), "수익률": port_ret,
                      "비용차감수익률": port_ret - cost,
-                     "벤치마크": bench_ret, "턴오버": turnover})
+                     "벤치마크": bench_ret, "벤치마크_유동성": bench_liq,
+                     "턴오버": turnover})
 
         info = scored.drop_duplicates("symbol").set_index("symbol")
         info.index = info.index.astype(str)
@@ -383,8 +419,10 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     perf = pd.DataFrame(rows)
     perf["누적"] = (1 + perf["비용차감수익률"]).cumprod()
     perf["누적_벤치마크"] = (1 + perf["벤치마크"]).cumprod()
+    perf["누적_벤치마크_유동성"] = (1 + perf["벤치마크_유동성"]).cumprod()
 
     summary = _metrics(perf, spec, top_n, cost_bps, lag_days)
+    summary["통계"] = _stats_block(perf, pd.DataFrame(ic_log))
     summary["제약"] = {
         "섹터상한": ("없음" if max_sector_pct >= 1
                   else f"한 섹터 최대 {max_sector_pct:.0%}"),
@@ -400,8 +438,50 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                 summary["제약"][f"평균 {k}"] = int(sl[k].mean())
     holdings = pd.concat(holdings_log, ignore_index=True) if holdings_log else pd.DataFrame()
 
-    return {"market": market, "summary": summary, "perf": perf, "holdings": holdings}
+    return {"market": market, "summary": summary, "perf": perf,
+            "holdings": holdings, "ic": pd.DataFrame(ic_log)}
 
+
+def _tstat(x: pd.Series) -> float:
+    x = pd.Series(x).dropna()
+    if len(x) < 3 or float(x.std(ddof=1)) == 0:
+        return float("nan")
+    return float(x.mean() / (x.std(ddof=1) / np.sqrt(len(x))))
+
+
+def _stats_block(perf: pd.DataFrame, ic: pd.DataFrame) -> dict:
+    """t값과 그 분해 — 무엇을 고쳐야 t가 오르는지 보이게.
+
+    t = IR x √기간 이고 IR = 초과수익 / 추적오차 입니다. t가 낮을 때
+    '초과수익이 작아서'인지 '추적오차가 커서'인지에 따라 할 일이 완전히
+    다릅니다. 둘을 따로 보여줍니다.
+
+    IC(정보계수)는 상위 N종목으로 압축하기 전, 전 종목 순위로 잰 신호 강도라
+    관측이 수백 배 많습니다. IC는 뚜렷한데 포트폴리오 t가 낮다면 문제는
+    신호가 아니라 포트폴리오 구성(종목 수·가중·제약)에 있습니다.
+    """
+    per_year = len(perf) / max((perf["다음리밸런싱"].iloc[-1]
+                                - perf["리밸런싱일"].iloc[0]).days / 365.25, 1e-9)
+    out = {}
+    for label, col in (("전종목 대비", "벤치마크"), ("유동성통과 대비", "벤치마크_유동성")):
+        if col not in perf.columns:
+            continue
+        ex = perf["비용차감수익률"] - perf[col]
+        te = float(ex.std(ddof=1)) * np.sqrt(per_year)
+        exr = float(ex.mean()) * per_year
+        out[f"{label} 연초과"] = round(exr * 100, 2)
+        out[f"{label} 추적오차"] = round(te * 100, 2)
+        out[f"{label} IR"] = round(exr / te, 3) if te else None
+        out[f"{label} t"] = round(_tstat(ex), 2)
+    if len(ic) and ic["IC"].notna().any():
+        out["IC 평균"] = round(float(ic["IC"].mean()), 4)
+        out["IC t"] = round(_tstat(ic["IC"]), 2)
+        out["IC 양수비율"] = round(float((ic["IC"] > 0).mean()) * 100, 1)
+        out["분위스프레드 t"] = round(_tstat(ic["분위스프레드"]), 2)
+        qs = [c for c in ic.columns if c.endswith("분위")]
+        if qs:
+            out["분위별 평균수익%"] = {c: round(float(ic[c].mean()) * 100, 2) for c in qs}
+    return out
 
 def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
              cost_bps: float, lag_days: int) -> dict:
