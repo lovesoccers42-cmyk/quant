@@ -64,8 +64,11 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
         _summary_rows(s).to_excel(xw, sheet_name="요약", index=False)
         out = perf.copy()
-        for c in ("수익률", "비용차감수익률", "벤치마크", "턴오버"):
-            out[c] = (out[c] * 100).round(2)
+        # 엑셀에서는 전부 % 단위로 통일합니다. 예전에는 벤치마크_유동성만
+        # 분수로 남아 있어, 엑셀을 다시 읽어 계산할 때 100배 틀렸습니다.
+        for c in ("수익률", "비용차감수익률", "벤치마크", "벤치마크_유동성", "턴오버"):
+            if c in out.columns:
+                out[c] = (out[c] * 100).round(3)
         out.to_excel(xw, sheet_name="리밸런싱", index=False)
         if len(holdings):
             holdings.to_excel(xw, sheet_name="보유종목", index=False)
