@@ -82,7 +82,7 @@ jobs:
         if: always()
         run: |
           shopt -s nullglob
-          files=(data/kor_*.parquet)
+          files=(data/kor_*.parquet output/*)
           fail=0
           for f in "${files[@]}"; do
             [ -f "$f" ] || continue

@@ -640,6 +640,32 @@ with tab_log:
                 if s.get("error"):
                     st.code(s["error"][-500:], language="text")
 
+        with st.expander("📥 재무제표(DART) 수집 현황", expanded=True):
+            ds = load_run("dart_status.json")
+            if not ds:
+                st.caption("아직 요약이 없습니다. DART 수집이 한 번 돌면 생깁니다.")
+            else:
+                fs = ds.get("재무제표", {})
+                if ds.get("끝남"):
+                    st.success(f"**수집 완료** — {ds['완료']:,}건 전부 받았습니다.")
+                else:
+                    left = ds.get("남은작업", 0)
+                    st.info(f"**수집 중** — {left:,}건 남음 "
+                            f"(하루 약 4,000건씩, 약 {max(1, round(left / 4000))}일 더)")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("재무제표 시작", fs.get("처음", "-"))
+                c2.metric("최신", fs.get("마지막", "-"))
+                c3.metric("행 수", f"{fs.get('행수', 0):,}")
+                st.caption(f"마지막 실행 {ds.get('실행시각','-')} · "
+                           f"{ds.get('중단사유','-')} · "
+                           f"이번에 {ds.get('이번저장행수',0):,}행 저장")
+
+                yr = pd.DataFrame(ds.get("연도별", []))
+                if len(yr):
+                    st.bar_chart(yr.set_index("연도")["종목수"], height=180)
+                    st.caption("연도마다 종목 수가 비슷하면 그 구간까지 백테스트가 가능합니다. "
+                               "앞쪽 연도만 뚝 낮으면 아직 덜 채워진 것입니다.")
+
         with st.expander("데이터 저장소 현황"):
             store_info = run_info.get("store", {})
             if store_info:
