@@ -78,6 +78,13 @@ jobs:
             "${{ github.event.inputs.budget || '19000' }}" \
             "${{ github.event.inputs.start_year || '2015' }}"
 
+      - name: 재무제표 정합성 점검
+        if: always()
+        run: |
+          # 숫자가 믿을 만한지 눈으로 확인합니다. 대형주 분기 값은 공개된
+          # 숫자라 틀리면 바로 보입니다.
+          python tools/check_fs.py || true
+
       - name: 데이터 올리기
         if: always()
         run: |

@@ -54,6 +54,7 @@ def _clean_fs(df, ticker, frequency):
     df = df.dropna(subset=["기준일"])
     df["종목코드"] = ticker
     df["공시구분"] = frequency
+    df["출처"] = "FnGuide"
     df["값"] = pd.to_numeric(df["값"], errors="coerce")
     return df.dropna(subset=["값"])
 

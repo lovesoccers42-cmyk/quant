@@ -251,7 +251,7 @@ def to_quarterly(by_quarter: dict, ticker: str) -> pd.DataFrame:
                     continue                   # 차분할 앞 분기가 없음
                 amount = val - prev_cum
             recs.append({"종목코드": ticker, "기준일": end, "계정": account,
-                         "값": float(amount), "공시구분": "q"})
+                         "값": float(amount), "공시구분": "q", "출처": "DART"})
     return pd.DataFrame(recs)
 
 
@@ -412,17 +412,18 @@ def collect(api_key: str | None = None, years=None, tickers=None,
         raise RuntimeError("수집할 종목이 없습니다 (kor_ticker가 비었습니다).")
 
     cmap = corp_map(api_key)
+    purged = purge_bad_dates()
 
     ok, why = probe(api_key, cmap)
     if not ok:
         raise RuntimeError(f"DART 응답을 받지 못해 수집을 시작하지 않습니다. {why}")
 
-    dec_fye = december_filers()
+    dec_fye, fye_calls = december_filers(api_key, tickers, cmap)
     prog = load_progress()
     done = _done_keys(prog)
     odd_fiscal = 0
 
-    calls, buffer, new_prog = 1, [], []
+    calls, buffer, new_prog = 1 + fye_calls, [], []
     rows_saved, skipped, missing = 0, 0, 0
     today = pd.Timestamp.today().normalize()
     sample = None          # 아무것도 못 읽었을 때 원인을 보여줄 실제 응답
@@ -435,7 +436,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
         if corp is None:
             missing += 1
             continue
-        if dec_fye is not None and ticker not in dec_fye:
+        if ticker not in dec_fye:
             # 응답에 날짜가 없어 사업연도·보고서코드로 분기말을 계산합니다.
             # 12월 결산이 아니면 그 계산이 틀리므로 아예 건너뜁니다.
             odd_fiscal += 1
@@ -504,8 +505,14 @@ def collect(api_key: str | None = None, years=None, tickers=None,
                 df = to_quarterly(res["분기"], res["종목코드"])
                 if len(df):
                     buffer.append(df)
+            # DART에 그 해 자료가 아예 없는 경우(상장 전 등)는 '없음'으로 끝냅니다.
+            # 0/4로 남기면 다시 받을 대상이 되어 매일 밤 같은 빈 조회를 반복하고
+            # 남은작업이 영원히 0이 되지 않습니다.
+            st = f"{res['성공']}/4"
+            if res["성공"] == 0 and set(res["상태"]) <= {"013"}:
+                st = "없음"
             new_prog.append({"종목코드": res["종목코드"], "연도": res["연도"],
-                             "상태": f"{res['성공']}/4", "갱신일": today})
+                             "상태": st, "갱신일": today})
 
             if len(buffer) >= chunk:
                 rows_saved += store.upsert("kor_fs", pd.concat(buffer, ignore_index=True))
@@ -525,6 +532,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     out = {"호출수": calls, "저장행수": rows_saved, "완료": total,
            "남은작업": max(remaining, 0), "건너뜀": skipped,
            "DART에없음": missing, "12월결산아님": odd_fiscal,
+           "미래날짜삭제": purged,
            "응답상태": statuses, "연결실패": fails["전체"],
            "실패사유": fails["사유"], "중단사유": stopped or "완료"}
     if rows_saved == 0 and sample is not None:
@@ -532,27 +540,71 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     return out
 
 
-def december_filers() -> set | None:
-    """12월 결산 종목 집합. 기존 FnGuide 데이터의 분기말 월로 판정합니다.
+COMPANY = "kor_dart_company"
 
-    DART 호출을 한 번도 더 쓰지 않는 방법입니다 — 이미 받아둔 kor_fs에
-    각 종목의 분기 기준일이 들어 있고, 12월 결산이면 3·6·9·12월에만 찍힙니다.
-    판정할 근거가 없으면 None(=전부 허용)을 돌려줍니다.
+
+def purge_bad_dates() -> int:
+    """미래 날짜가 붙은 재무제표 행을 지웁니다. 지운 행 수 반환.
+
+    결산월을 잘못 판정하던 시절에 6월 결산 회사의 사업보고서에 12월 31일이
+    붙어 아직 오지 않은 분기의 실적처럼 저장됐습니다. 백테스트는 공시지연
+    90일을 두기 때문에 미래 행을 바로 쓰진 않지만, 남겨둘 이유가 없습니다.
     """
     if not store.exists("kor_fs"):
-        return None
-    try:
-        df = store.read_sql("""
-            select 종목코드, month(기준일) 월 from kor_fs
-            where 공시구분 = 'q' group by 1, 2;
-        """)
-    except Exception:
-        return None
+        return 0
+    df = store.read("kor_fs")
     if df.empty:
-        return None
-    months = df.groupby("종목코드")["월"].apply(set)
-    ok = {str(t).zfill(6) for t, ms in months.items() if ms <= {3, 6, 9, 12}}
-    return ok or None
+        return 0
+    cutoff = pd.Timestamp.today().normalize()
+    bad = pd.to_datetime(df["기준일"], errors="coerce") > cutoff
+    n = int(bad.sum())
+    if n:
+        store.write("kor_fs", df[~bad])
+        log.warning("미래 날짜 재무제표 %d행 삭제 (결산월 오판정 흔적)", n)
+    return n
+
+
+def december_filers(api_key: str, tickers: list, cmap: dict) -> tuple[set, int]:
+    """DART 기업개황으로 결산월을 확인해 12월 결산만 남깁니다. (집합, 호출수)
+
+    처음에는 기존 kor_fs의 분기 기준일 '월'로 판정했는데, 그걸로는 구분이
+    안 됩니다. 6월 결산 회사도 분기말이 9·12·3·6월이라 월 집합이 {3,6,9,12}로
+    똑같이 나오기 때문입니다. 그래서 6월 결산 회사가 12월 결산으로 통과했고,
+    사업연도 2026 사업보고서(실제 기간 끝 2026-06-30)에 2026-12-31이라는
+    있지도 않은 날짜가 붙었습니다. 실제로 저장소 최신 기준일이 미래가 됐습니다.
+
+    결산월은 회사당 한 번만 확인하면 되고 거의 안 바뀌므로 저장해 둡니다.
+    """
+    cache = store.read(COMPANY)
+    known = {}
+    if len(cache):
+        known = dict(zip(cache["종목코드"].astype(str).str.zfill(6),
+                         cache["결산월"].astype(str)))
+
+    calls, new_rows = 0, []
+    for t in tickers:
+        if t in known or t not in cmap:
+            continue
+        try:
+            http_util.polite_sleep(config.DART_SLEEP)
+            r = http_util.get(f"{BASE}/company.json",
+                              params={"crtfc_key": api_key, "corp_code": cmap[t]})
+            calls += 1
+            acc = str((r.json() or {}).get("acc_mt") or "").strip()
+        except Exception as e:
+            log.warning("결산월 조회 실패 %s: %s", t, str(e)[:100])
+            continue
+        if acc:
+            known[t] = acc
+            new_rows.append({"종목코드": t, "결산월": acc,
+                             "갱신일": pd.Timestamp.today().normalize()})
+
+    if new_rows:
+        merged = pd.concat([cache, pd.DataFrame(new_rows)], ignore_index=True) \
+            if len(cache) else pd.DataFrame(new_rows)
+        store.write(COMPANY, merged.drop_duplicates("종목코드", keep="last"))
+
+    return {t for t, m in known.items() if m == "12"}, calls
 
 
 def _priority_tickers(limit: int | None = None) -> list[str]:
