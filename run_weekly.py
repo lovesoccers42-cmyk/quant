@@ -72,9 +72,10 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
                    else f"{r['이번등분']}번 / 총 {tranches}등분")},
             {"항목": "목표 종목 수", "값": r["목표종목수"]},
             {"항목": "현재 보유", "값": r["보유종목수"]},
-            {"항목": "매도", "값": r["매도"]},
+            {"항목": "매도 (전량)", "값": r["매도"]},
+            {"항목": "비중조절 (일부만)", "값": r.get("비중조절", 0)},
             {"항목": "매수", "값": r["매수"]},
-            {"항목": "유지", "값": r["유지"]},
+            {"항목": "유지 (손 안 댐)", "값": r["유지"] - r.get("비중조절", 0)},
             {"항목": "총 운용금액",
              "값": (f"{config.CAPITAL_KRW:,.0f}원" if config.CAPITAL_KRW > 0
                    else "미설정 — QUANT_CAPITAL_KRW를 넣으면 수량까지 계산합니다")},
@@ -84,10 +85,20 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
             {"항목": "주가가 배정액보다 비싸 제외한 종목",
              "값": (f"{r['가격초과제외']}종목 — 1주도 못 사서 다음 순위로 채웠습니다"
                    if r.get("가격초과제외") else "없음")},
+            {"항목": "비중축소로 확보되는 금액",
+             "값": (f"{r['확보금액_하한']:,}원 이상 (전량매도 대금은 별도)"
+                   if r.get("확보금액_하한") else "-")},
+            {"항목": "매수에 필요한 금액",
+             "값": (f"{r['필요금액']:,}원" if r.get("필요금액") else "-")},
             {"항목": "안내", "값": "아래 '주문' 시트의 종목만 거래하세요. "
                                  "나머지 등분은 이번 주에 손대지 않습니다."},
-            {"항목": "매도 수량", "값": "'전량'입니다 — 그 종목을 다 비우세요. "
-                                   "보유 수량은 증권사 앱에서 확인하세요."},
+            {"항목": "구분 읽는 법",
+             "값": "매도=전량 비우기 · 비중축소/비중확대=적힌 수량만큼만 "
+                  "(종목은 계속 보유) · 매수=신규 편입"},
+            {"항목": "돈이 모자라면",
+             "값": "매도·비중축소를 먼저 체결하고, 들어온 현금으로 살 수 있는 "
+                  "만큼만 위에서부터 사세요. 못 산 종목은 다음 차례에 채웁니다. "
+                  "다른 등분을 건드려 돈을 만들지는 마세요."},
         ])
         meta.to_excel(xw, sheet_name="요약", index=False)
         (r["orders"] if len(r["orders"])
@@ -130,11 +141,21 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
     return 0
 
 
-def seed_main(csv_path: str, tranches: int = 4) -> int:
-    """보유 종목 CSV를 읽어 등분에 배분합니다. 전환 시작 전에 한 번만."""
+def seed_main(src: str, tranches: int = 4) -> int:
+    """보유 종목 목록을 읽어 등분에 배분합니다. 전환 시작 전에 한 번만.
+
+    src는 파일 경로여도 되고, 엑셀에서 복사한 문자열을 그대로 줘도 됩니다
+    (탭 구분, 줄바꿈이 사라진 상태여도 복원합니다).
+    """
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
-    df = pd.read_csv(csv_path, dtype={"종목코드": str}, encoding="utf-8-sig")
-    r = portfolio.seed(df, tranches=tranches)
+    parsed = portfolio.parse_holdings(src)
+    print(f"\n  읽어낸 보유 종목 {len(parsed)}개 · "
+          f"합계 {parsed['평가금액'].sum():,.0f}원")
+    print("  (앞 3개 / 뒤 3개로 제대로 읽혔는지 확인하세요)")
+    for _, h in pd.concat([parsed.head(3), parsed.tail(3)]).iterrows():
+        print(f"    {h['종목코드']}  {h['평가금액']:>12,.0f}원  {h['종목명']}")
+
+    r = portfolio.seed(parsed, tranches=tranches)
 
     print("\n" + "=" * 60)
     print("  보유 종목을 등분에 배분했습니다")
@@ -152,10 +173,15 @@ def seed_main(csv_path: str, tranches: int = 4) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "seed":
-        if len(sys.argv) < 3:
-            print("사용법: python run_weekly.py seed 보유종목.csv [등분수]")
-            sys.exit(2)
-        sys.exit(seed_main(sys.argv[2],
-                           int(sys.argv[3]) if len(sys.argv) > 3 else 4))
+        # 인자로 경로를 주거나, 표준입력으로 붙여넣은 내용을 흘려보내도 됩니다.
+        if len(sys.argv) > 2 and sys.argv[2] != "-":
+            src, rest = sys.argv[2], sys.argv[3:]
+        else:
+            src, rest = sys.stdin.read(), sys.argv[3:]
+            if not src.strip():
+                print("사용법: python run_weekly.py seed 보유종목.csv [등분수]\n"
+                      "      또는 표준입력으로: ... | python run_weekly.py seed - 4")
+                sys.exit(2)
+        sys.exit(seed_main(src, int(rest[0]) if rest else 4))
     tr = int(sys.argv[1]) if len(sys.argv) > 1 else 4
     sys.exit(main(tr))

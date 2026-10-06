@@ -56,7 +56,10 @@ SCHEMAS: dict[str, dict[str, str]] = {
                "출처": "VARCHAR"},
     "kor_value": {"종목코드": "VARCHAR", "기준일": "TIMESTAMP", "지표": "VARCHAR",
                   "값": "DOUBLE"},
+    # 기준금액 = 그 종목을 마지막으로 손봤을 때의 목표 금액. 실시간 평가액이
+    # 아니라 '그때 맞춰 둔 값'입니다. 비중 조절 수량을 계산하는 데 씁니다.
     "kor_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
+                      "기준금액": "DOUBLE",
                       "종목명": "VARCHAR", "섹터": "VARCHAR"},
     "global_ticker": {"Name": "VARCHAR", "Symbol": "VARCHAR", "Exchange": "VARCHAR",
                       "Sector": "VARCHAR", "Market Cap": "DOUBLE",

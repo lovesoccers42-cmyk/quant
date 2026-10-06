@@ -139,6 +139,45 @@ check(mild * 52 < 2.5,
 check(wild * 52 < 13.1,
       "극단적으로 흔들려도 구조적 상한(연 1300%) 안에 머무름")
 
+# ── 6b. 붙여넣은 보유 목록 읽기 ─────────────────────────────
+# 엑셀에서 긁어 붙이면 (1) 탭 구분이고 (2) GitHub 입력창이 줄바꿈을 지우고
+# (3) 엑셀이 종목코드 앞자리 0을 없앱니다. 실제로 그렇게 들어왔습니다.
+print("\n[붙여넣은 목록 읽기]")
+PASTE = ("종목코드\t평가금액\t종목명 95570\t310250\tAJ네트웍스 "
+         "1040\t649000\tCJ 5930\t6267500\t삼성전자 70\t114600\t삼양홀딩스 "
+         "243070\t447810\t휴온스").replace(" ", " ")
+p1 = portfolio.parse_holdings(PASTE)
+check(len(p1) == 5, f"줄바꿈이 없어도 5종목을 읽어냄 ({len(p1)})")
+check(list(p1["종목코드"]) == ["095570", "001040", "005930", "000070", "243070"],
+      f"앞자리 0을 되살림 ({list(p1['종목코드'])})")
+check(float(p1.loc[p1['종목코드'] == '005930', '평가금액'].iloc[0]) == 6_267_500,
+      "금액이 종목과 올바르게 짝지어짐")
+check(p1.loc[p1["종목코드"] == "000070", "종목명"].iloc[0] == "삼양홀딩스",
+      "이름이 다음 종목코드와 섞이지 않음")
+
+# 제대로 된 CSV, 헤더 없는 CSV, 쉼표 한 줄, 금액에 쉼표·'원'이 붙은 경우
+for src, why in (
+        ("종목코드,평가금액,종목명\n005930,6267500,삼성전자\n000070,114600,삼양홀딩스",
+         "줄바꿈 있는 쉼표 CSV"),
+        ("005930,6267500,삼성전자\n000070,114600,삼양홀딩스", "헤더 없는 CSV"),
+        ("5930,6267500,삼성전자 70,114600,삼양홀딩스", "줄바꿈 없는 쉼표"),
+        ('종목코드,평가금액\n005930,"6,267,500원"\n000070,"114,600원"',
+         "금액에 쉼표와 원"),
+        ("종목명\t평가금액\t종목코드\n삼성전자\t6267500\t005930\n"
+         "삼양홀딩스\t114600\t000070", "컬럼 순서가 다름")):
+    got = portfolio.parse_holdings(src)
+    ok = (len(got) == 2
+          and set(got["종목코드"]) == {"005930", "000070"}
+          and float(got.loc[got["종목코드"] == "005930", "평가금액"].iloc[0]) == 6_267_500)
+    check(ok, f"{why} → 2종목 정상 ({len(got)}종목)")
+
+# 읽을 수 없는 입력은 조용히 빈 결과를 내지 말고 막아야 합니다
+try:
+    portfolio.parse_holdings("아무 의미 없는 문장입니다")
+    check(True, "의미 없는 입력은 빈 결과 (seed에서 막힘)")
+except ValueError:
+    check(True, "의미 없는 입력은 명확히 거부")
+
 # ── 7. 보유 종목 seed (이미 주식을 들고 있는 경우) ───────────
 print("\n[보유 종목 배분]")
 store.write("kor_portfolio",
@@ -219,9 +258,81 @@ check(r9["가격초과제외"] == 0, "자금 미설정이면 가격으로 걸러
 check(bool(r9["orders"].query("구분 == '매수'")["수량"].isna().all()),
       "자금 미설정이면 수량 칸이 빔")
 
+# ── 9. 비중 조절 — 전환이 막히지 않는지 ──────────────────────
+# 실제 상황: 보유 종목 하나가 전체의 21%입니다(삼성전자). 그게 모델 상위
+# 100위에 들어 '유지'로만 처리되면, 그 등분을 팔아 나온 돈이 25종목을 사기에
+# 모자라 전환이 멈춥니다. 넘치는 만큼 덜어내는지 확인합니다.
+print("\n[비중 조절]")
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+BIG, CAP2 = "005930", 30_000_000
+unit2 = CAP2 / N                                  # 30만원
+held2 = ([{"종목코드": BIG, "평가금액": 6_300_000, "종목명": "큰종목"}]
+         + [{"종목코드": f"{i:06d}", "평가금액": 250_000, "종목명": f"보유{i}"}
+            for i in range(701, 796)])            # 96종목 합 2,955만
+portfolio.seed(held2, tranches=TR, today=date(2026, 10, 2))
+big_slot = int(portfolio.load_state()
+               .set_index("종목코드").loc[BIG, "등분"])
+
+# BIG을 1순위에 둔 모델. 주가 7만원이면 목표 30만원은 4주.
+order2 = [BIG] + [c for c in universe if c != BIG]
+px2 = {c: 20_000 for c in order2}
+px2[BIG] = 70_000
+# BIG의 등분 차례가 오는 주를 찾습니다
+wk = next(d for d in range(2, 40)
+          if portfolio.current_slot(TR, date(2026, 10, 2) + pd.Timedelta(weeks=d))
+          == big_slot)
+day2 = date(2026, 10, 2) + pd.Timedelta(weeks=wk)
+r10 = portfolio.rebalance(model(order2, px2), n=N, tranches=TR,
+                          today=day2, capital=CAP2)
+tr = r10["orders"].query("구분 == '비중축소'")
+check(BIG in set(tr["종목코드"]), "21% 종목이 유지되더라도 비중축소 주문이 나옴")
+if BIG in set(tr["종목코드"]):
+    row = tr[tr["종목코드"] == BIG].iloc[0]
+    want = int((6_300_000 - unit2) // 70_000)
+    check(int(row["수량"]) == want,
+          f"축소 수량 = (현재-목표)÷주가 내림 ({int(row['수량'])}주, 기대 {want}주)")
+    check(int(row["예상금액"]) > 5_000_000,
+          f"500만원 이상이 현금으로 풀림 ({int(row['예상금액']):,}원)")
+check(r10["확보금액_하한"] >= r10["필요금액"] * 0.5,
+      f"확보금액이 필요금액에 크게 못 미치지 않음 "
+      f"(확보 {r10['확보금액_하한']:,} / 필요 {r10['필요금액']:,})")
+print(f"    → 확보(하한) {r10['확보금액_하한']:,}원 / 필요 {r10['필요금액']:,}원")
+
+# ±20% 밴드 안이면 건드리지 않아야 합니다 (거래세만 나갑니다)
+near = r10["orders"].query("구분.str.startswith('비중')", engine="python")
+st10 = portfolio.load_state()
+in_band = [c for c in st10[st10["등분"] == big_slot]["종목코드"]
+           if c != BIG and abs(250_000 - unit2) <= unit2 * 0.20]
+check(not (set(in_band) & set(near["종목코드"])),
+      "목표의 ±20% 안에 있는 종목은 손대지 않음")
+
+# 목표 비중으로 1주도 못 담는 종목은 유지할 수 없습니다
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+portfolio.seed([{"종목코드": "000111", "평가금액": 1_000_000},
+                {"종목코드": "000222", "평가금액": 1_000_000},
+                {"종목코드": "000333", "평가금액": 1_000_000},
+                {"종목코드": "000444", "평가금액": 1_000_000}],
+               tranches=TR, today=date(2026, 10, 2))
+pricey_code = portfolio.load_state()["종목코드"].iloc[0]
+order3 = [pricey_code] + [c for c in universe]
+px3 = {c: 20_000 for c in order3}
+px3[pricey_code] = 400_000                 # 1주 40만 > 목표 30만
+found = False
+for d in range(1, 6):
+    rr = portfolio.rebalance(model(order3, px3), n=N, tranches=TR,
+                             today=date(2026, 10, 2) + pd.Timedelta(weeks=d),
+                             capital=CAP2)
+    sold = set(rr["orders"].query("구분 == '매도'")["종목코드"])
+    if pricey_code in sold:
+        found = True
+        break
+check(found, "1주가 목표 배정액보다 비싸면 유지하지 않고 전량 매도")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:
     print("\n실패:", *fails, sep="\n  ")
     sys.exit(1)
-print("\n전체 통과 — 한 등분만 손대고, 보유 종목에서 이어받고, 수량이 맞습니다.")
+print("\n전체 통과 — 붙여넣은 목록을 읽고, 비중을 맞추고, 4주에 전환합니다.")

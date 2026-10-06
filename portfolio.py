@@ -18,8 +18,11 @@
 """
 from __future__ import annotations
 
+import csv
 import logging
+import re
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -35,6 +38,119 @@ def _sizes(n: int, tranches: int) -> list[int]:
     return [n // tranches + (1 if j < n % tranches else 0) for j in range(tranches)]
 
 
+# 보유 종목 목록을 사람이 붙여넣은 그대로 받아들이기 위한 준비 ───────────
+#
+# 증권사 화면이나 엑셀에서 긁어 붙이면 세 가지가 어긋납니다.
+#   1. 구분자가 쉼표가 아니라 탭입니다 (엑셀 복사의 기본)
+#   2. GitHub Actions 입력창은 줄바꿈을 보존하지 않습니다 — 100줄이 한 줄로
+#      뭉쳐서 들어옵니다
+#   3. 엑셀이 종목코드의 앞자리 0을 지웁니다 (005930 → 5930, 000070 → 70)
+# 이걸 전부 사람에게 고치라고 하는 대신 코드가 받아들입니다.
+
+_HEADER_WORDS = ("종목코드", "코드", "티커", "종목", "평가금액", "금액", "평가",
+                 "종목명", "이름", "name", "code", "ticker")
+
+# 줄바꿈이 사라진 한 줄에서 레코드 경계를 찾습니다. 이름 뒤의 공백 다음에
+# '숫자 + 구분자'가 오면 거기가 다음 종목의 시작입니다.
+_RECORD_SPLIT = re.compile(r" +(?=\d{1,6}[\t,;|])")
+
+
+def _to_number(v) -> float:
+    """'1,234,500원' 같은 값도 숫자로. 못 읽으면 0."""
+    if isinstance(v, (int, float)):
+        return float(v) if pd.notna(v) else 0.0
+    s = re.sub(r"[^\d.\-]", "", str(v))
+    try:
+        return float(s) if s not in ("", "-", ".") else 0.0
+    except ValueError:
+        return 0.0
+
+
+def parse_holdings(src) -> pd.DataFrame:
+    """보유 종목 목록을 어떤 모양으로 받아도 종목코드·평가금액·종목명으로.
+
+    받아들이는 것: DataFrame, 레코드 리스트, CSV/TSV 파일 경로, 그리고
+    엑셀에서 복사해 붙여넣은 문자열(탭 구분, 줄바꿈이 없어도 됨).
+    """
+    if isinstance(src, pd.DataFrame):
+        df = src.copy()
+    elif isinstance(src, (list, tuple)):
+        df = pd.DataFrame(list(src))
+    else:
+        text = str(src)
+        # 파일 경로로 들어왔으면 읽어 옵니다. 붙여넣은 내용이 그대로 들어올
+        # 수도 있으므로, 경로로 해석할 수 없는 문자열은 조용히 넘깁니다
+        # (윈도에서는 Path()가 특수문자에 예외를 던집니다).
+        if len(text) < 4096 and "\n" not in text and "\t" not in text:
+            try:
+                p = Path(text)
+                if p.exists():
+                    text = p.read_text(encoding="utf-8-sig")
+            except (OSError, ValueError):
+                pass
+
+        lines = [ln for ln in text.replace("\r\n", "\n").split("\n") if ln.strip()]
+        if len(lines) <= 1:
+            # 줄바꿈이 사라진 경우 — 레코드 경계를 되살립니다
+            lines = [ln for ln in _RECORD_SPLIT.split(text.strip()) if ln.strip()]
+
+        if "\t" in lines[0]:
+            # csv 모듈을 씁니다 — "6,267,500원" 처럼 따옴표 안에 구분자가
+            # 들어 있는 칸을 직접 split으로 자르면 숫자가 쪼개집니다.
+            parts = list(csv.reader(lines, delimiter="\t"))
+        elif "," in lines[0]:
+            parts = list(csv.reader(lines))
+        else:
+            parts = [re.split(r"\s+", ln.strip()) for ln in lines]
+        parts = [[c.strip() for c in row] for row in parts if any(c.strip() for c in row)]
+
+        first = parts[0]
+        has_header = any(any(w in c.lower() for w in _HEADER_WORDS) for c in first)
+        body = parts[1:] if has_header else parts
+
+        cols = ["종목코드", "평가금액", "종목명"]
+        if has_header:
+            # 헤더가 있으면 순서가 달라도 맞춰 줍니다
+            idx = {}
+            for i, c in enumerate(first):
+                lc = c.lower()
+                if any(w in lc for w in ("종목코드", "코드", "티커", "code", "ticker")):
+                    idx.setdefault("종목코드", i)
+                elif any(w in lc for w in ("평가금액", "금액", "평가")):
+                    idx.setdefault("평가금액", i)
+                elif any(w in lc for w in ("종목명", "이름", "name")):
+                    idx.setdefault("종목명", i)
+            if "종목코드" in idx and "평가금액" in idx:
+                rows = [{k: (r[i] if i < len(r) else "") for k, i in idx.items()}
+                        for r in body]
+                df = pd.DataFrame(rows)
+            else:
+                df = pd.DataFrame(body).iloc[:, :3]
+                df.columns = cols[:df.shape[1]]
+        else:
+            df = pd.DataFrame(body).iloc[:, :3]
+            df.columns = cols[:df.shape[1]]
+
+    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+    if "종목코드" not in df.columns or "평가금액" not in df.columns:
+        raise ValueError(
+            "'종목코드'와 '평가금액'을 찾지 못했습니다. "
+            f"읽어낸 컬럼: {list(df.columns)}. "
+            "엑셀에서 '종목코드 / 평가금액 / 종목명' 세 칸을 복사해 붙여넣으세요.")
+
+    # 엑셀이 지워버린 앞자리 0을 되살립니다 (70 → 000070)
+    df["종목코드"] = (df["종목코드"].astype(str)
+                   .str.replace(r"\D", "", regex=True).str.zfill(6))
+    df["평가금액"] = df["평가금액"].map(_to_number)
+    if "종목명" not in df.columns:
+        df["종목명"] = ""
+    df["종목명"] = df["종목명"].fillna("").astype(str).str.strip()
+
+    df = df[(df["종목코드"].str.len() == 6) & (df["종목코드"] != "000000")]
+    df = df[df["평가금액"] > 0].drop_duplicates("종목코드")
+    return df[["종목코드", "평가금액", "종목명"]].reset_index(drop=True)
+
+
 def seed(holdings, *, tranches: int = 4, today: date | None = None) -> dict:
     """이미 들고 있는 종목을 등분에 나눠 넣습니다 — 전환의 출발점.
 
@@ -46,23 +162,17 @@ def seed(holdings, *, tranches: int = 4, today: date | None = None) -> dict:
     팔아 그 돈으로 새 종목을 사기 때문에, 금액이 쏠려 있으면 어떤 주에는
     살 돈이 모자라고 어떤 주에는 남습니다.
 
-    holdings: [{"종목코드": "005930", "평가금액": 3_200_000}, ...]
-              또는 같은 컬럼을 가진 DataFrame.
+    holdings: parse_holdings가 받아들이는 모든 형태 — DataFrame, 레코드 리스트,
+              CSV/TSV 경로, 엑셀에서 복사한 문자열.
     """
     today = today or date.today()
     tranches = max(1, int(tranches))
 
-    df = pd.DataFrame(holdings).copy()
+    df = parse_holdings(holdings)
     if df.empty:
-        raise ValueError("보유 종목이 비어 있습니다.")
-    for col in ("종목코드", "평가금액"):
-        if col not in df.columns:
-            raise ValueError(f"'{col}' 컬럼이 필요합니다 (받은 컬럼: {list(df.columns)})")
-    df["종목코드"] = df["종목코드"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
-    df["평가금액"] = pd.to_numeric(df["평가금액"], errors="coerce").fillna(0.0)
-    df = df[df["평가금액"] > 0].drop_duplicates("종목코드")
-    if df.empty:
-        raise ValueError("평가금액이 0보다 큰 보유 종목이 없습니다.")
+        raise ValueError(
+            "읽어낼 보유 종목이 없습니다. 종목코드가 6자리 숫자이고 "
+            "평가금액이 0보다 큰 줄이 하나도 없습니다.")
 
     # 큰 종목부터 '지금 가장 가벼운 등분'에 넣습니다. 금액 균형을 맞추는
     # 가장 단순한 방법이고, 종목 수가 적을 때도 최선에 가깝게 나뉩니다.
@@ -73,6 +183,7 @@ def seed(holdings, *, tranches: int = 4, today: date | None = None) -> dict:
         j = int(min(range(tranches), key=lambda k: totals[k]))
         totals[j] += float(r["평가금액"])
         rows.append({"종목코드": r["종목코드"], "등분": j, "편입일": today,
+                     "기준금액": float(r["평가금액"]),
                      "종목명": str(r.get("종목명", "") or ""), "섹터": ""})
 
     state = pd.DataFrame(rows)
@@ -110,10 +221,14 @@ def _affordable(codes, price_map, unit_krw: float):
 
 
 def load_state() -> pd.DataFrame:
+    cols = ["종목코드", "등분", "편입일", "기준금액", "종목명", "섹터"]
     df = store.read(STATE)
     if df.empty:
-        return pd.DataFrame(columns=["종목코드", "등분", "편입일", "종목명", "섹터"])
+        return pd.DataFrame(columns=cols)
     df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
+    # 기준금액은 나중에 추가된 컬럼입니다 — 예전 파일에는 없습니다.
+    if "기준금액" not in df.columns:
+        df["기준금액"] = np.nan
     return df
 
 
@@ -156,12 +271,14 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     state = load_state()
     first = state.empty
 
+    trims: list[dict] = []          # 유지하지만 비중을 조절할 종목
     if first:
         # 첫 실행 — 전액을 한 번에 넣습니다. 순위를 등분에 번갈아 나눠
         # 어느 한 등분만 상위권을 독차지하지 않게 합니다.
         rows, slot_used = [], None
         for i, code in enumerate(target[:n]):
-            rows.append({"종목코드": code, "등분": i % tranches, "편입일": today})
+            rows.append({"종목코드": code, "등분": i % tranches, "편입일": today,
+                         "기준금액": unit or np.nan})
         new_state = pd.DataFrame(rows)
         buys, sells, keeps = [r["종목코드"] for r in rows], [], []
     else:
@@ -169,20 +286,61 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         mine = state[state["등분"] == slot_used]["종목코드"].tolist()
         others = state[state["등분"] != slot_used]["종목코드"].tolist()
         tset = set(target[:n])
+        base = dict(zip(state["종목코드"], pd.to_numeric(state["기준금액"],
+                                                     errors="coerce")))
 
         keeps = [c for c in mine if c in tset]          # 아직 상위면 그대로
         sells = [c for c in mine if c not in tset]
+
+        # 목표 비중으로 1주도 담을 수 없는 종목은 들고 있을 수 없습니다.
+        # (종목당 30만원인데 1주가 50만원이면 1%를 만들 방법이 없습니다)
+        if unit > 0 and price_map:
+            unholdable = [c for c in keeps if (price_map.get(c) or 0) > unit]
+            if unholdable:
+                keeps = [c for c in keeps if c not in set(unholdable)]
+                sells += unholdable
+
+        # ── 비중 조절 ────────────────────────────────────────
+        # 유지하는 종목이라도 금액이 목표에서 크게 벗어나 있으면 맞춰야
+        # 합니다. 이게 없으면 전환이 막힙니다: 삼성전자가 전체의 21%인데
+        # '상위 100위라서 유지'로 끝내면, 그 등분을 팔아 나온 돈이 25종목을
+        # 사기에 모자랍니다. 넘치는 만큼 덜어내야 새 종목을 살 돈이 생깁니다.
+        #
+        # ±20% 밴드를 둡니다. 몇 %p 차이로 매번 사고팔면 거래세(0.20%)만
+        # 나갑니다.
+        if unit > 0 and price_map:
+            for c in keeps:
+                cur, px = base.get(c), price_map.get(c)
+                if not px or px <= 0 or cur is None or not np.isfinite(cur):
+                    continue
+                gap = cur - unit
+                if abs(gap) <= unit * 0.20:
+                    continue
+                qty = int(abs(gap) // px)
+                if qty <= 0:
+                    continue
+                trims.append({"종목코드": c, "구분": "비중축소" if gap > 0 else "비중확대",
+                              "수량": qty, "주가": px,
+                              "현재기준": round(cur), "목표": round(unit)})
+
         blocked = set(keeps) | set(others)
         need = sizes[slot_used] - len(keeps)
         buys = [c for c in target if c not in blocked][:max(need, 0)]
 
         kept = state[state["등분"] != slot_used]
+        # 이번에 손본 등분은 전부 목표 금액에 맞춰졌으므로 기준금액을 갱신합니다.
+        # 안 건드린 등분은 예전 기준금액을 그대로 둡니다 — 그 등분 차례가
+        # 올 때 다시 맞춥니다.
         rows = [{"종목코드": c, "등분": slot_used,
-                 "편입일": state.loc[state["종목코드"] == c, "편입일"].iloc[0]}
+                 "편입일": state.loc[state["종목코드"] == c, "편입일"].iloc[0],
+                 "기준금액": unit if unit > 0 else base.get(c, np.nan)}
                 for c in keeps]
-        rows += [{"종목코드": c, "등분": slot_used, "편입일": today} for c in buys]
-        new_state = pd.concat([kept[["종목코드", "등분", "편입일"]],
-                               pd.DataFrame(rows)], ignore_index=True)
+        rows += [{"종목코드": c, "등분": slot_used, "편입일": today,
+                  "기준금액": unit or np.nan} for c in buys]
+        state_cols = ["종목코드", "등분", "편입일", "기준금액"]
+        new_state = pd.concat([kept[state_cols],
+                               pd.DataFrame(rows, columns=state_cols)],
+                              ignore_index=True)
 
     # 이름·섹터를 붙여 저장 (사람이 읽을 수 있게)
     new_state["종목명"] = new_state["종목코드"].map(
@@ -213,7 +371,33 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
                                 and pd.notna(r["qvm"]) else None)})
         return out
 
-    orders = pd.DataFrame(rows_for(sells, "매도") + rows_for(buys, "매수"))
+    def trim_rows():
+        out = []
+        for t in trims:
+            c = t["종목코드"]
+            r = info.loc[c] if c in info.index else None
+            out.append({"구분": t["구분"], "종목코드": c,
+                        "종목명": (r[name] if r is not None and name in info.columns else ""),
+                        "섹터": (r[sector] if r is not None and sector in info.columns else ""),
+                        "주가": round(t["주가"]),
+                        "수량": t["수량"],
+                        "예상금액": round(t["수량"] * t["주가"]),
+                        "qvm": (round(float(r["qvm"]), 4)
+                                if r is not None and "qvm" in info.columns
+                                and pd.notna(r["qvm"]) else None)})
+        return out
+
+    orders = pd.DataFrame(rows_for(sells, "매도") + trim_rows()
+                          + rows_for(buys, "매수"))
+
+    # 이번 주 현금 수지 — 파는 돈으로 사는 돈을 댈 수 있는지.
+    # 모자라면 사람이 알아야 합니다. 조용히 주문서를 내밀면 증권사 앱에서
+    # 주문이 거부되고, 그게 왜인지 알 수가 없습니다.
+    매도대금 = sum(float(t["수량"]) * float(t["주가"])
+                for t in trims if t["구분"] == "비중축소")
+    매수대금 = sum(float(r["예상금액"] or 0) for r in rows_for(buys, "매수"))
+    매수대금 += sum(float(t["수량"]) * float(t["주가"])
+                 for t in trims if t["구분"] == "비중확대")
 
     return {
         "첫실행": first,
@@ -222,8 +406,13 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         "목표종목수": n,
         "보유종목수": len(new_state),
         "매도": len(sells), "매수": len(buys), "유지": len(keeps),
+        "비중조절": len(trims),
         "종목당배정액": round(unit) if unit > 0 else None,
         "가격초과제외": len(too_pricey),
+        # 전량매도 종목의 금액은 보유 수량을 몰라 셀 수 없습니다.
+        # 그래서 '비중축소로 확보되는 금액'만 셉니다 — 하한입니다.
+        "확보금액_하한": round(매도대금),
+        "필요금액": round(매수대금),
         "orders": orders,
         "holdings": new_state.sort_values(["등분", "종목코드"]).reset_index(drop=True),
     }
