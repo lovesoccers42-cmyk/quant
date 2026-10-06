@@ -14,6 +14,14 @@ on:
         description: "주가 수집 동시 요청 수 (차단되면 낮추세요)"
         required: false
         default: "6"
+      seed_csv:
+        description: "처음 한 번만 — 보유 종목 CSV를 그대로 붙여넣으세요 (종목코드,평가금액,종목명)"
+        required: false
+        default: ""
+      tranches:
+        description: "등분 수 (주간 4등분이면 4)"
+        required: false
+        default: "4"
 
 concurrency:
   group: quant-pipeline
@@ -40,6 +48,10 @@ jobs:
       QUANT_TG_CHAT_ID: ${{ secrets.QUANT_TG_CHAT_ID }}
       QUANT_TICKER_LIMIT: ${{ github.event.inputs.ticker_limit || '0' }}
       QUANT_PRICE_WORKERS: ${{ github.event.inputs.price_workers || '6' }}
+      # 총 운용금액 — 주문서에 '몇 주 살지'를 적는 데 씁니다.
+      # 설정 > Secrets and variables > Actions > Variables 에 숫자만 넣으세요.
+      # 비워 두면 수량 칸이 빈 주문서가 나옵니다.
+      QUANT_CAPITAL_KRW: ${{ vars.QUANT_CAPITAL_KRW || '0' }}
       TZ: Asia/Seoul
 
     steps:
@@ -60,8 +72,23 @@ jobs:
             || echo "저장소가 아직 없습니다 — 월간 실행을 먼저 돌려주세요."
           ls -lh data || true
 
-      - name: 일간 파이프라인 실행
-        run: python run_weekly.py 4
+      - name: 오프라인 점검 (커밋 누락 잡기)
+        run: python tools/test_portfolio.py
+
+      - name: 보유 종목 등분 배분 (seed — 처음 한 번만)
+        if: ${{ github.event.inputs.seed_csv != '' }}
+        env:
+          # 입력을 셸에 직접 끼워 넣지 않습니다 — 따옴표나 특수문자가
+          # 들어오면 명령이 깨지고, 그보다 더 나쁜 일도 생길 수 있습니다.
+          SEED_CSV: ${{ github.event.inputs.seed_csv }}
+        run: |
+          printf '%s\n' "$SEED_CSV" > holdings.csv
+          echo "--- 붙여넣은 보유 종목 ---"
+          cat holdings.csv
+          python run_weekly.py seed holdings.csv "${{ github.event.inputs.tranches || '4' }}"
+
+      - name: 주간 주문서 만들기
+        run: python run_weekly.py "${{ github.event.inputs.tranches || '4' }}"
 
       - name: 저장소·결과 올리기
         if: always()

@@ -33,14 +33,17 @@ def check(cond, msg):
         fails.append(msg)
 
 
-def model(order):
+def model(order, prices=None):
     """order: 종목코드 순위 리스트 (앞이 좋은 종목)."""
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "종목코드": order,
         "종목명": [f"종목{c}" for c in order],
         "SEC_NM_KOR": [f"S{int(c) % 7}" for c in order],
         "qvm": [round(-2 + i * 0.01, 4) for i in range(len(order))],
     })
+    if prices is not None:
+        df["종가"] = [float(prices.get(c, 10_000)) for c in order]
+    return df
 
 
 N, TR = 100, 4
@@ -136,9 +139,89 @@ check(mild * 52 < 2.5,
 check(wild * 52 < 13.1,
       "극단적으로 흔들려도 구조적 상한(연 1300%) 안에 머무름")
 
+# ── 7. 보유 종목 seed (이미 주식을 들고 있는 경우) ───────────
+print("\n[보유 종목 배분]")
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+
+# 금액이 들쭉날쭉한 8종목 3,000만원
+amounts = [9_000_000, 7_000_000, 5_000_000, 4_000_000,
+           2_000_000, 1_500_000, 1_000_000, 500_000]
+held = [{"종목코드": f"{i:06d}", "평가금액": a, "종목명": f"보유{i}"}
+        for i, a in enumerate(amounts, start=901)]
+sd = portfolio.seed(held, tranches=TR, today=date(2026, 10, 9))
+check(sd["보유종목수"] == 8, f"8종목 전부 배분 ({sd['보유종목수']})")
+check(abs(sd["총평가액"] - sum(amounts)) < 1, "총평가액이 맞음")
+check(sum(sd["등분별금액"]) == sum(amounts), "등분 금액 합이 총액과 같음")
+print("    등분별 금액비중:", [f"{s:.1%}" for s in sd["등분별비중"]])
+# 금액 기준으로 나눴으니 종목 수가 아니라 금액이 고르게 나와야 합니다
+check(max(sd["등분별비중"]) - min(sd["등분별비중"]) < 0.10,
+      f"금액이 고르게 나뉨 (최대-최소 {max(sd['등분별비중']) - min(sd['등분별비중']):.1%})")
+st7 = portfolio.load_state()
+check(len(st7) == 8 and st7["종목코드"].duplicated().sum() == 0, "중복 없이 저장")
+check(set(st7["등분"]) <= set(range(TR)), "등분 번호가 범위 안")
+
+# 종목이 등분 수보다 적으면 금액이 쏠려 경고가 떠야 합니다
+sd2 = portfolio.seed([{"종목코드": "000001", "평가금액": 3_000_000}],
+                     tranches=TR, today=date(2026, 10, 9))
+check(sd2["금액균형경고"] is not None, "1종목만 있으면 금액 불균형을 경고")
+
+# 잘못된 입력은 조용히 넘어가지 않아야 합니다
+for bad, why in (([], "빈 목록"),
+                 ([{"종목코드": "000001"}], "평가금액 컬럼 없음"),
+                 ([{"종목코드": "000001", "평가금액": 0}], "평가금액 0")):
+    try:
+        portfolio.seed(bad, tranches=TR)
+        check(False, f"{why}을 그냥 받아들임")
+    except ValueError:
+        check(True, f"{why}은 명확히 거부")
+
+# seed 후 첫 주문은 '첫 실행'이 아니어야 합니다 (100종목 신규매수 방지)
+portfolio.seed(held, tranches=TR, today=date(2026, 10, 9))
+r7 = portfolio.rebalance(model(universe), n=N, tranches=TR,
+                         today=date(2026, 10, 16))
+check(not r7["첫실행"], "seed 후에는 첫 실행으로 보지 않음")
+check(r7["매수"] <= 25, f"첫 주에 25종목 이내만 매수 ({r7['매수']}종목)")
+check(r7["매도"] <= len([c for c in portfolio.load_state()["종목코드"]]),
+      "보유한 것보다 많이 팔지 않음")
+print(f"    → 전환 1주차: 매도 {r7['매도']} · 매수 {r7['매수']}")
+
+# ── 8. 수량 계산과 1주 단위 제약 ────────────────────────────
+print("\n[수량 계산]")
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+CAP = 30_000_000                       # 3,000만원 → 종목당 30만원
+# 상위 5종목을 '1주에 50만원'으로 만들어 배정액을 넘게 합니다
+pricey = {c: 500_000 for c in universe[:5]}
+px = {c: pricey.get(c, 20_000) for c in universe}
+r8 = portfolio.rebalance(model(universe, px), n=N, tranches=TR,
+                         today=date(2026, 11, 6), capital=CAP)
+check(r8["종목당배정액"] == 300_000, f"종목당 배정액 30만원 ({r8['종목당배정액']:,})")
+check(r8["가격초과제외"] == 5, f"배정액보다 비싼 5종목 제외 ({r8['가격초과제외']})")
+bought = set(r8["orders"].query("구분 == '매수'")["종목코드"])
+check(not (bought & set(universe[:5])), "1주도 못 사는 종목은 주문에 없음")
+check(r8["보유종목수"] == N, f"그래도 100종목을 채움 ({r8['보유종목수']})")
+qty = r8["orders"].query("구분 == '매수'")["수량"]
+check(bool((qty > 0).all()), "모든 매수 종목의 수량이 1주 이상")
+check(int(qty.iloc[0]) == 300_000 // 20_000, f"수량 = 배정액÷주가 내림 ({int(qty.iloc[0])}주)")
+amt = r8["orders"].query("구분 == '매수'")["예상금액"]
+check(bool((amt <= 300_000 + 1).all()), "예상금액이 배정액을 넘지 않음")
+print(f"    → 매수 {len(qty)}종목 · 1종목당 {int(qty.iloc[0])}주 "
+      f"· 합계 {amt.sum():,.0f}원")
+
+# 자금을 안 주면 수량 칸이 비어야 합니다 (조용히 1주로 넣으면 안 됨)
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+r9 = portfolio.rebalance(model(universe, px), n=N, tranches=TR,
+                         today=date(2026, 11, 6))
+check(r9["종목당배정액"] is None, "자금 미설정이면 배정액 없음")
+check(r9["가격초과제외"] == 0, "자금 미설정이면 가격으로 걸러내지 않음")
+check(bool(r9["orders"].query("구분 == '매수'")["수량"].isna().all()),
+      "자금 미설정이면 수량 칸이 빔")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:
     print("\n실패:", *fails, sep="\n  ")
     sys.exit(1)
-print("\n전체 통과 — 매주 한 등분만 손대고 회전율이 안 늘어납니다.")
+print("\n전체 통과 — 한 등분만 손대고, 보유 종목에서 이어받고, 수량이 맞습니다.")

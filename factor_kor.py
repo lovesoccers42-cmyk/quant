@@ -135,7 +135,9 @@ def run() -> dict:
     k_bind = k.reindex(ticker_list["종목코드"]).reset_index()
     k_bind.columns = ["종목코드", "K_ratio"]
 
-    data_bind = (ticker_list[["종목코드", "종목명"]]
+    # 종가를 같이 들고 갑니다 — 주간 주문서에서 '몇 주 살지'를 계산하는 데
+    # 필요합니다. 한국 주식은 1주 단위라 배정액을 주가로 나눠야 수량이 나옵니다.
+    data_bind = (ticker_list[["종목코드", "종목명", "종가"]]
                  .merge(sector_list[["CMP_CD", "SEC_NM_KOR"]],
                         how="left", left_on="종목코드", right_on="CMP_CD")
                  .merge(fs_pivot[["ROE", "GPA", "CFO"]], how="left", on="종목코드")
