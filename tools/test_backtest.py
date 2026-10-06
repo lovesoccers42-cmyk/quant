@@ -465,6 +465,45 @@ try:
 except ValueError as e:
     check("weighting" in str(e), "모르는 비중 방식은 명확히 거부")
 
+# ── 4e. 섹터 중립 선택 ──────────────────────────────────────
+# 모멘텀까지 섹터 안에서만 재면 '그 섹터가 통째로 오른다'는 정보가 지워집니다.
+# 설정으로 그걸 풀 수 있어야 하고, 실제로 점수가 달라져야 합니다.
+print("\n[섹터 중립]")
+import factor_core as _fc  # noqa: E402
+
+check(_fc.neutral_spec("all") == _fc.SECTOR_NEUTRAL_ALL, "'all' 해석")
+check(_fc.neutral_spec("no_mom") == _fc.SECTOR_NEUTRAL_NO_MOM, "'no_mom' 해석")
+check(_fc.neutral_spec("none") == (), "'none' 해석")
+check(_fc.neutral_spec("quality,value") == ("quality", "value"), "직접 나열 해석")
+try:
+    _fc.neutral_spec("quality,모멘텀")
+    check(False, "모르는 팩터명을 그냥 받아들임")
+except ValueError as e:
+    check("모르는 팩터" in str(e), "모르는 팩터명은 명확히 거부")
+
+_all = backtest.run(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+                    min_turnover=0, tranches=4, weighting="score",
+                    rebal_band=0.20, rank_buffer=0.5, sector_neutral="all")
+_nom = backtest.run(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+                    min_turnover=0, tranches=4, weighting="score",
+                    rebal_band=0.20, rank_buffer=0.5, sector_neutral="no_mom")
+check(len(_all["perf"]) == len(_nom["perf"]), "두 설정의 회차 수가 같음")
+_same = set(_all["holdings"]["종목코드"]) == set(_nom["holdings"]["종목코드"])
+check(not _same, "모멘텀 중립을 풀면 고르는 종목이 달라짐")
+check("섹터중립" in _nom["summary"]["제약"], "요약에 섹터중립 설정이 적힘")
+print(f"    섹터중립 all → {_all['summary']['포트폴리오']['누적수익률']}% · "
+      f"no_mom → {_nom['summary']['포트폴리오']['누적수익률']}%")
+check(abs(float(_all["summary"]["통계"]["IC 평균"])
+          - float(_nom["summary"]["통계"]["IC 평균"])) > 1e-6,
+      "점수가 달라졌으니 IC도 달라짐")
+
+# ── 4f. 연도별 표 ───────────────────────────────────────────
+_y = _nom["yearly"]
+check(len(_y) >= 2, f"연도별 표가 생김 ({len(_y)}개 연도)")
+check("지수대비%p" in _y.columns and "전종목대비%p" in _y.columns,
+      "연도별 표에 지수·전종목 대비가 들어감")
+check(bool((_y["연"].diff().dropna() > 0).all()), "연도가 순서대로 정렬됨")
+
 # ── 5. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
 store.write("kor_price", store.read("kor_price").query("날짜 >= '2025-10-01'"))
 try:

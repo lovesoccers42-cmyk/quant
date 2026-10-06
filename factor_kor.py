@@ -148,7 +148,8 @@ def run() -> dict:
     data_bind = data_bind.drop(["CMP_CD"], axis=1)
 
     port = fc.build_scores(data_bind, symbol="종목코드", sector="SEC_NM_KOR",
-                           weights=config.QVM_WEIGHTS, n_portfolio=len(data_bind))
+                           weights=config.QVM_WEIGHTS, n_portfolio=len(data_bind),
+                           neutral=config.SECTOR_NEUTRAL)
 
     coverage = {k: int(port[k].notna().sum())
                 for k in ("ROE", "PER", "12M", "K_ratio",

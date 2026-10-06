@@ -246,7 +246,7 @@ def _ttm_pivot(fs, cutoff, spec, cache):
 
 
 def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
-              ttm_cache=None):
+              ttm_cache=None, neutral=None):
     """asof 시점에 실제로 알 수 있었던 정보만으로 QVM 점수를 냅니다."""
     got = _ttm_pivot(fs, asof - pd.Timedelta(days=lag_days), spec,
                      ttm_cache if ttm_cache is not None else {})
@@ -313,7 +313,8 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
         return None
 
     scored = fc.build_scores(merged, symbol="symbol", sector="sector",
-                             weights=config.QVM_WEIGHTS, n_portfolio=len(merged))
+                             weights=config.QVM_WEIGHTS, n_portfolio=len(merged),
+                             neutral=neutral)
     return scored.dropna(subset=["qvm"])
 
 
@@ -324,7 +325,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         tranches: int = 1, trend_ma: int = 0, risk_off: float = 0.0,
         cash_rate: float = 0.02, weighting: str = "equal",
         max_weight: float = 0.0, rebal_band: float = 0.0,
-        rank_buffer: float = 0.0) -> dict:
+        rank_buffer: float = 0.0, sector_neutral=None) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -360,6 +361,9 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         _DEFAULT_CAP.get(weighting, 0.0)
     band = max(0.0, float(rebal_band))
     buffer = max(0.0, float(rank_buffer))
+    neutral = fc.neutral_spec(sector_neutral
+                              if sector_neutral is not None
+                              else config.SECTOR_NEUTRAL)
     price, fs, ticker, sector = _load(spec)
 
     if price.empty or fs.empty or ticker.empty:
@@ -427,7 +431,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     for i, t in enumerate(dates[:-1]):
         t_next = dates[i + 1]
         scored = _score_at(t, price_pivot, fs, ticker, sector, shares, spec,
-                           lag_days, ttm_cache)
+                           lag_days, ttm_cache, neutral=neutral)
         if scored is None or scored.empty:
             continue
 
@@ -494,8 +498,14 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             continue
 
         # ── 비중 결정 ────────────────────────────────────────
+        # 점수가중의 순위는 '전체 점수표' 기준으로 매깁니다. 상위 100종목
+        # 안에서만 매기면, 버퍼 구간(101~150위) 종목이 꼴찌 비중을 받고
+        # 100위 안에 들어오는 순간 비중이 급등합니다. 종목 교체를 줄이려고
+        # 버퍼를 넣었는데 그 왕복이 비중 쪽으로 옮겨갈 뿐입니다.
+        rank_order = (scored.dropna(subset=["qvm"])
+                      .sort_values("qvm")["symbol"].astype(str).tolist())
         tw = _target_weights(codes, weighting, shares=shares,
-                             price_pivot=price_pivot, t=t, order=target,
+                             price_pivot=price_pivot, t=t, order=rank_order,
                              cap=cap, vol_window=config.VOL_WINDOW)
 
         if w_state is None or slot is None:
@@ -684,6 +694,12 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                  "score": "점수가중 (qvm 순위에 선형)",
                  "invvol": f"역변동성 ({config.VOL_WINDOW}일 변동성의 역수)",
                  }[weighting],
+        "섹터중립": ("모든 팩터를 섹터 안에서만 비교"
+                 if set(neutral) == set(fc.SECTOR_NEUTRAL_ALL)
+                 else ("섹터 중립 없음 — 전 종목 비교" if not neutral
+                       else f"섹터 안에서만 비교: {', '.join(neutral)}"
+                            f" / 전 종목 비교: "
+                            f"{', '.join(x for x in fc.SECTOR_NEUTRAL_ALL if x not in neutral)}")),
         "순위버퍼": ("없음 — 상위 종목 수 밖으로 밀려나면 바로 매도"
                  if buffer <= 0
                  else f"상위 {top_n}위 안에서 사고, "
@@ -723,10 +739,27 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         for k in ("유동성탈락", "섹터상한탈락"):
             if k in sl.columns:
                 summary["제약"][f"평균 {k}"] = int(sl[k].mean())
+    # 연도별 성과 — 전체 누적 한 줄로는 '언제 이기고 언제 지는지'가 안 보입니다.
+    yearly = pd.DataFrame()
+    if len(perf):
+        yp = perf.copy()
+        yp["연"] = pd.to_datetime(yp["리밸런싱일"]).dt.year
+        cols = {"포트폴리오%": "비용차감수익률", "전종목%": "벤치마크"}
+        if "벤치마크_지수" in yp.columns:
+            cols["지수%"] = "벤치마크_지수"
+        yearly = yp.groupby("연").apply(
+            lambda x: pd.Series({k: ((1 + x[c]).prod() - 1) * 100
+                                 for k, c in cols.items()}),
+            include_groups=False).round(2)
+        if "지수%" in yearly.columns:
+            yearly["지수대비%p"] = (yearly["포트폴리오%"] - yearly["지수%"]).round(2)
+        yearly["전종목대비%p"] = (yearly["포트폴리오%"] - yearly["전종목%"]).round(2)
+        yearly = yearly.reset_index()
+
     holdings = pd.concat(holdings_log, ignore_index=True) if holdings_log else pd.DataFrame()
 
     return {"market": market, "summary": summary, "perf": perf,
-            "holdings": holdings, "ic": pd.DataFrame(ic_log)}
+            "holdings": holdings, "ic": pd.DataFrame(ic_log), "yearly": yearly}
 
 
 def _tstat(x: pd.Series) -> float:

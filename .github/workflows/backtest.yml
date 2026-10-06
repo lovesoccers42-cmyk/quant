@@ -59,6 +59,12 @@ on:
         description: "순위 버퍼 — 상위 N위에서 사고 N×(1+버퍼)위 밖에서 매도. 0.5면 100위에서 사고 150위에서 팜. 0이면 끔"
         required: false
         default: "0.5"
+      sector_neutral:
+        description: "섹터 중립 — all(전부 섹터 내 비교) / no_mom(모멘텀만 전 종목 비교) / none(전부 전 종목 비교)"
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "no_mom", "none"]
 
 concurrency:
   group: quant-backtest
@@ -113,7 +119,8 @@ jobs:
             "${{ github.event.inputs.weighting || 'equal' }}" \
             "${{ github.event.inputs.max_weight || '0' }}" \
             "${{ github.event.inputs.rebal_band || '0.20' }}" \
-            "${{ github.event.inputs.rank_buffer || '0.5' }}"
+            "${{ github.event.inputs.rank_buffer || '0.5' }}" \
+            "${{ github.event.inputs.sector_neutral || 'all' }}"
 
       - name: 결과 올리기
         if: always()

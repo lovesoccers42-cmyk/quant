@@ -189,41 +189,83 @@ def select_portfolio(scored: pd.DataFrame, *, symbol: str, sector: str,
     return out, stats
 
 
+# 어느 팩터를 '섹터 안에서만' 비교할지. 섹터 중립은 공짜가 아닙니다.
+#
+# 밸류·퀄리티는 섹터 안에서 비교하는 게 타당합니다 — 업종마다 PER·ROE 수준이
+# 다르니 은행과 바이오의 PER을 그대로 견주면 업종 베팅이 됩니다.
+#
+# 모멘텀은 다릅니다. 섹터 안에서만 재면 "IT 섹터가 통째로 100% 올랐다"는
+# 정보가 완전히 지워집니다. IT 종목의 모멘텀 점수는 다른 IT 종목 대비로만
+# 매겨지니까요. 섹터 로테이션 수익을 스스로 포기하는 셈입니다.
+SECTOR_NEUTRAL_ALL = ("quality", "value", "momentum")
+SECTOR_NEUTRAL_NO_MOM = ("quality", "value")
+
+_NEUTRAL_PRESETS = {"all": SECTOR_NEUTRAL_ALL,
+                    "no_mom": SECTOR_NEUTRAL_NO_MOM,
+                    "none": ()}
+
+
+def neutral_spec(value) -> tuple:
+    """'all' / 'no_mom' / 'none' / 'quality,value' 를 튜플로."""
+    if value is None:
+        return SECTOR_NEUTRAL_ALL
+    if isinstance(value, (list, tuple, set)):
+        return tuple(value)
+    key = str(value).strip().lower()
+    if key in _NEUTRAL_PRESETS:
+        return _NEUTRAL_PRESETS[key]
+    got = tuple(x.strip() for x in key.split(",") if x.strip())
+    bad = [x for x in got if x not in SECTOR_NEUTRAL_ALL]
+    if bad:
+        raise ValueError(
+            f"섹터 중립 설정에 모르는 팩터가 있습니다: {bad}. "
+            f"쓸 수 있는 값은 {list(_NEUTRAL_PRESETS)} 또는 "
+            f"{list(SECTOR_NEUTRAL_ALL)}의 조합입니다.")
+    return got
+
+
 def build_scores(data_bind: pd.DataFrame, *, symbol: str, sector: str,
-                 weights, n_portfolio: int) -> pd.DataFrame:
+                 weights, n_portfolio: int,
+                 neutral=SECTOR_NEUTRAL_ALL) -> pd.DataFrame:
     """z_quality / z_value / z_momentum / qvm / invest 컬럼을 붙여 반환.
 
     data_bind에는 ROE·GPA·CFO, PBR·PCR·PER·PSR·DY, 12M·K_ratio가 있어야 합니다.
+
+    neutral은 섹터 안에서만 비교할 팩터를 고릅니다. 빠진 팩터는 전 종목을
+    한 줄로 세워 비교하므로 섹터 간 차이가 점수에 그대로 들어옵니다.
     """
     data_bind = data_bind.copy()
+    neutral = neutral_spec(neutral)
 
     # 무배당 종목이 밸류 팩터에서 통째로 빠지지 않도록 DY 결측은 0
     if "DY" in data_bind.columns:
         data_bind["DY"] = data_bind["DY"].fillna(0)
 
-    group = data_bind.set_index([symbol, sector]).groupby(sector)
+    indexed = data_bind.set_index([symbol, sector])
+    group = indexed.groupby(sector)
+
+    def scored(cols, *, asc: bool, key: str):
+        """key가 neutral에 있으면 섹터 안에서, 없으면 전 종목에서 순위를 냅니다."""
+        if key in neutral:
+            return (group[cols].apply(lambda x: col_clean(x, 0.01, asc))
+                    .droplevel(axis=0, level=0))
+        return col_clean(indexed[cols], 0.01, asc)
 
     # 퀄리티 — 높을수록 좋음
-    z_quality = (group[["ROE", "GPA", "CFO"]]
-                 .apply(lambda x: col_clean(x, 0.01, False))
-                 .sum(axis=1, skipna=False).to_frame("z_quality")
-                 .droplevel(axis=0, level=0))
+    z_quality = (scored(["ROE", "GPA", "CFO"], asc=False, key="quality")
+                 .sum(axis=1, skipna=False).to_frame("z_quality"))
     data_bind = data_bind.merge(z_quality, how="left", on=[symbol, sector])
 
     # 밸류 — 낮을수록 좋음, DY만 높을수록 좋음
-    v1 = (group[["PBR", "PCR", "PER", "PSR"]]
-          .apply(lambda x: col_clean(x, 0.01, True)).droplevel(axis=0, level=0))
-    v2 = (group[["DY"]]
-          .apply(lambda x: col_clean(x, 0.01, False)).droplevel(axis=0, level=0))
+    v1 = scored(["PBR", "PCR", "PER", "PSR"], asc=True, key="value")
+    v2 = scored(["DY"], asc=False, key="value")
     z_value = (v1.merge(v2, on=[symbol, sector])
                .sum(axis=1, skipna=False).to_frame("z_value"))
     data_bind = data_bind.merge(z_value, how="left", on=[symbol, sector])
 
     # 모멘텀 — 높을수록 좋음
-    z_mom = (group[["12M", "K_ratio"]]
-             .apply(lambda x: col_clean(x, 0.01, False))
-             .sum(axis=1, skipna=False).to_frame("z_momentum")
-             .droplevel(axis=0, level=0))
+    z_mom = (scored(["12M", "K_ratio"], asc=False, key="momentum")
+             .sum(axis=1, skipna=False).to_frame("z_momentum"))
     data_bind = data_bind.merge(z_mom, how="left", on=[symbol, sector])
 
     # 최종 QVM — 낮을수록 우수

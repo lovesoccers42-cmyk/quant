@@ -45,7 +45,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
          min_turnover: float = -1.0, tranches: int = 1,
          trend_ma: int = 0, risk_off: float = 0.0,
          weighting: str = "", max_weight: float = -1.0,
-         rebal_band: float = -1.0, rank_buffer: float = -1.0) -> int:
+         rebal_band: float = -1.0, rank_buffer: float = -1.0,
+         sector_neutral: str = "") -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -75,7 +76,9 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                        cash_rate=config.CASH_RATE,
                        weighting=weighting, max_weight=float(max_weight),
                        rebal_band=float(rebal_band),
-                       rank_buffer=float(rank_buffer))
+                       rank_buffer=float(rank_buffer),
+                       sector_neutral=(sector_neutral or
+                                       config.SECTOR_NEUTRAL))
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -96,6 +99,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         out.to_excel(xw, sheet_name="리밸런싱", index=False)
         if len(holdings):
             holdings.to_excel(xw, sheet_name="보유종목", index=False)
+        if len(res.get("yearly", [])):
+            res["yearly"].to_excel(xw, sheet_name="연도별", index=False)
         if len(res.get("ic", [])):
             res["ic"].to_excel(xw, sheet_name="신호강도", index=False)
 
@@ -126,6 +131,9 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         print("\n  통계 (t = IR x √기간):")
         for k, v in s["통계"].items():
             print(f"   · {k}: {v}")
+    if len(res.get("yearly", [])):
+        print("\n  연도별 (%):")
+        print("   " + res["yearly"].to_string(index=False).replace("\n", "\n   "))
     print("\n  제약:")
     for k, v in s.get("제약", {}).items():
         print(f"   · {k}: {v}")
@@ -150,5 +158,6 @@ if __name__ == "__main__":
     mw = float(sys.argv[11]) if len(sys.argv) > 11 else -1.0
     bnd = float(sys.argv[12]) if len(sys.argv) > 12 else -1.0
     buf = float(sys.argv[13]) if len(sys.argv) > 13 else -1.0
+    sn = sys.argv[14] if len(sys.argv) > 14 else ""
     sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff,
-                  wgt, mw, bnd, buf))
+                  wgt, mw, bnd, buf, sn))

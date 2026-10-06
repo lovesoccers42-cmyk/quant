@@ -87,7 +87,8 @@ def run() -> dict:
     data_bind = data_bind.drop_duplicates("Symbol")
 
     port = fc.build_scores(data_bind, symbol="Symbol", sector="Sector",
-                           weights=config.QVM_WEIGHTS, n_portfolio=len(data_bind))
+                           weights=config.QVM_WEIGHTS, n_portfolio=len(data_bind),
+                           neutral=config.SECTOR_NEUTRAL)
 
     # 어느 팩터에서 종목이 떨어져 나갔는지 리포트에 남깁니다
     coverage = {k: int(port[k].notna().sum())
