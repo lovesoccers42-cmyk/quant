@@ -246,7 +246,7 @@ def _ttm_pivot(fs, cutoff, spec, cache):
 
 
 def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
-              ttm_cache=None, neutral=None):
+              ttm_cache=None, neutral=None, weights=None, trend_stock=0):
     """asof 시점에 실제로 알 수 있었던 정보만으로 QVM 점수를 냅니다."""
     got = _ttm_pivot(fs, asof - pd.Timedelta(days=lag_days), spec,
                      ttm_cache if ttm_cache is not None else {})
@@ -292,6 +292,19 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
     pivot["12M"] = ret_list["12M"].reindex(pivot.index)
     pivot["K_ratio"] = k.reindex(pivot.index)
 
+    # 변동성 (저변동성 팩터용) — 최근 VOL_WINDOW 거래일 일간수익률 표준편차
+    pxf = px.ffill()
+    dr = pxf.tail(config.VOL_WINDOW + 1).pct_change(fill_method=None)
+    pivot["VOL"] = dr.std(ddof=1).reindex(pivot.index)
+
+    # 종목 단위 추세 — 자기 이동평균 위에 있는가 (미래 미사용)
+    if trend_stock and trend_stock > 0:
+        ma_s = pxf.tail(trend_stock).mean()
+        pivot["위추세"] = (last_px.reindex(pivot.index)
+                        >= ma_s.reindex(pivot.index))
+    else:
+        pivot["위추세"] = True
+
     # 섹터 붙이기
     base = ticker[[spec.t_sym, spec.t_name]].copy()
     base.columns = ["symbol", "name"]
@@ -305,7 +318,8 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
                      ticker[spec.sector_col].astype(str))))
     base["sector"] = base["sector"].fillna("기타")
 
-    cols = ["ROE", "GPA", "CFO", "PER", "PBR", "PCR", "PSR", "DY", "12M", "K_ratio"]
+    cols = ["ROE", "GPA", "CFO", "PER", "PBR", "PCR", "PSR", "DY", "12M",
+            "K_ratio", "VOL", "위추세"]
     merged = base.merge(pivot[cols].reset_index().rename(columns={sym_col: "symbol"}),
                         on="symbol", how="inner")
     merged = merged.drop_duplicates("symbol")
@@ -313,8 +327,11 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
         return None
 
     scored = fc.build_scores(merged, symbol="symbol", sector="sector",
-                             weights=config.QVM_WEIGHTS, n_portfolio=len(merged),
-                             neutral=neutral)
+                             weights=weights or config.QVM_WEIGHTS,
+                             n_portfolio=len(merged), neutral=neutral)
+    # 추세 필터 — 하락 추세인 종목은 아예 후보에서 뺍니다
+    if "위추세" in scored.columns:
+        scored = scored[scored["위추세"].fillna(True)]
     return scored.dropna(subset=["qvm"])
 
 
@@ -325,7 +342,9 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         tranches: int = 1, trend_ma: int = 0, risk_off: float = 0.0,
         cash_rate: float = 0.02, weighting: str = "equal",
         max_weight: float = 0.0, rebal_band: float = 0.0,
-        rank_buffer: float = 0.0, sector_neutral=None) -> dict:
+        rank_buffer: float = 0.0, sector_neutral=None,
+        use_lowvol: bool = False, trend_stock: int = 0,
+        max_sector_weight: float = 0.0) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -364,6 +383,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     neutral = fc.neutral_spec(sector_neutral
                               if sector_neutral is not None
                               else config.SECTOR_NEUTRAL)
+    qvm_weights = config.QVML_WEIGHTS if use_lowvol else config.QVM_WEIGHTS
+    sec_w_cap = max(0.0, float(max_sector_weight))
     price, fs, ticker, sector = _load(spec)
 
     if price.empty or fs.empty or ticker.empty:
@@ -431,7 +452,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     for i, t in enumerate(dates[:-1]):
         t_next = dates[i + 1]
         scored = _score_at(t, price_pivot, fs, ticker, sector, shares, spec,
-                           lag_days, ttm_cache, neutral=neutral)
+                           lag_days, ttm_cache, neutral=neutral,
+                           weights=qvm_weights, trend_stock=trend_stock)
         if scored is None or scored.empty:
             continue
 
@@ -502,6 +524,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         # 안에서만 매기면, 버퍼 구간(101~150위) 종목이 꼴찌 비중을 받고
         # 100위 안에 들어오는 순간 비중이 급등합니다. 종목 교체를 줄이려고
         # 버퍼를 넣었는데 그 왕복이 비중 쪽으로 옮겨갈 뿐입니다.
+        sec_map = (dict(zip(scored["symbol"].astype(str), scored["sector"]))
+                   if sec_w_cap > 0 else None)
         rank_order = (scored.dropna(subset=["qvm"])
                       .sort_values("qvm")["symbol"].astype(str).tolist())
         tw = _target_weights(codes, weighting, shares=shares,
@@ -554,6 +578,38 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             tot = float(w_new.sum())
             w_new = (w_new / tot) if tot > 0 else tw
 
+        # ── 보유 기준 섹터 비중 상한 ────────────────────────
+        # select_portfolio의 섹터 상한은 '살 때' 종목 수만 제한합니다.
+        # 4등분으로 나눠 사고 순위 버퍼로 계속 들고 있으면 보유가 누적돼
+        # 상한을 넘습니다 — 캡 40%를 걸고도 한 섹터가 54%까지 갔습니다.
+        # 이건 비중 자체를 누르고, 깎은 몫을 다른 섹터에 비례 배분합니다.
+        sec_trim = 0.0
+        if sec_w_cap > 0 and sec_map:
+            secs = pd.Series({c: sec_map.get(c, "기타") for c in w_new.index})
+            for _ in range(20):
+                tot_by = w_new.groupby(secs).sum()
+                over = tot_by[tot_by > sec_w_cap + 1e-12]
+                if over.empty:
+                    break
+                for sname, sw in over.items():
+                    mem = secs[secs == sname].index
+                    scale = sec_w_cap / float(sw)
+                    sec_trim += float(w_new.loc[mem].sum()) * (1 - scale)
+                    w_new.loc[mem] = w_new.loc[mem] * scale
+                free = secs[~secs.isin(over.index)].index
+                room = 1.0 - float(w_new.sum())
+                if len(free) and room > 0:
+                    base = float(w_new.loc[free].sum())
+                    if base > 0:
+                        w_new.loc[free] += room * (w_new.loc[free] / base)
+                    else:
+                        w_new.loc[free] += room / len(free)
+                else:
+                    break
+            tot = float(w_new.sum())
+            if tot > 0:
+                w_new = w_new / tot
+
         # 상한을 크게 넘은 종목은 차례를 기다리지 않고 깎습니다.
         # 깎는 거래는 아래 회전율에 그대로 잡혀 비용을 뭅니다.
         breach = 0
@@ -584,6 +640,11 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         w_state = grown / gsum if gsum > 0 else wv
         top10 = float(wv.sort_values(ascending=False).head(10).sum())
         wmax = float(wv.max())
+        max_sec_w = 0.0
+        if sec_map:
+            max_sec_w = float(wv.groupby(
+                pd.Series({c: sec_map.get(c, "기타") for c in wv.index})
+            ).sum().max())
 
         # 벤치마크 — 같은 기간 전 종목 동일가중
         bwin = price_pivot.loc[t:t_next].ffill()
@@ -668,7 +729,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                      "벤치마크": bench_ret, "벤치마크_유동성": bench_liq,
                      "벤치마크_지수": bench_idx,
                      "턴오버": turnover, "최대종목비중": wmax,
-                     "상위10비중": top10, "상한초과정리": breach})
+                     "상위10비중": top10, "상한초과정리": breach,
+                     "최대섹터비중": max_sec_w, "섹터상한깎음": sec_trim})
 
         info = scored.drop_duplicates("symbol").set_index("symbol")
         info.index = info.index.astype(str)
@@ -694,6 +756,12 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                  "score": "점수가중 (qvm 순위에 선형)",
                  "invvol": f"역변동성 ({config.VOL_WINDOW}일 변동성의 역수)",
                  }[weighting],
+        "저변동성팩터": ("켬 (QVML — 네 팩터 1/4씩)" if use_lowvol
+                     else "끔 (QVM — 변동성 정보 없음)"),
+        "종목추세필터": ("없음" if not trend_stock or trend_stock <= 0
+                   else f"종목이 자기 {trend_stock}일 이동평균 아래면 후보 제외"),
+        "보유섹터비중상한": ("없음 — 살 때 종목 수만 제한(누적되면 넘침)"
+                     if sec_w_cap <= 0 else f"한 섹터 보유비중 최대 {sec_w_cap:.0%}"),
         "섹터중립": ("모든 팩터를 섹터 안에서만 비교"
                  if set(neutral) == set(fc.SECTOR_NEUTRAL_ALL)
                  else ("섹터 중립 없음 — 전 종목 비교" if not neutral
@@ -724,6 +792,9 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                     else f"시장지수 {trend_ma}일 이동평균 아래면 주식비중 {risk_off:.0%}"
                          f" · 현금 이자 연 {cash_rate:.1%}"),
     }
+    if "최대섹터비중" in perf.columns and float(perf["최대섹터비중"].max()) > 0:
+        summary["제약"]["실제 최대섹터비중 평균"] = f"{perf['최대섹터비중'].mean():.1%}"
+        summary["제약"]["실제 최대섹터비중 최악"] = f"{perf['최대섹터비중'].max():.1%}"
     if "최대종목비중" in perf.columns:
         summary["제약"]["실제 최대종목비중 평균"] = f"{perf['최대종목비중'].mean():.2%}"
         summary["제약"]["실제 최대종목비중 최악"] = f"{perf['최대종목비중'].max():.2%}"

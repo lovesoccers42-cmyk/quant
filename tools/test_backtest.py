@@ -504,6 +504,66 @@ check("지수대비%p" in _y.columns and "전종목대비%p" in _y.columns,
       "연도별 표에 지수·전종목 대비가 들어감")
 check(bool((_y["연"].diff().dropna() > 0).all()), "연도가 순서대로 정렬됨")
 
+# ── 4g. 저변동성 팩터 / 종목 추세 필터 / 보유 섹터 비중 상한 ──
+print("\n[리스크 레버 3종]")
+_base = dict(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+             min_turnover=0, tranches=4, weighting="score",
+             rebal_band=0.20, rank_buffer=0.5, sector_neutral="no_mom")
+
+_lv = backtest.run(**_base, use_lowvol=True)
+check(len(_lv["perf"]) > 3, f"저변동성 팩터로 돌아감 ({len(_lv['perf'])}회차)")
+check("켬" in _lv["summary"]["제약"]["저변동성팩터"], "요약에 저변동성 설정이 적힘")
+_plain = backtest.run(**_base)
+check(set(_lv["holdings"]["종목코드"]) != set(_plain["holdings"]["종목코드"]),
+      "저변동성을 넣으면 고르는 종목이 달라짐")
+_v1 = float(_lv["summary"]["포트폴리오"]["연변동성"])
+_v0 = float(_plain["summary"]["포트폴리오"]["연변동성"])
+print(f"    연변동성: QVM {_v0}% → QVML {_v1}% · "
+      f"MDD {_plain['summary']['포트폴리오']['최대낙폭']}% → "
+      f"{_lv['summary']['포트폴리오']['최대낙폭']}%")
+
+# VOL 컬럼 없이 4개 가중치를 주면 조용히 3개로 돌지 말고 막아야 합니다
+import factor_core as _fc2  # noqa: E402
+try:
+    _fc2.build_scores(pd.DataFrame({"s": ["a", "b"], "sec": ["x", "x"],
+                                    "ROE": [1, 2], "GPA": [1, 2], "CFO": [1, 2],
+                                    "PBR": [1, 2], "PCR": [1, 2], "PER": [1, 2],
+                                    "PSR": [1, 2], "DY": [0, 0],
+                                    "12M": [1, 2], "K_ratio": [1, 2]}),
+                      symbol="s", sector="sec", weights=[.25] * 4, n_portfolio=2)
+    check(False, "VOL 없이 저변동성을 요청했는데 그냥 돌아감")
+except ValueError as e:
+    check("VOL" in str(e), "VOL 컬럼이 없으면 명확히 거부")
+
+_ts = backtest.run(**_base, trend_stock=120)
+check(len(_ts["perf"]) > 3, f"종목 추세 필터로 돌아감 ({len(_ts['perf'])}회차)")
+check("120일" in _ts["summary"]["제약"]["종목추세필터"], "요약에 추세 필터가 적힘")
+check(set(_ts["holdings"]["종목코드"]) != set(_plain["holdings"]["종목코드"]),
+      "추세 필터가 종목 선택을 바꿈")
+
+_sw = backtest.run(**_base, max_sector_weight=0.30)
+_p = _sw["perf"]
+check("최대섹터비중" in _p.columns, "섹터 비중이 기록됨")
+worst = float(_p["최대섹터비중"].max())
+check(worst <= 0.30 + 1e-6, f"보유 섹터 비중이 상한을 지킴 (최악 {worst:.1%})")
+w_no = float(_plain["perf"]["최대섹터비중"].max()) if "최대섹터비중" in _plain["perf"] else 0
+print(f"    최대섹터비중 최악: 상한없음 {w_no:.1%} → 상한30% {worst:.1%}")
+# 상한 30%는 이 합성 데이터에서 안 걸립니다(자연 최악 25.1%). 깎는 동작
+# 자체는 반드시 걸리는 값으로 따로 확인합니다 — 안 그러면 "상한을 지켰다"가
+# "아무 일도 안 했다"와 구분되지 않습니다.
+_sw2 = backtest.run(**_base, max_sector_weight=0.15)
+_p2 = _sw2["perf"]
+check(float(_p2["최대섹터비중"].max()) <= 0.15 + 1e-6,
+      f"빡빡한 상한 15%도 지킴 (최악 {float(_p2['최대섹터비중'].max()):.1%})")
+check(float(_p2["섹터상한깎음"].sum()) > 0,
+      f"실제로 깎은 기록이 남음 (합계 {float(_p2['섹터상한깎음'].sum()):.3f})")
+check(float(_p["섹터상한깎음"].sum()) == 0,
+      "안 걸리는 상한에서는 깎지 않음 (불필요한 거래 없음)")
+for _r, _tag in ((_lv, "QVML"), (_ts, "추세필터"), (_sw, "섹터비중상한")):
+    _pp = _r["perf"]
+    check(abs(float(_pp["수익률"].abs().max())) < 5, f"{_tag}: 수익률이 상식 범위")
+    check(bool((_pp["턴오버"] <= 1 + 1e-9).all()), f"{_tag}: 회전율 0~100%")
+
 # ── 5. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
 store.write("kor_price", store.read("kor_price").query("날짜 >= '2025-10-01'"))
 try:

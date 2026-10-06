@@ -46,7 +46,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
          trend_ma: int = 0, risk_off: float = 0.0,
          weighting: str = "", max_weight: float = -1.0,
          rebal_band: float = -1.0, rank_buffer: float = -1.0,
-         sector_neutral: str = "") -> int:
+         sector_neutral: str = "", use_lowvol: int = -1,
+         trend_stock: int = -1, max_sector_weight: float = -1.0) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -78,7 +79,14 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                        rebal_band=float(rebal_band),
                        rank_buffer=float(rank_buffer),
                        sector_neutral=(sector_neutral or
-                                       config.SECTOR_NEUTRAL))
+                                       config.SECTOR_NEUTRAL),
+                       use_lowvol=(bool(config.USE_LOWVOL) if use_lowvol < 0
+                                   else bool(use_lowvol)),
+                       trend_stock=(config.TREND_STOCK_MA if trend_stock < 0
+                                    else int(trend_stock)),
+                       max_sector_weight=(config.MAX_SECTOR_WEIGHT
+                                          if max_sector_weight < 0
+                                          else float(max_sector_weight)))
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -93,7 +101,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         # 엑셀에서는 전부 % 단위로 통일합니다. 예전에는 벤치마크_유동성만
         # 분수로 남아 있어, 엑셀을 다시 읽어 계산할 때 100배 틀렸습니다.
         for c in ("수익률", "비용차감수익률", "벤치마크", "벤치마크_유동성", "벤치마크_지수", "턴오버",
-                  "최대종목비중", "상위10비중"):
+                  "최대종목비중", "상위10비중",
+                  "최대섹터비중", "섹터상한깎음"):
             if c in out.columns:
                 out[c] = (out[c] * 100).round(3)
         out.to_excel(xw, sheet_name="리밸런싱", index=False)
@@ -159,5 +168,8 @@ if __name__ == "__main__":
     bnd = float(sys.argv[12]) if len(sys.argv) > 12 else -1.0
     buf = float(sys.argv[13]) if len(sys.argv) > 13 else -1.0
     sn = sys.argv[14] if len(sys.argv) > 14 else ""
+    lv = int(sys.argv[15]) if len(sys.argv) > 15 else -1
+    ts = int(sys.argv[16]) if len(sys.argv) > 16 else -1
+    sw = float(sys.argv[17]) if len(sys.argv) > 17 else -1.0
     sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff,
-                  wgt, mw, bnd, buf, sn))
+                  wgt, mw, bnd, buf, sn, lv, ts, sw))

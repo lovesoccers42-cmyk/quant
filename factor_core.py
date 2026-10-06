@@ -197,8 +197,8 @@ def select_portfolio(scored: pd.DataFrame, *, symbol: str, sector: str,
 # 모멘텀은 다릅니다. 섹터 안에서만 재면 "IT 섹터가 통째로 100% 올랐다"는
 # 정보가 완전히 지워집니다. IT 종목의 모멘텀 점수는 다른 IT 종목 대비로만
 # 매겨지니까요. 섹터 로테이션 수익을 스스로 포기하는 셈입니다.
-SECTOR_NEUTRAL_ALL = ("quality", "value", "momentum")
-SECTOR_NEUTRAL_NO_MOM = ("quality", "value")
+SECTOR_NEUTRAL_ALL = ("quality", "value", "momentum", "lowvol")
+SECTOR_NEUTRAL_NO_MOM = ("quality", "value", "lowvol")
 
 _NEUTRAL_PRESETS = {"all": SECTOR_NEUTRAL_ALL,
                     "no_mom": SECTOR_NEUTRAL_NO_MOM,
@@ -268,11 +268,30 @@ def build_scores(data_bind: pd.DataFrame, *, symbol: str, sector: str,
              .sum(axis=1, skipna=False).to_frame("z_momentum"))
     data_bind = data_bind.merge(z_mom, how="left", on=[symbol, sector])
 
-    # 최종 QVM — 낮을수록 우수
-    final = (data_bind[[symbol, "z_quality", "z_value", "z_momentum"]]
-             .set_index(symbol).apply(safe_z))
-    final.columns = ["quality", "value", "momentum"]
-    qvm = (final * list(weights)).sum(axis=1, skipna=False).to_frame("qvm")
+    # 저변동성 — 낮을수록 좋음. weights가 4개일 때만 씁니다.
+    #
+    # 왜 넣는가: QVM에는 '얼마나 흔들리는 종목인가'라는 정보가 아예 없습니다.
+    # 그래서 낙폭을 줄일 수단이 모델 안에 하나도 없었습니다. 저변동 종목이
+    # 위험 조정 수익에서 앞선다는 건 가장 재현성이 높은 이상현상입니다.
+    use_lowvol = len(list(weights)) >= 4
+    cols = ["z_quality", "z_value", "z_momentum"]
+    names_ = ["quality", "value", "momentum"]
+    if use_lowvol:
+        if "VOL" not in data_bind.columns:
+            raise ValueError(
+                "저변동성 팩터를 쓰려면 'VOL' 컬럼(최근 변동성)이 필요합니다. "
+                "weights를 3개로 주면 기존 QVM으로 동작합니다.")
+        z_vol = (scored(["VOL"], asc=True, key="lowvol")
+                 .sum(axis=1, skipna=False).to_frame("z_lowvol"))
+        data_bind = data_bind.merge(z_vol, how="left", on=[symbol, sector])
+        cols.append("z_lowvol")
+        names_.append("lowvol")
+
+    # 최종 점수 — 낮을수록 우수
+    final = data_bind[[symbol] + cols].set_index(symbol).apply(safe_z)
+    final.columns = names_
+    qvm = (final * list(weights)[:len(names_)]).sum(
+        axis=1, skipna=False).to_frame("qvm")
 
     port = data_bind.merge(qvm, on=symbol)
     port["invest"] = np.where(port["qvm"].rank() <= n_portfolio, "Y", "N")

@@ -65,6 +65,20 @@ on:
         default: "all"
         type: choice
         options: ["all", "no_mom", "none"]
+      use_lowvol:
+        description: "저변동성 팩터 — 1이면 QVM→QVML (네 팩터 1/4씩). 낙폭을 줄이는 모델 내부 레버"
+        required: false
+        default: "0"
+        type: choice
+        options: ["0", "1"]
+      trend_stock:
+        description: "종목 단위 추세 필터 — 종목이 자기 N일선 아래면 후보 제외. 0이면 끔, 표준값 200"
+        required: false
+        default: "0"
+      max_sector_weight:
+        description: "보유 기준 섹터 비중 상한 (0.3=30%). 0이면 끔. 살 때 종목수 제한과 달리 실제로 걸립니다"
+        required: false
+        default: "0"
 
 concurrency:
   group: quant-backtest
@@ -120,7 +134,10 @@ jobs:
             "${{ github.event.inputs.max_weight || '0' }}" \
             "${{ github.event.inputs.rebal_band || '0.20' }}" \
             "${{ github.event.inputs.rank_buffer || '0.5' }}" \
-            "${{ github.event.inputs.sector_neutral || 'all' }}"
+            "${{ github.event.inputs.sector_neutral || 'all' }}" \
+            "${{ github.event.inputs.use_lowvol || '0' }}" \
+            "${{ github.event.inputs.trend_stock || '0' }}" \
+            "${{ github.event.inputs.max_sector_weight || '0' }}"
 
       - name: 결과 올리기
         if: always()

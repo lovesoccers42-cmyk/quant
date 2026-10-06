@@ -61,6 +61,24 @@ QVM_WEIGHTS = [1 / 3, 1 / 3, 1 / 3]   # quality, value, momentum
 # 모델은 모멘텀까지 섹터 중립으로 재서 '그 섹터가 통째로 오른다'는 정보를
 # 스스로 지우고 있었습니다. 섹터 상한 25%는 봤더라도 담지 못하게 막았습니다.
 SECTOR_NEUTRAL = os.getenv("QUANT_SECTOR_NEUTRAL", "all").strip().lower()
+
+# 저변동성 팩터를 쓸지. 켜면 QVM → QVML (네 팩터 균등 1/4씩).
+# QVM에는 '얼마나 흔들리는 종목인가'가 아예 없어서, 모델 안에 낙폭을 줄일
+# 수단이 하나도 없었습니다. 백테스트 MDD -41.8%의 유일한 내부 레버입니다.
+USE_LOWVOL = os.getenv("QUANT_USE_LOWVOL", "0").strip() not in ("", "0", "false")
+QVML_WEIGHTS = [0.25, 0.25, 0.25, 0.25]   # quality, value, momentum, lowvol
+
+# 종목 단위 추세 필터 — 종목이 자기 N일 이동평균 아래면 후보에서 제외.
+# 0이면 끔. 전에 실패한 리스크 오버레이는 '시장 지수'로 전량 현금화하는
+# 것이었고(시장이 월평균 +1.52% 오르는 동안 현금 보유), 이건 다릅니다.
+# 시장은 그대로 100% 투자하고, 하락 추세인 '개별 종목'만 피합니다.
+TREND_STOCK_MA = int(os.getenv("QUANT_TREND_STOCK_MA", "0"))
+
+# 보유 기준 섹터 비중 상한 (0이면 끔).
+# 기존 MAX_SECTOR_PCT는 '살 때' 종목 수만 제한합니다. 4등분으로 나눠 사고
+# 순위 버퍼로 유지하다 보면 보유가 누적돼 상한을 넘습니다 — 캡 40%를 걸고도
+# 실제 한 섹터가 54%까지 갔습니다. 이건 보유 비중 자체를 누릅니다.
+MAX_SECTOR_WEIGHT = float(os.getenv("QUANT_MAX_SECTOR_WEIGHT", "0"))
 # 실제로 살 종목 수. 백테스트에서 검증한 값과 같아야 합니다 — 다르면
 # 검증한 것과 다른 걸 사게 됩니다. 9.5년 백테스트 결과:
 #   30종목  비용 후 초과 -10.9%p   (신호를 못 담음)

@@ -147,9 +147,20 @@ def run() -> dict:
     data_bind.loc[data_bind["SEC_NM_KOR"].isnull(), "SEC_NM_KOR"] = "기타"
     data_bind = data_bind.drop(["CMP_CD"], axis=1)
 
-    port = fc.build_scores(data_bind, symbol="종목코드", sector="SEC_NM_KOR",
-                           weights=config.QVM_WEIGHTS, n_portfolio=len(data_bind),
-                           neutral=config.SECTOR_NEUTRAL)
+    # 변동성 (저변동성 팩터용) 과 종목 단위 추세
+    _pf = price_pivot.ffill()
+    _dr = _pf.tail(config.VOL_WINDOW + 1).pct_change(fill_method=None)
+    data_bind["VOL"] = data_bind["종목코드"].map(_dr.std(ddof=1))
+    if config.TREND_STOCK_MA > 0:
+        _ma = _pf.tail(config.TREND_STOCK_MA).mean()
+        _last = _pf.iloc[-1]
+        _up = (_last >= _ma)
+        data_bind = data_bind[data_bind["종목코드"].map(_up).fillna(True)]
+
+    port = fc.build_scores(
+        data_bind, symbol="종목코드", sector="SEC_NM_KOR",
+        weights=(config.QVML_WEIGHTS if config.USE_LOWVOL else config.QVM_WEIGHTS),
+        n_portfolio=len(data_bind), neutral=config.SECTOR_NEUTRAL)
 
     coverage = {k: int(port[k].notna().sum())
                 for k in ("ROE", "PER", "12M", "K_ratio",
