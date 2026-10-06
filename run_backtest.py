@@ -45,7 +45,7 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
          min_turnover: float = -1.0, tranches: int = 1,
          trend_ma: int = 0, risk_off: float = 0.0,
          weighting: str = "", max_weight: float = -1.0,
-         rebal_band: float = -1.0) -> int:
+         rebal_band: float = -1.0, rank_buffer: float = -1.0) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -65,6 +65,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         max_weight = config.MAX_WEIGHT
     if rebal_band < 0:
         rebal_band = config.REBAL_BAND
+    if rank_buffer < 0:
+        rank_buffer = config.RANK_BUFFER
 
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
                        cost_bps=cost_bps, max_sector_pct=max_sector_pct,
@@ -72,7 +74,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                        trend_ma=int(trend_ma), risk_off=float(risk_off),
                        cash_rate=config.CASH_RATE,
                        weighting=weighting, max_weight=float(max_weight),
-                       rebal_band=float(rebal_band))
+                       rebal_band=float(rebal_band),
+                       rank_buffer=float(rank_buffer))
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -86,7 +89,7 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         out = perf.copy()
         # 엑셀에서는 전부 % 단위로 통일합니다. 예전에는 벤치마크_유동성만
         # 분수로 남아 있어, 엑셀을 다시 읽어 계산할 때 100배 틀렸습니다.
-        for c in ("수익률", "비용차감수익률", "벤치마크", "벤치마크_유동성", "턴오버",
+        for c in ("수익률", "비용차감수익률", "벤치마크", "벤치마크_유동성", "벤치마크_지수", "턴오버",
                   "최대종목비중", "상위10비중"):
             if c in out.columns:
                 out[c] = (out[c] * 100).round(3)
@@ -146,5 +149,6 @@ if __name__ == "__main__":
     wgt = sys.argv[10] if len(sys.argv) > 10 else ""
     mw = float(sys.argv[11]) if len(sys.argv) > 11 else -1.0
     bnd = float(sys.argv[12]) if len(sys.argv) > 12 else -1.0
+    buf = float(sys.argv[13]) if len(sys.argv) > 13 else -1.0
     sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff,
-                  wgt, mw, bnd))
+                  wgt, mw, bnd, buf))

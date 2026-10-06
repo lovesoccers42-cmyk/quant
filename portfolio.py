@@ -241,13 +241,18 @@ def current_slot(tranches: int, today: date | None = None) -> int:
 def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
               today: date | None = None, symbol: str = "종목코드",
               name: str = "종목명", sector: str = "SEC_NM_KOR",
-              capital: float = 0.0, close: str = "종가") -> dict:
+              capital: float = 0.0, close: str = "종가",
+              hold_universe=None) -> dict:
     """모델 순위표(picks)를 받아 이번 회차 주문을 계산하고 상태를 갱신합니다.
 
     picks는 qvm 오름차순(좋은 종목이 위)으로 정렬돼 있어야 합니다.
 
     capital > 0 이면 종목당 배정액(capital ÷ n)으로 매수 수량을 계산하고,
     1주 가격이 배정액보다 비싼 종목은 후보에서 빼고 다음 순위로 채웁니다.
+
+    hold_universe를 주면 순위 버퍼로 동작합니다 — 살 때는 picks 상위 n위
+    안에서만 고르고, 팔 때는 hold_universe 밖으로 밀려나야 팝니다. 백테스트와
+    같은 규칙이어야 하므로 반드시 같은 값을 쓰세요(model_kr_hold.parquet).
     """
     today = today or date.today()
     tranches = max(1, int(tranches))
@@ -285,12 +290,16 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         slot_used = current_slot(tranches, today)
         mine = state[state["등분"] == slot_used]["종목코드"].tolist()
         others = state[state["등분"] != slot_used]["종목코드"].tolist()
-        tset = set(target[:n])
+        buy_set = set(target[:n])
+        # 유지 판정은 넓은 명단으로 (순위 버퍼). 안 주면 예전처럼 상위 n위.
+        hold_set = ({str(c).zfill(6) for c in hold_universe}
+                    if hold_universe is not None and len(hold_universe)
+                    else buy_set)
         base = dict(zip(state["종목코드"], pd.to_numeric(state["기준금액"],
                                                      errors="coerce")))
 
-        keeps = [c for c in mine if c in tset]          # 아직 상위면 그대로
-        sells = [c for c in mine if c not in tset]
+        keeps = [c for c in mine if c in hold_set]      # 버퍼 안이면 그대로
+        sells = [c for c in mine if c not in hold_set]
 
         # 목표 비중으로 1주도 담을 수 없는 종목은 들고 있을 수 없습니다.
         # (종목당 30만원인데 1주가 50만원이면 1%를 만들 방법이 없습니다)
@@ -323,9 +332,14 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
                               "수량": qty, "주가": px,
                               "현재기준": round(cur), "목표": round(unit)})
 
+        # 새로 담는 건 상위 n위에서만 — 버퍼 구간(n위~버퍼)은
+        # '들고 있으면 유지, 없으면 안 산다'는 중립 구간입니다.
         blocked = set(keeps) | set(others)
         need = sizes[slot_used] - len(keeps)
-        buys = [c for c in target if c not in blocked][:max(need, 0)]
+        buys = [c for c in target[:n] if c not in blocked][:max(need, 0)]
+        if len(buys) < max(need, 0):   # 상위 n위가 모자라면 그 밖에서 보충
+            buys += [c for c in target if c not in blocked
+                     and c not in set(buys)][:max(need, 0) - len(buys)]
 
         kept = state[state["등분"] != slot_used]
         # 이번에 손본 등분은 전부 목표 금액에 맞춰졌으므로 기준금액을 갱신합니다.
@@ -399,8 +413,11 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
                                 and pd.notna(r["qvm"]) else None)})
         return out
 
+    ORDER_COLS = ["구분", "종목코드", "종목명", "섹터", "주가", "수량", "예상금액", "qvm"]
+    # 거래가 없는 주에도 컬럼은 있어야 합니다. 빈 DataFrame을 그냥 돌려주면
+    # 받는 쪽에서 orders["구분"]이 KeyError로 터집니다.
     orders = pd.DataFrame(rows_for(sells, "매도") + trim_rows()
-                          + rows_for(buys, "매수"))
+                          + rows_for(buys, "매수"), columns=ORDER_COLS)
 
     # 이번 주 현금 수지 — 파는 돈으로 사는 돈을 댈 수 있는지.
     # 모자라면 사람이 알아야 합니다. 조용히 주문서를 내밀면 증권사 앱에서

@@ -163,6 +163,18 @@ def run() -> dict:
         port, symbol="종목코드", sector="SEC_NM_KOR", n=config.N_PORTFOLIO,
         max_sector_pct=config.MAX_SECTOR_PCT, eligible=eligible)
 
+    # 유지 판정용 넓은 명단 (순위 버퍼). 살 때는 위의 invest(상위 100위,
+    # 섹터 상한 적용)에서만 고르고, 팔 때는 이 명단 밖으로 밀려나야 팝니다.
+    # 100위 경계를 오가는 종목을 매달 팔고 되사는 왕복 거래를 막습니다.
+    # 섹터 상한을 여기 적용하지 않는 이유: 상한은 새로 담을 때 지키는 규칙이고,
+    # 이미 들고 있는 종목을 억지로 팔아야 할 이유는 아닙니다.
+    hold_n = int(round(config.N_PORTFOLIO * (1 + config.RANK_BUFFER)))
+    hold_pool = port[port["종목코드"].astype(str).isin(eligible)] if eligible else port
+    hold_list = (hold_pool.dropna(subset=["qvm"]).nsmallest(hold_n, "qvm")
+                 [["종목코드", "종목명", "SEC_NM_KOR", "qvm"]]
+                 .reset_index(drop=True))
+    hold_list.to_parquet(config.OUTPUT_DIR / "model_kr_hold.parquet", index=False)
+
     codes = [c for c in invest["종목코드"] if c in price_pivot.columns]
 
     tech = _technical_signals(price_pivot, codes)

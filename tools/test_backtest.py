@@ -404,6 +404,60 @@ check(float(_wb["perf"]["턴오버"].iloc[1:].min()) >= 0,
       "밴드를 켜도 교체가 필요한 회차는 거래가 일어남")
 check("무매매밴드" in _wb["summary"]["제약"], "요약에 밴드 설정이 적힘")
 
+# ── 4c. 순위 버퍼 — 종목 교체가 실제로 줄어야 한다 ───────────
+# 지난번에 밴드의 효과를 측정하지 않고 주장했다가 틀렸습니다. 이번에는
+# 보유 명단에서 교체 수를 직접 세서 확인합니다.
+print("\n[순위 버퍼]")
+
+
+def churn_of(res):
+    """회차당 교체 종목 수 / 보유 종목 수."""
+    h = res["holdings"]
+    g = h.groupby("리밸런싱일")["종목코드"].apply(set)
+    ds = list(g.index)
+    ch = [len(g[ds[i]] - g[ds[i - 1]]) for i in range(1, len(ds))]
+    n = float(h.groupby("리밸런싱일").size().mean())
+    return (float(np.mean(ch)) / n if ch and n else 0.0), float(np.mean(ch) if ch else 0)
+
+
+_ib = backtest.run(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+                   min_turnover=0, tranches=4, weighting="equal",
+                   rebal_band=0.20, rank_buffer=0.0)
+_yb = backtest.run(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+                   min_turnover=0, tranches=4, weighting="equal",
+                   rebal_band=0.20, rank_buffer=0.5)
+c0, n0 = churn_of(_ib)
+c1, n1 = churn_of(_yb)
+print(f"    교체: 버퍼 없음 {n0:.2f}종목/회차 ({c0:.1%}) "
+      f"→ 버퍼 1.5배 {n1:.2f}종목/회차 ({c1:.1%})")
+check(c1 < c0, f"버퍼가 종목 교체를 줄임 ({c0:.1%} → {c1:.1%})")
+t_no = float(_ib["perf"]["턴오버"].iloc[1:].mean())
+t_yes = float(_yb["perf"]["턴오버"].iloc[1:].mean())
+print(f"    회전율: {t_no:.2%} → {t_yes:.2%}")
+check(t_yes < t_no, f"버퍼가 총 회전율을 낮춤 ({t_no:.2%} → {t_yes:.2%})")
+check(len(_yb["holdings"].groupby("리밸런싱일").size().unique()) <= 2,
+      "버퍼를 켜도 보유 종목 수는 유지됨")
+check("순위버퍼" in _yb["summary"]["제약"], "요약에 버퍼 설정이 적힘")
+
+# ── 4d. 지수 벤치마크 ────────────────────────────────────────
+# 실제 대안은 '전 종목 동일가중'이 아니라 지수 ETF입니다. 같은 날짜로 재야
+# 수익도 낙폭도 비교됩니다.
+print("\n[지수 벤치마크]")
+_p = _yb["perf"]
+check("벤치마크_지수" in _p.columns, "리밸런싱 표에 지수 수익률이 들어감")
+check(not _p["벤치마크_지수"].isna().any(), "지수 수익률에 빈 값이 없음")
+check(float((_p["벤치마크_지수"] - _p["벤치마크"]).abs().mean()) > 1e-9,
+      "지수(시총가중)와 전종목 동일가중이 서로 다름")
+_key = [k for k in _yb["summary"] if k.startswith("벤치마크(시총상위")]
+check(len(_key) == 1, f"요약에 지수 벤치마크가 실림 ({_key})")
+check("지수대비 초과수익률" in _yb["summary"], "요약에 지수 대비 초과수익률이 실림")
+check("지수대비 낙폭차" in _yb["summary"], "요약에 지수 대비 낙폭차가 실림")
+check("지수 대비 t" in _yb["summary"]["통계"], "통계에 지수 대비 t가 실림")
+print(f"    포트 {_yb['summary']['포트폴리오']['누적수익률']}% · "
+      f"지수 {_yb['summary'][_key[0]]['누적수익률']}% · "
+      f"지수대비 {_yb['summary']['지수대비 초과수익률']}%p · "
+      f"낙폭차 {_yb['summary']['지수대비 낙폭차']}%p")
+
 # 잘못된 방식 이름은 조용히 동일가중으로 넘어가면 안 됩니다
 try:
     backtest.run(market="kr", top_n=30, rebalance="QE", weighting="시총")

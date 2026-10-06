@@ -35,6 +35,9 @@ log = logging.getLogger("quant_agent.backtest")
 
 TRADING_DAYS = 252
 
+# 지수 벤치마크 종목 수 — 시총 상위 N종목 시총가중으로 코스피200을 근사합니다.
+INDEX_N = 200
+
 
 @dataclass(frozen=True)
 class Spec:
@@ -320,7 +323,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         max_sector_pct: float = 1.0, min_turnover: float = 0.0,
         tranches: int = 1, trend_ma: int = 0, risk_off: float = 0.0,
         cash_rate: float = 0.02, weighting: str = "equal",
-        max_weight: float = 0.0, rebal_band: float = 0.0) -> dict:
+        max_weight: float = 0.0, rebal_band: float = 0.0,
+        rank_buffer: float = 0.0) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -355,6 +359,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     cap = float(max_weight) if max_weight and max_weight > 0 else \
         _DEFAULT_CAP.get(weighting, 0.0)
     band = max(0.0, float(rebal_band))
+    buffer = max(0.0, float(rank_buffer))
     price, fs, ticker, sector = _load(spec)
 
     if price.empty or fs.empty or ticker.empty:
@@ -437,6 +442,15 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             max_sector_pct=max_sector_pct, eligible=eligible)
         sel_log.append({"리밸런싱일": t, **sel})
 
+        # 유지 판정용 넓은 명단 (순위 버퍼). qvm이 작을수록 좋은 종목입니다.
+        hold_set: set = set()
+        if buffer > 0:
+            pool_sc = scored
+            if eligible:
+                pool_sc = scored[scored["symbol"].astype(str).isin(eligible)]
+            hold_rank = int(round(top_n * (1 + buffer)))
+            hold_set = set(pool_sc.nsmallest(hold_rank, "qvm")["symbol"].astype(str))
+
         target = [str(c) for c in picks["symbol"] if c in price_pivot.columns]
         if len(target) < 5:
             continue
@@ -451,9 +465,17 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             started = True
         else:
             slot = i % n_tr
-            tset = set(target)
+            # 순위 버퍼 — 살 때는 상위 top_n, 팔 때는 top_n×(1+buffer) 밖으로
+            # 밀려나야 팝니다. 측정해 보니 회전율의 89%가 종목 교체였고, 그
+            # 교체는 100위 경계를 들락날락하는 종목들입니다(99위 → 103위에
+            # 팔고 다음 달 98위에 되사기). 버퍼를 두면 그 왕복이 사라집니다.
+            # 주의: target은 select_portfolio가 돌려준 top_n종목뿐입니다. 그래서
+            # 유지 판정용 명단은 점수표에서 따로 뽑습니다(섹터 상한 없이 순위만).
+            # 섹터 상한은 '새로 담을 때' 지키는 규칙이고, 이미 들고 있는 종목을
+            # 억지로 팔아야 할 이유는 아닙니다.
+            tset = hold_set if buffer > 0 else set(target)
             others = {c for j, s in enumerate(sleeves) if j != slot for c in s}
-            keep = [c for c in sleeves[slot] if c in tset]     # 아직 상위면 유지
+            keep = [c for c in sleeves[slot] if c in tset]     # 버퍼 안이면 유지
             need = sizes[slot] - len(keep)
             if need > 0:
                 blocked = set(keep) | others
@@ -569,6 +591,25 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                 else list(brets.index))
         bench_liq = float(brets.reindex(pool).dropna().mean()) if pool else bench_ret
 
+        # 세 번째 벤치마크 — 시총 상위 200종목 시총가중 (코스피200 근사).
+        #
+        # 이게 진짜 비교 대상입니다. 앞의 두 벤치마크는 '전 종목을 똑같이 샀다면'
+        # 이라는 가상의 포트폴리오인데, 실제 대안은 지수 ETF를 사는 것입니다.
+        # 같은 날짜·같은 방식으로 재야 낙폭까지 사과끼리 비교됩니다 (월말로 잰
+        # 낙폭과 주간으로 잰 낙폭은 비교할 수 없습니다).
+        bench_idx = bench_ret
+        if len(shares):
+            mc = (price_pivot.loc[:t].ffill().iloc[-1]
+                  * shares.reindex(price_pivot.columns))
+            mc = mc.replace([np.inf, -np.inf], np.nan).dropna()
+            big = mc.nlargest(INDEX_N).index
+            iw = mc.reindex(big)
+            ir = brets.reindex(big)
+            ok_i = ir.notna() & iw.notna() & (iw > 0)
+            if int(ok_i.sum()) >= 20:
+                w_i = iw[ok_i] / float(iw[ok_i].sum())
+                bench_idx = float((ir[ok_i] * w_i).sum())
+
         # 점수가 수익률 순위를 맞추는가 (IC) — 상위 N종목으로 압축하기 전에,
         # 그 시점 전 종목의 순위 정보를 그대로 씁니다. 관측이 수백 배 많아
         # 포트폴리오 수익률보다 훨씬 예민하게 신호 유무를 가려냅니다.
@@ -615,6 +656,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                      "종목수": len(codes), "수익률": port_ret,
                      "비용차감수익률": net_ret, "주식비중": expo,
                      "벤치마크": bench_ret, "벤치마크_유동성": bench_liq,
+                     "벤치마크_지수": bench_idx,
                      "턴오버": turnover, "최대종목비중": wmax,
                      "상위10비중": top10, "상한초과정리": breach})
 
@@ -642,6 +684,10 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                  "score": "점수가중 (qvm 순위에 선형)",
                  "invvol": f"역변동성 ({config.VOL_WINDOW}일 변동성의 역수)",
                  }[weighting],
+        "순위버퍼": ("없음 — 상위 종목 수 밖으로 밀려나면 바로 매도"
+                 if buffer <= 0
+                 else f"상위 {top_n}위 안에서 사고, "
+                      f"{int(round(top_n * (1 + buffer)))}위 밖으로 밀려나면 매도"),
         "무매매밴드": ("없음 — 손보는 등분을 매번 목표 비중으로 되맞춤"
                    if band <= 0
                    else f"목표의 ±{band:.0%} 안이면 그대로 둠"),
@@ -704,7 +750,9 @@ def _stats_block(perf: pd.DataFrame, ic: pd.DataFrame) -> dict:
     per_year = len(perf) / max((perf["다음리밸런싱"].iloc[-1]
                                 - perf["리밸런싱일"].iloc[0]).days / 365.25, 1e-9)
     out = {}
-    for label, col in (("전종목 대비", "벤치마크"), ("유동성통과 대비", "벤치마크_유동성")):
+    for label, col in (("전종목 대비", "벤치마크"),
+                       ("유동성통과 대비", "벤치마크_유동성"),
+                       ("지수 대비", "벤치마크_지수")):
         if col not in perf.columns:
             continue
         ex = perf["비용차감수익률"] - perf[col]
@@ -745,6 +793,8 @@ def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
 
     port = stats(perf["누적"], perf["비용차감수익률"])
     bench = stats(perf["누적_벤치마크"], perf["벤치마크"])
+    idx = (stats((1 + perf["벤치마크_지수"]).cumprod(), perf["벤치마크_지수"])
+           if "벤치마크_지수" in perf.columns else None)
 
     return {
         "시장": spec.label,
@@ -759,7 +809,12 @@ def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
         "공시지연가정": f"{lag_days}일",
         "포트폴리오": port,
         "벤치마크(전종목 동일가중)": bench,
+        **({f"벤치마크(시총상위{INDEX_N} 시총가중 = 지수)": idx} if idx else {}),
         "초과수익률": round(port["누적수익률"] - bench["누적수익률"], 2),
+        **({"지수대비 초과수익률":
+            round(port["누적수익률"] - idx["누적수익률"], 2),
+            "지수대비 낙폭차":
+            round(port["최대낙폭"] - idx["최대낙폭"], 2)} if idx else {}),
         "한계": [
             "생존편향: 상장폐지 종목이 데이터에 없어 성과가 과대평가됩니다 (가장 큰 한계)",
             "과거 시가총액은 '그날 종가 × 현재 주식수' 근사 — 증자·감자·분할 미반영. "

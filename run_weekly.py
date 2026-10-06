@@ -57,8 +57,19 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
     if picks.empty:
         raise RuntimeError("모델 결과가 비어 있습니다.")
 
+    hold_path = config.OUTPUT_DIR / "model_kr_hold.parquet"
+    hold_universe = None
+    if hold_path.exists():
+        hold_universe = (pd.read_parquet(hold_path)["종목코드"]
+                         .astype(str).str.zfill(6).tolist())
+        log.info("순위 버퍼 명단 %d종목 사용", len(hold_universe))
+    else:
+        log.warning("model_kr_hold.parquet이 없어 순위 버퍼 없이 돌립니다 "
+                    "— 백테스트와 규칙이 달라집니다")
+
     r = portfolio.rebalance(picks, n=config.N_PORTFOLIO, tranches=tranches,
-                            capital=config.CAPITAL_KRW)
+                            capital=config.CAPITAL_KRW,
+                            hold_universe=hold_universe)
 
     today = f"{date.today():%Y%m%d}"
     name = (f"{config.REPORT_NAME} 한국 주간주문 {today[4:]}_"

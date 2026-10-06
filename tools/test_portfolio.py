@@ -330,9 +330,72 @@ for d in range(1, 6):
         break
 check(found, "1주가 목표 배정액보다 비싸면 유지하지 않고 전량 매도")
 
+# ── 10. 순위 버퍼 — 실전도 백테스트와 같은 규칙인지 ──────────
+# 백테스트는 "100위 안에서 사고 150위 밖에서 판다"로 돌아갑니다. 실전이
+# 그와 다르면 검증한 것과 다른 걸 사고팔게 됩니다.
+print("\n[순위 버퍼 (실전)]")
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+BUF = 1.5
+# 처음 100종목을 담아두고, 다음 주에 순위를 20칸 밀어버립니다.
+portfolio.rebalance(model(universe), n=N, tranches=TR, today=date(2026, 10, 9))
+# 보유 중인 상위 10종목을 '101~110위'로 밀어 넣습니다 — 버퍼 구간입니다.
+# 버퍼가 없으면 팔고, 버퍼가 있으면 들고 있어야 합니다.
+shifted2 = universe[10:110] + universe[:10] + universe[110:]
+hold_u = shifted2[:int(N * BUF)]                  # 유지 명단 = 상위 150위
+
+no_buf = portfolio.rebalance(model(shifted2), n=N, tranches=TR,
+                             today=date(2026, 10, 16))
+st_a = portfolio.load_state()
+# 같은 상황을 버퍼를 켜고 다시 (상태를 되돌려서)
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+portfolio.rebalance(model(universe), n=N, tranches=TR, today=date(2026, 10, 9))
+with_buf = portfolio.rebalance(model(shifted2), n=N, tranches=TR,
+                               today=date(2026, 10, 16), hold_universe=hold_u)
+print(f"    매도: 버퍼 없음 {no_buf['매도']}종목 → 버퍼 1.5배 {with_buf['매도']}종목")
+check(with_buf["매도"] < no_buf["매도"],
+      f"버퍼가 매도를 줄임 ({no_buf['매도']} → {with_buf['매도']})")
+check(with_buf["매수"] == with_buf["매도"],
+      f"판 만큼만 삼 ({with_buf['매수']}매수/{with_buf['매도']}매도)")
+check(with_buf["보유종목수"] == N, f"보유 100종목 유지 ({with_buf['보유종목수']})")
+check(list(with_buf["orders"].columns)[:2] == ["구분", "종목코드"],
+      "거래가 없는 주에도 주문표에 컬럼이 있음")
+
+
+def codes_of(res, kind):
+    o = res["orders"]
+    return set(o.loc[o["구분"] == kind, "종목코드"]) if len(o) else set()
+
+# 101~150위는 '들고 있으면 유지, 없으면 안 산다'는 중립 구간이어야 합니다
+bought = codes_of(with_buf, "매수")
+mid = set(shifted2[N:int(N * BUF)])
+check(not (bought & mid), f"버퍼 구간 종목은 새로 사지 않음 (잘못 산 것 {len(bought & mid)}개)")
+held_now = set(portfolio.load_state()["종목코드"])
+check(bool(held_now & mid), "버퍼 구간에 있는 보유 종목은 팔지 않고 들고 있음")
+sold_buf = codes_of(with_buf, "매도")
+check(not (sold_buf & mid), f"버퍼 구간 종목을 팔지 않음 (잘못 판 것 {len(sold_buf & mid)}개)")
+sold_nobuf = codes_of(no_buf, "매도")
+check(bool(sold_nobuf & mid),
+      "버퍼가 없으면 같은 종목을 팔았다 (비교가 성립하는지 확인)")
+
+# 150위 밖으로 완전히 밀려나면 팔아야 합니다
+far = universe[:5]                                 # 맨 뒤로 밀어버릴 종목
+pushed = [c for c in universe if c not in far] + far
+hold_u2 = pushed[:int(N * BUF)]
+sold_far = False
+for d in (23, 30, 6, 13):
+    rr = portfolio.rebalance(model(pushed), n=N, tranches=TR,
+                             today=date(2026, 10, d) if d > 20 else date(2026, 11, d),
+                             hold_universe=hold_u2)
+    if codes_of(rr, "매도") & set(far):
+        sold_far = True
+        break
+check(sold_far, "버퍼 밖으로 완전히 밀려난 종목은 매도됨")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:
     print("\n실패:", *fails, sep="\n  ")
     sys.exit(1)
-print("\n전체 통과 — 붙여넣은 목록을 읽고, 비중을 맞추고, 4주에 전환합니다.")
+print("\n전체 통과 — 실전이 백테스트와 같은 규칙으로 사고팝니다.")

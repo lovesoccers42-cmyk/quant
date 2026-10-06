@@ -55,6 +55,10 @@ on:
         description: "무매매 밴드 — 목표 비중의 ±이 비율 안이면 안 건드림. 실전과 같은 값은 0.20. 0이면 매번 되맞춤"
         required: false
         default: "0.20"
+      rank_buffer:
+        description: "순위 버퍼 — 상위 N위에서 사고 N×(1+버퍼)위 밖에서 매도. 0.5면 100위에서 사고 150위에서 팜. 0이면 끔"
+        required: false
+        default: "0.5"
 
 concurrency:
   group: quant-backtest
@@ -108,7 +112,8 @@ jobs:
             "${{ github.event.inputs.risk_off || '0' }}" \
             "${{ github.event.inputs.weighting || 'equal' }}" \
             "${{ github.event.inputs.max_weight || '0' }}" \
-            "${{ github.event.inputs.rebal_band || '0.20' }}"
+            "${{ github.event.inputs.rebal_band || '0.20' }}" \
+            "${{ github.event.inputs.rank_buffer || '0.5' }}"
 
       - name: 결과 올리기
         if: always()
