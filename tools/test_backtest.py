@@ -537,9 +537,17 @@ except ValueError as e:
 
 _ts = backtest.run(**_base, trend_stock=120)
 check(len(_ts["perf"]) > 3, f"종목 추세 필터로 돌아감 ({len(_ts['perf'])}회차)")
-check("120일" in _ts["summary"]["제약"]["종목추세필터"], "요약에 추세 필터가 적힘")
+check("새로 사지 않음" in _ts["summary"]["제약"]["종목추세필터"],
+      "요약에 '매수만 제한'으로 적힘")
 check(set(_ts["holdings"]["종목코드"]) != set(_plain["holdings"]["종목코드"]),
       "추세 필터가 종목 선택을 바꿈")
+# 핵심: 추세 필터가 보유를 강제 매도하면 회전율이 폭증합니다.
+# 실제 데이터에서 152%→593%로 뛴 버그라 테스트로 박아둡니다.
+_t_ts = float(_ts["perf"]["턴오버"].iloc[1:].mean())
+_t_pl = float(_plain["perf"]["턴오버"].iloc[1:].mean())
+print(f"    회전율: 필터 없음 {_t_pl:.2%} → 추세 필터 {_t_ts:.2%}")
+check(_t_ts < _t_pl * 2.0,
+      f"추세 필터가 회전율을 2배 넘게 키우지 않음 ({_t_pl:.2%} → {_t_ts:.2%})")
 
 _sw = backtest.run(**_base, max_sector_weight=0.30)
 _p = _sw["perf"]

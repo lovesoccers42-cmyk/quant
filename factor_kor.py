@@ -151,11 +151,14 @@ def run() -> dict:
     _pf = price_pivot.ffill()
     _dr = _pf.tail(config.VOL_WINDOW + 1).pct_change(fill_method=None)
     data_bind["VOL"] = data_bind["종목코드"].map(_dr.std(ddof=1))
+    # 추세는 '새로 살 때'만 거릅니다. 여기서 종목을 빼면 유지 판정 명단
+    # (model_kr_hold)에서도 빠져 보유분이 강제 매도되고, 순위 버퍼가
+    # 무력화됩니다 — 백테스트에서 회전율이 연 152%→593%로 뛴 원인입니다.
+    data_bind["위추세"] = True
     if config.TREND_STOCK_MA > 0:
         _ma = _pf.tail(config.TREND_STOCK_MA).mean()
-        _last = _pf.iloc[-1]
-        _up = (_last >= _ma)
-        data_bind = data_bind[data_bind["종목코드"].map(_up).fillna(True)]
+        data_bind["위추세"] = (data_bind["종목코드"]
+                            .map(_pf.iloc[-1] >= _ma).fillna(True).astype(bool))
 
     port = fc.build_scores(
         data_bind, symbol="종목코드", sector="SEC_NM_KOR",
@@ -171,8 +174,14 @@ def run() -> dict:
         price_list, symbol="종목코드", date="날짜", close="종가", volume="거래량",
         window=config.LIQUIDITY_WINDOW, min_value=config.MIN_TURNOVER_KR)
 
+    buy_pool = port
+    if config.TREND_STOCK_MA > 0 and "위추세" in port.columns:
+        _up = port["위추세"].fillna(True).astype(bool)
+        if int(_up.sum()) >= max(30, config.N_PORTFOLIO):
+            buy_pool = port[_up]
+
     invest, sel = fc.select_portfolio(
-        port, symbol="종목코드", sector="SEC_NM_KOR", n=config.N_PORTFOLIO,
+        buy_pool, symbol="종목코드", sector="SEC_NM_KOR", n=config.N_PORTFOLIO,
         max_sector_pct=config.MAX_SECTOR_PCT, eligible=eligible)
 
     # 유지 판정용 넓은 명단 (순위 버퍼). 살 때는 위의 invest(상위 100위,

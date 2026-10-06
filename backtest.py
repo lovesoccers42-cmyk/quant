@@ -329,9 +329,13 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
     scored = fc.build_scores(merged, symbol="symbol", sector="sector",
                              weights=weights or config.QVM_WEIGHTS,
                              n_portfolio=len(merged), neutral=neutral)
-    # 추세 필터 — 하락 추세인 종목은 아예 후보에서 뺍니다
-    if "위추세" in scored.columns:
-        scored = scored[scored["위추세"].fillna(True)]
+    # 추세 필터는 여기서 종목을 빼지 않습니다.
+    #
+    # 전에는 scored에서 아예 제거했는데, 유지 판정 명단(hold_set)도 같은
+    # scored에서 만들기 때문에 보유 종목이 200일선을 한 번 밑돌면 순위와
+    # 무관하게 강제 매도됐습니다. 순위 버퍼가 무력화되고 회전율이 연 152%
+    # → 593%로 뛰었습니다. 그래서 '위추세' 컬럼만 남기고, 새로 살 때만
+    # 거릅니다 (버퍼와 같은 사고방식: 안 사는 것과 파는 것은 다른 규칙).
     return scored.dropna(subset=["qvm"])
 
 
@@ -401,6 +405,16 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
     shares = _shares(ticker, spec)
 
+    # 전역 섹터 지도 — 보유 종목의 섹터는 점수표에 그 종목이 있든 없든
+    # 항상 알 수 있어야 합니다 (섹터 비중 상한이 '기타' 뒤로 숨지 않도록).
+    sector_map_all: dict = {}
+    if sector is not None and spec.sector_key in sector.columns:
+        sector_map_all = dict(zip(sector[spec.sector_key].astype(str),
+                                  sector[spec.sector_col].astype(str)))
+    elif spec.sector_col in ticker.columns:
+        sector_map_all = dict(zip(ticker[spec.t_sym].astype(str),
+                                  ticker[spec.sector_col].astype(str)))
+
     # 리스크 오버레이용 시장지수 — 전 종목 동일가중 일간 수익률의 누적.
     # 시총가중 대신 동일가중을 쓰는 이유: 소수 대형주가 아니라 '시장 전체가
     # 내려가고 있는가'를 봐야 위험 신호로 쓸 수 있기 때문입니다.
@@ -463,14 +477,25 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             avg = win.mean()
             eligible = set(avg[avg >= min_turnover].index)
 
+        # 매수 후보 — 추세 필터는 여기에만 걸립니다 (유지 판정은 아래 hold_set)
+        buy_pool = scored
+        trend_blocked = 0
+        if trend_stock and trend_stock > 0 and "위추세" in scored.columns:
+            up = scored["위추세"].fillna(True).astype(bool)
+            trend_blocked = int((~up).sum())
+            if int(up.sum()) >= max(30, top_n):
+                buy_pool = scored[up]
+
         picks, sel = fc.select_portfolio(
-            scored, symbol="symbol", sector="sector", n=top_n,
+            buy_pool, symbol="symbol", sector="sector", n=top_n,
             max_sector_pct=max_sector_pct, eligible=eligible)
+        sel.update({"추세탈락": trend_blocked})
         sel_log.append({"리밸런싱일": t, **sel})
 
         # 유지 판정용 넓은 명단 (순위 버퍼). qvm이 작을수록 좋은 종목입니다.
         hold_set: set = set()
         if buffer > 0:
+            # 유지 판정은 추세와 무관하게 순위만 봅니다 — scored 전체 사용
             pool_sc = scored
             if eligible:
                 pool_sc = scored[scored["symbol"].astype(str).isin(eligible)]
@@ -524,8 +549,14 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         # 안에서만 매기면, 버퍼 구간(101~150위) 종목이 꼴찌 비중을 받고
         # 100위 안에 들어오는 순간 비중이 급등합니다. 종목 교체를 줄이려고
         # 버퍼를 넣었는데 그 왕복이 비중 쪽으로 옮겨갈 뿐입니다.
-        sec_map = (dict(zip(scored["symbol"].astype(str), scored["sector"]))
-                   if sec_w_cap > 0 else None)
+        # 섹터 지도는 전역 지도를 먼저 쓰고 그 시점 점수표로 보완합니다.
+        # scored만 쓰면 필터로 빠진 보유 종목이 '기타'로 뭉쳐서, 상한이
+        # 정작 쏠린 쪽을 못 봅니다 (실제로 최악 49.6%가 그 '기타'였습니다).
+        sec_map = None
+        if sec_w_cap > 0:
+            sec_map = dict(sector_map_all)
+            sec_map.update(dict(zip(scored["symbol"].astype(str),
+                                    scored["sector"])))
         rank_order = (scored.dropna(subset=["qvm"])
                       .sort_values("qvm")["symbol"].astype(str).tolist())
         tw = _target_weights(codes, weighting, shares=shares,
@@ -759,7 +790,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         "저변동성팩터": ("켬 (QVML — 네 팩터 1/4씩)" if use_lowvol
                      else "끔 (QVM — 변동성 정보 없음)"),
         "종목추세필터": ("없음" if not trend_stock or trend_stock <= 0
-                   else f"종목이 자기 {trend_stock}일 이동평균 아래면 후보 제외"),
+                   else f"종목이 자기 {trend_stock}일 이동평균 아래면 "
+                        f"'새로 사지 않음' (보유분은 순위 버퍼대로 유지)"),
         "보유섹터비중상한": ("없음 — 살 때 종목 수만 제한(누적되면 넘침)"
                      if sec_w_cap <= 0 else f"한 섹터 보유비중 최대 {sec_w_cap:.0%}"),
         "섹터중립": ("모든 팩터를 섹터 안에서만 비교"
