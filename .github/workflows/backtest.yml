@@ -48,9 +48,13 @@ on:
         type: choice
         options: ["equal", "mcap", "score", "invvol"]
       max_weight:
-        description: "한 종목 최대 비중. 0이면 방식별 기본값(mcap 8%, score·invvol 3%)"
+        description: "한 종목 최대 비중. 0이면 방식별 기본값(mcap 8%, score·invvol 3%). 섹터상한과 혼동하지 마세요"
         required: false
         default: "0"
+      rebal_band:
+        description: "무매매 밴드 — 목표 비중의 ±이 비율 안이면 안 건드림. 실전과 같은 값은 0.20. 0이면 매번 되맞춤"
+        required: false
+        default: "0.20"
 
 concurrency:
   group: quant-backtest
@@ -103,7 +107,8 @@ jobs:
             "${{ github.event.inputs.trend_ma || '0' }}" \
             "${{ github.event.inputs.risk_off || '0' }}" \
             "${{ github.event.inputs.weighting || 'equal' }}" \
-            "${{ github.event.inputs.max_weight || '0' }}"
+            "${{ github.event.inputs.max_weight || '0' }}" \
+            "${{ github.event.inputs.rebal_band || '0.20' }}"
 
       - name: 결과 올리기
         if: always()

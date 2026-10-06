@@ -350,6 +350,18 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     new_state["편입일"] = pd.to_datetime(new_state["편입일"])
     store.write(STATE, new_state)
 
+    # 팔 종목은 모델 상위권에서 밀려났으니 picks에 없습니다. 이름을 info에서만
+    # 찾으면 매도 줄이 종목코드만 남은 빈 줄이 됩니다 — 22개를 코드만 보고
+    # 팔라는 주문서가 됩니다. 보유 상태에 저장해 둔 이름으로 메웁니다.
+    held_name = dict(zip(state["종목코드"], state.get("종목명", pd.Series(dtype=str))))
+    held_sector = dict(zip(state["종목코드"], state.get("섹터", pd.Series(dtype=str))))
+
+    def _label(c, col, fallback):
+        if c in info.index and col in info.columns and pd.notna(info.at[c, col]):
+            return info.at[c, col]
+        v = fallback.get(c)
+        return v if isinstance(v, str) and v.strip() else ""
+
     def rows_for(codes, kind):
         out = []
         for c in codes:
@@ -361,8 +373,8 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
             if kind == "매수" and unit > 0 and px and px > 0:
                 qty = int(unit // px)
             out.append({"구분": kind, "종목코드": c,
-                        "종목명": (r[name] if r is not None and name in info.columns else ""),
-                        "섹터": (r[sector] if r is not None and sector in info.columns else ""),
+                        "종목명": _label(c, name, held_name),
+                        "섹터": _label(c, sector, held_sector),
                         "주가": (round(px) if px else None),
                         "수량": ("전량" if kind == "매도" else qty),
                         "예상금액": (round(qty * px) if qty and px else None),
@@ -377,8 +389,8 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
             c = t["종목코드"]
             r = info.loc[c] if c in info.index else None
             out.append({"구분": t["구분"], "종목코드": c,
-                        "종목명": (r[name] if r is not None and name in info.columns else ""),
-                        "섹터": (r[sector] if r is not None and sector in info.columns else ""),
+                        "종목명": _label(c, name, held_name),
+                        "섹터": _label(c, sector, held_sector),
                         "주가": round(t["주가"]),
                         "수량": t["수량"],
                         "예상금액": round(t["수량"] * t["주가"]),

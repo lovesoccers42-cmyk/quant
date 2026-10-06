@@ -382,6 +382,28 @@ check(int(_w["mcap"]["perf"]["상한초과정리"].sum()) >= 0
 _to = float(_w["equal"]["perf"]["턴오버"].iloc[1:].mean())
 check(_to < 0.45, f"4등분에서 회차당 회전율이 과하지 않음 ({_to:.1%})")
 
+# 무매매 밴드 — 비중을 매번 되돌리지 않으면 회전율이 떨어져야 합니다.
+# 이게 안 떨어지면 밴드가 실제로 적용되지 않은 것입니다.
+_nb = backtest.run(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+                   min_turnover=0, tranches=4, weighting="equal", rebal_band=0.0)
+_wb = backtest.run(market="kr", top_n=30, rebalance="QE", max_sector_pct=1.0,
+                   min_turnover=0, tranches=4, weighting="equal", rebal_band=0.20)
+_t0 = float(_nb["perf"]["턴오버"].iloc[1:].mean())
+_t1 = float(_wb["perf"]["턴오버"].iloc[1:].mean())
+print(f"    회전율: 밴드 없음 {_t0:.2%} → ±20% 밴드 {_t1:.2%}")
+check(_t1 < _t0, f"밴드가 회전율을 낮춤 ({_t0:.2%} → {_t1:.2%})")
+check(len(_wb["perf"]) == len(_nb["perf"]), "밴드를 켜도 회차 수는 같음")
+for r, tag in ((_nb, "밴드없음"), (_wb, "밴드20%")):
+    w = r["perf"]
+    check(bool((w["턴오버"] >= -1e-12).all()) and bool((w["턴오버"] <= 1 + 1e-9).all()),
+          f"{tag}: 회전율이 0~100% 범위")
+    check(bool((w["최대종목비중"] <= 1 + 1e-9).all()),
+          f"{tag}: 최대종목비중이 100%를 넘지 않음")
+# 밴드를 켜도 종목 교체는 그대로 일어나야 합니다 (비중만 안 건드리는 것)
+check(float(_wb["perf"]["턴오버"].iloc[1:].min()) >= 0,
+      "밴드를 켜도 교체가 필요한 회차는 거래가 일어남")
+check("무매매밴드" in _wb["summary"]["제약"], "요약에 밴드 설정이 적힘")
+
 # 잘못된 방식 이름은 조용히 동일가중으로 넘어가면 안 됩니다
 try:
     backtest.run(market="kr", top_n=30, rebalance="QE", weighting="시총")

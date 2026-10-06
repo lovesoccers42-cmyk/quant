@@ -320,7 +320,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         max_sector_pct: float = 1.0, min_turnover: float = 0.0,
         tranches: int = 1, trend_ma: int = 0, risk_off: float = 0.0,
         cash_rate: float = 0.02, weighting: str = "equal",
-        max_weight: float = 0.0) -> dict:
+        max_weight: float = 0.0, rebal_band: float = 0.0) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -354,6 +354,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                          f"(받은 값 {weighting!r})")
     cap = float(max_weight) if max_weight and max_weight > 0 else \
         _DEFAULT_CAP.get(weighting, 0.0)
+    band = max(0.0, float(rebal_band))
     price, fs, ticker, sector = _load(spec)
 
     if price.empty or fs.empty or ticker.empty:
@@ -494,7 +495,30 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                 ssum = float(sub.sum())
                 sub = (sub / ssum) if ssum > 0 else pd.Series(
                     1.0 / len(sl), index=pd.Index(sl), dtype="float64")
-                w_new.loc[sl] = (pool * sub).values
+                want = pool * sub                      # 목표 비중
+                if band > 0:
+                    # 무매매 밴드 — 목표에서 band 이내로 벗어난 종목은
+                    # 그대로 둡니다. 실전에서 1%가 1.1%가 된 걸 매주 되돌리면
+                    # 거래세만 나갑니다. 이 밴드가 없던 탓에 회전율이 연 249%
+                    # 까지 뛰었고, 그 비용이 초과수익의 90%를 먹었습니다.
+                    cur = w_state.reindex(pd.Index(sl)).fillna(0.0)
+                    hold = (cur > 0) & ((cur - want).abs() <= band * want)
+                    locked = float(cur[hold].sum())
+                    rest = pool - locked
+                    if rest < 0:
+                        # 그대로 둔 종목이 너무 커져 등분 몫을 넘은 경우 —
+                        # 비례로 눌러 등분 합을 지킵니다
+                        cur.loc[hold] = cur[hold] * (pool / max(locked, 1e-12))
+                        locked, rest = pool, 0.0
+                    out = [c for c in sl if not bool(hold.get(c, False))]
+                    new_w = cur.copy()
+                    if out:
+                        ow = want.reindex(out).fillna(0.0)
+                        osum = float(ow.sum())
+                        new_w.loc[out] = (rest * (ow / osum)).values if osum > 0 \
+                            else rest / len(out)
+                    want = new_w
+                w_new.loc[sl] = want.reindex(pd.Index(sl)).fillna(0.0).values
             tot = float(w_new.sum())
             w_new = (w_new / tot) if tot > 0 else tw
 
@@ -618,6 +642,9 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                  "score": "점수가중 (qvm 순위에 선형)",
                  "invvol": f"역변동성 ({config.VOL_WINDOW}일 변동성의 역수)",
                  }[weighting],
+        "무매매밴드": ("없음 — 손보는 등분을 매번 목표 비중으로 되맞춤"
+                   if band <= 0
+                   else f"목표의 ±{band:.0%} 안이면 그대로 둠"),
         "종목상한": ("없음" if cap <= 0 or cap >= 1
                   else (f"한 종목 최대 {cap:.1%}" if top_n * cap >= 1
                         # 상한 × 종목수 < 1 이면 상한을 지키면서 100%를 채울 수

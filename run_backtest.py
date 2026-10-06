@@ -44,7 +44,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
          cost_bps: float = 25.0, max_sector_pct: float = -1.0,
          min_turnover: float = -1.0, tranches: int = 1,
          trend_ma: int = 0, risk_off: float = 0.0,
-         weighting: str = "", max_weight: float = -1.0) -> int:
+         weighting: str = "", max_weight: float = -1.0,
+         rebal_band: float = -1.0) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -62,13 +63,16 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     weighting = (weighting or config.WEIGHTING or "equal").strip().lower()
     if max_weight < 0:
         max_weight = config.MAX_WEIGHT
+    if rebal_band < 0:
+        rebal_band = config.REBAL_BAND
 
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
                        cost_bps=cost_bps, max_sector_pct=max_sector_pct,
                        min_turnover=min_turnover, tranches=max(1, int(tranches)),
                        trend_ma=int(trend_ma), risk_off=float(risk_off),
                        cash_rate=config.CASH_RATE,
-                       weighting=weighting, max_weight=float(max_weight))
+                       weighting=weighting, max_weight=float(max_weight),
+                       rebal_band=float(rebal_band))
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -141,4 +145,6 @@ if __name__ == "__main__":
     roff = float(sys.argv[9]) if len(sys.argv) > 9 else 0.0
     wgt = sys.argv[10] if len(sys.argv) > 10 else ""
     mw = float(sys.argv[11]) if len(sys.argv) > 11 else -1.0
-    sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff, wgt, mw))
+    bnd = float(sys.argv[12]) if len(sys.argv) > 12 else -1.0
+    sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff,
+                  wgt, mw, bnd))
