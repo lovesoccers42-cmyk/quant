@@ -225,7 +225,11 @@ PROFILES: dict[str, dict] = {
     },
     "alt": {
         "라벨": "배우자",
-        "weighting": "invvol",
+        # 역변동성 가중은 측정해 보니 전종목 동일가중에도 -5.32%p로 졌습니다
+        # (t -0.27). 시총가중과 같은 이유 — 비중을 '신호'가 아닌 다른 기준에
+        # 연동하면 팩터를 거스릅니다. 그래서 비중은 main과 같은 점수가중을
+        # 유지하고, 섹터 축만 뒤집습니다: 섹터 로테이션 안 함 + 쏠림 제한.
+        "weighting": "score",
         "sector_neutral": "all",
         "max_sector_pct": 0.25,
         "slot_offset": 2,

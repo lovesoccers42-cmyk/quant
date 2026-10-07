@@ -453,6 +453,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
              spec.label, dates[0].date(), dates[-1].date(), len(dates), top_n)
 
     rows, holdings_log, sel_log, ic_log = [], [], [], []
+    hold_sizes: list[int] = []
     ttm_cache = {}
 
     # 분할 리밸런싱 상태 — 등분별 보유 종목
@@ -489,7 +490,11 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         picks, sel = fc.select_portfolio(
             buy_pool, symbol="symbol", sector="sector", n=top_n,
             max_sector_pct=max_sector_pct, eligible=eligible)
-        sel.update({"추세탈락": trend_blocked})
+        sel.update({"추세탈락": trend_blocked,
+                    # 같은 설정인데 성과가 달라졌을 때 가장 먼저 봐야 하는 값.
+                    # 점수가 계산된 종목 수가 바뀌면 유니버스가 바뀐 것이고,
+                    # 그러면 성과가 달라지는 게 당연합니다.
+                    "점수산출종목": int(len(scored))})
         sel_log.append({"리밸런싱일": t, **sel})
 
         # 유지 판정용 넓은 명단 (순위 버퍼). qvm이 작을수록 좋은 종목입니다.
@@ -501,6 +506,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                 pool_sc = scored[scored["symbol"].astype(str).isin(eligible)]
             hold_rank = int(round(top_n * (1 + buffer)))
             hold_set = set(pool_sc.nsmallest(hold_rank, "qvm")["symbol"].astype(str))
+            hold_sizes.append(len(hold_set))
 
         target = [str(c) for c in picks["symbol"] if c in price_pivot.columns]
         if len(target) < 5:
@@ -800,6 +806,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                        else f"섹터 안에서만 비교: {', '.join(neutral)}"
                             f" / 전 종목 비교: "
                             f"{', '.join(x for x in fc.SECTOR_NEUTRAL_ALL if x not in neutral)}")),
+        "유지명단 크기": (f"평균 {int(np.mean(hold_sizes))}종목"
+                      if hold_sizes else "버퍼 없음"),
         "순위버퍼": ("없음 — 상위 종목 수 밖으로 밀려나면 바로 매도"
                  if buffer <= 0
                  else f"상위 {top_n}위 안에서 사고, "
@@ -839,9 +847,12 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         summary["제약"]["현금 보유 회차"] = f"{int((perf['주식비중'] < 1).sum())}/{len(perf)}"
     if sel_log:
         sl = pd.DataFrame(sel_log)
-        for k in ("유동성탈락", "섹터상한탈락"):
-            if k in sl.columns:
+        for k in ("점수산출종목", "유동성탈락", "섹터상한탈락", "추세탈락"):
+            if k in sl.columns and sl[k].notna().any():
                 summary["제약"][f"평균 {k}"] = int(sl[k].mean())
+        if "점수산출종목" in sl.columns:
+            summary["제약"]["점수산출종목 범위"] = (
+                f"{int(sl['점수산출종목'].min())} ~ {int(sl['점수산출종목'].max())}")
     # 연도별 성과 — 전체 누적 한 줄로는 '언제 이기고 언제 지는지'가 안 보입니다.
     yearly = pd.DataFrame()
     if len(perf):

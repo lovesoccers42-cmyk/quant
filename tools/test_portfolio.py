@@ -467,9 +467,15 @@ import config as _cfg  # noqa: E402
 PM, PA = _cfg.profile("main"), _cfg.profile("alt")
 check(PM["state_table"] != PA["state_table"], "보유 테이블이 서로 다름")
 check(PM["model_file"] != PA["model_file"], "모델 파일이 서로 다름")
-check(PM["weighting"] != PA["weighting"],
-      f"비중 방식이 다름 ({PM['weighting']} / {PA['weighting']})")
-check(PM["sector_neutral"] != PA["sector_neutral"], "섹터중립 태도가 다름")
+# 두 계좌는 어느 축에서든 달라야 합니다. 비중 축은 측정 결과 '점수가중'만
+# 통했으므로(시총가중 -21.9%p, 역변동성 -5.3%p) 둘 다 점수가중을 쓰고,
+# 섹터 축을 뒤집습니다.
+axes = [k for k in ("weighting", "sector_neutral", "max_sector_pct")
+        if PM[k] != PA[k]]
+check(len(axes) >= 1, f"설정이 최소 한 축에서 다름 {axes}")
+check("sector_neutral" in axes and "max_sector_pct" in axes,
+      f"섹터 축(중립 태도·상한)이 다름 {axes}")
+check(PM["slot_offset"] != PA["slot_offset"], "손보는 등분이 엇갈림")
 try:
     _cfg.profile("wife")
     check(False, "모르는 프로필을 받아들임")
@@ -506,12 +512,17 @@ check(len(portfolio.load_state(PA["state_table"])) == N, "alt 계좌 100종목")
 lo_m, hi_m = rm["배정액범위"]
 lo_a, hi_a = ra["배정액범위"]
 print(f"    main(score)  배정액 {lo_m:,} ~ {hi_m:,}원")
-print(f"    alt(invvol)  배정액 {lo_a:,} ~ {hi_a:,}원")
+print(f"    alt(score·섹터중립) 배정액 {lo_a:,} ~ {hi_a:,}원")
 # 점수가중은 '전체 유니버스 순위'로 매기므로 상위 100위 안의 기울기는
 # 완만합니다 (백테스트가 그렇게 돌았고, 실전이 그걸 재현해야 합니다).
 check(hi_m > lo_m * 1.05, f"점수가중이 종목별로 다른 금액을 배정 ({lo_m:,}~{hi_m:,})")
 check(hi_m < lo_m * 3, f"다만 극단적으로 쏠리지는 않음 ({hi_m / lo_m:.2f}배)")
-check(hi_a > lo_a * 1.5, f"역변동성도 종목별로 다름 ({lo_a:,}~{hi_a:,})")
+check(hi_a > lo_a * 1.05, f"alt도 종목별로 다른 금액 ({lo_a:,}~{hi_a:,})")
+# 역변동성 자체는 함수 단위로 확인합니다 (프로필에서는 쓰지 않습니다)
+ai = portfolio.target_amounts(universe[:N], capital=CAP4, n=N,
+                              weighting="invvol", vol_map=vols)
+check(max(ai.values()) > min(ai.values()) * 2,
+      f"역변동성은 변동성에 따라 크게 다름 ({max(ai.values())/min(ai.values()):.1f}배)")
 check(abs(sum(portfolio.load_state(PM["state_table"])["기준금액"]) - CAP4)
       < CAP4 * 0.02, "main 배정액 합이 총자본에 수렴")
 check(abs(sum(portfolio.load_state(PA["state_table"])["기준금액"]) - CAP4)
