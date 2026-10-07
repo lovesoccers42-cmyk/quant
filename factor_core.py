@@ -11,6 +11,8 @@ factor-Global 노트북에 들어 있던 개선점을 기준으로 통일했습�
 """
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import pandas as pd
 from scipy.stats import zscore
@@ -296,3 +298,29 @@ def build_scores(data_bind: pd.DataFrame, *, symbol: str, sector: str,
     port = data_bind.merge(qvm, on=symbol)
     port["invest"] = np.where(port["qvm"].rank() <= n_portfolio, "Y", "N")
     return port
+
+
+def split_bucket(code, mod: int) -> int:
+    """종목코드를 mod개 바구니에 고정 배정합니다.
+
+    왜 순위가 아니라 코드로 나누는가: 순위로 홀/짝을 나누면 순위가 한 칸만
+    움직여도 소속이 뒤바뀝니다. 분할 리밸런싱은 종목을 최대 4주간 들고 있으니
+    그 사이에 두 계좌가 같은 종목을 동시에 보유하게 됩니다 (실측 최대 17개).
+    코드 해시는 영구히 같은 쪽에 붙으므로 겹침이 구조적으로 0이 됩니다.
+
+    md5를 쓰는 이유는 파이썬 hash()가 프로세스마다 달라지기 때문입니다 —
+    실행할 때마다 배정이 바뀌면 보유 종목이 매주 뒤집힙니다.
+    """
+    if mod <= 1:
+        return 0
+    h = hashlib.md5(str(code).zfill(6).encode("utf-8")).hexdigest()
+    return int(h, 16) % int(mod)
+
+
+def split_mask(codes, mod: int, rem: int) -> pd.Series:
+    """codes 중 rem번째 바구니에 속하는지."""
+    idx = pd.Index([str(c).zfill(6) for c in codes])
+    if mod <= 1:
+        return pd.Series(True, index=idx)
+    return pd.Series([split_bucket(c, mod) == (int(rem) % int(mod)) for c in idx],
+                     index=idx)

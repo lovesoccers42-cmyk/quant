@@ -348,7 +348,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         max_weight: float = 0.0, rebal_band: float = 0.0,
         rank_buffer: float = 0.0, sector_neutral=None,
         use_lowvol: bool = False, trend_stock: int = 0,
-        max_sector_weight: float = 0.0) -> dict:
+        max_sector_weight: float = 0.0, qvm_weights=None,
+        split=None) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -387,7 +388,13 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     neutral = fc.neutral_spec(sector_neutral
                               if sector_neutral is not None
                               else config.SECTOR_NEUTRAL)
-    qvm_weights = config.QVML_WEIGHTS if use_lowvol else config.QVM_WEIGHTS
+    qvm_weights = (list(qvm_weights) if qvm_weights
+                   else (config.QVML_WEIGHTS if use_lowvol
+                         else config.QVM_WEIGHTS))
+    # 교차 분할 — 같은 순위 명단을 번갈아 나눠 갖습니다 (종목 0% 겹침).
+    sp = dict(split or {})
+    split_mod = max(1, int(sp.get("mod", 1) or 1))
+    split_rem = int(sp.get("rem", 0) or 0) % split_mod
     sec_w_cap = max(0.0, float(max_sector_weight))
     price, fs, ticker, sector = _load(spec)
 
@@ -477,6 +484,14 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             win = turnover_pivot.loc[:t].tail(config.LIQUIDITY_WINDOW)
             avg = win.mean()
             eligible = set(avg[avg >= min_turnover].index)
+
+        # 교차 분할 — 종목코드 해시로 고정 배정합니다. 순위로 나누면 순위가
+        # 한 칸 움직일 때 소속이 뒤바뀌고, 4주간 들고 있는 동안 두 계좌가 같은
+        # 종목을 동시에 보유합니다 (순위 방식 실측: 회차당 최대 17종목 겹침).
+        if split_mod > 1:
+            mine = scored["symbol"].astype(str).map(
+                lambda c: fc.split_bucket(c, split_mod) == split_rem)
+            scored = scored[mine]
 
         # 매수 후보 — 추세 필터는 여기에만 걸립니다 (유지 판정은 아래 hold_set)
         buy_pool = scored
@@ -793,6 +808,10 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                  "score": "점수가중 (qvm 순위에 선형)",
                  "invvol": f"역변동성 ({config.VOL_WINDOW}일 변동성의 역수)",
                  }[weighting],
+        "교차분할": ("없음" if split_mod <= 1
+                 else f"종목코드 해시 {split_mod}등분 중 {split_rem + 1}번째 "
+                      f"— 다른 계좌와 종목이 겹치지 않음(구조적으로 0)"),
+        "팩터가중치": "/".join(f"{w:.2f}" for w in qvm_weights),
         "저변동성팩터": ("켬 (QVML — 네 팩터 1/4씩)" if use_lowvol
                      else "끔 (QVM — 변동성 정보 없음)"),
         "종목추세필터": ("없음" if not trend_stock or trend_stock <= 0

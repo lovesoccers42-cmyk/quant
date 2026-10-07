@@ -572,6 +572,47 @@ for _r, _tag in ((_lv, "QVML"), (_ts, "추세필터"), (_sw, "섹터비중상한
     check(abs(float(_pp["수익률"].abs().max())) < 5, f"{_tag}: 수익률이 상식 범위")
     check(bool((_pp["턴오버"] <= 1 + 1e-9).all()), f"{_tag}: 회전율 0~100%")
 
+# ── 4h. 교차 분할 — 두 계좌가 종목을 하나도 겹치지 않는가 ────
+print("\n[교차 분할]")
+_s0 = backtest.run(**_base, split={"mod": 2, "rem": 0})
+_s1 = backtest.run(**_base, split={"mod": 2, "rem": 1})
+h0 = _s0["holdings"].groupby("리밸런싱일")["종목코드"].apply(set)
+h1 = _s1["holdings"].groupby("리밸런싱일")["종목코드"].apply(set)
+common = [len(h0[d] & h1[d]) for d in h0.index if d in h1.index]
+print(f"    회차별 겹치는 종목 수: 최대 {max(common)} · 평균 {np.mean(common):.2f}")
+check(max(common) == 0, f"어떤 회차에도 종목이 겹치지 않음 (최대 {max(common)}개)")
+# 소속이 영구 고정인지 — 한 종목이 양쪽에 나타나면 안 됩니다
+all0 = set(_s0["holdings"]["종목코드"]); all1 = set(_s1["holdings"]["종목코드"])
+check(not (all0 & all1),
+      f"전 기간을 합쳐도 겹치는 종목이 없음 (겹침 {len(all0 & all1)}개)")
+check(len(_s0["perf"]) == len(_s1["perf"]) == len(_plain["perf"]),
+      "분할해도 회차 수는 같음")
+n0 = float(_s0["holdings"].groupby("리밸런싱일").size().mean())
+n1 = float(_s1["holdings"].groupby("리밸런싱일").size().mean())
+check(abs(n0 - n1) <= 1, f"두 쪽 종목 수가 비슷함 ({n0:.0f} / {n1:.0f})")
+check("교차분할" in _s0["summary"]["제약"], "요약에 분할 설정이 적힘")
+check("없음" in _plain["summary"]["제약"]["교차분할"], "분할 안 하면 '없음'")
+# 둘 다 같은 신호에서 뽑으므로 성과가 크게 벌어지면 안 됩니다
+r0 = float(_s0["summary"]["포트폴리오"]["누적수익률"])
+r1 = float(_s1["summary"]["포트폴리오"]["누적수익률"])
+print(f"    누적수익: 홀수쪽 {r0}% · 짝수쪽 {r1}% (분할 없음 "
+      f"{_plain['summary']['포트폴리오']['누적수익률']}%)")
+check(abs(r0 - r1) < max(40.0, abs(r0) * 0.8),
+      f"두 쪽 성과가 같은 신호답게 비슷한 수준 ({r0} vs {r1})")
+
+# ── 4i. 팩터 가중치 ─────────────────────────────────────────
+print("\n[팩터 가중치]")
+_val = backtest.run(**_base, qvm_weights=[0.25, 0.50, 0.25])
+check(_val["summary"]["제약"]["팩터가중치"] == "0.25/0.50/0.25",
+      f"요약에 가중치가 적힘 ({_val['summary']['제약']['팩터가중치']})")
+check(set(_val["holdings"]["종목코드"]) != set(_plain["holdings"]["종목코드"]),
+      "가중치를 바꾸면 고르는 종목이 달라짐")
+try:
+    backtest.run(**_base, qvm_weights=[0.5, 0.5])
+    check(False, "가중치 2개를 받아들임")
+except Exception:
+    check(True, "가중치 개수가 틀리면 막힘")
+
 # ── 5. 데이터가 짧으면 조용히 넘어가지 않고 막는지 ───────────
 store.write("kor_price", store.read("kor_price").query("날짜 >= '2025-10-01'"))
 try:

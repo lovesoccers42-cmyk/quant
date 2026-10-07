@@ -169,7 +169,9 @@ def run(profile: str | None = None) -> dict:
 
     port = fc.build_scores(
         data_bind, symbol="종목코드", sector="SEC_NM_KOR",
-        weights=(config.QVML_WEIGHTS if config.USE_LOWVOL else config.QVM_WEIGHTS),
+        weights=(prof["qvm_weights"] or
+                 (config.QVML_WEIGHTS if config.USE_LOWVOL
+                  else config.QVM_WEIGHTS)),
         n_portfolio=len(data_bind), neutral=prof["sector_neutral"])
 
     coverage = {k: int(port[k].notna().sum())
@@ -188,6 +190,20 @@ def run(profile: str | None = None) -> dict:
     port = port.copy()
     port["전체순위"] = port["qvm"].rank(method="first")
     port["전체종목수"] = int(port["qvm"].notna().sum())
+
+    # 교차 분할 — 종목코드 해시로 고정 배정 (백테스트와 동일 규칙).
+    # 같은 신호에서 뽑으므로 기대수익이 구조적으로 같고, 소속이 영구히
+    # 고정되므로 두 계좌의 보유가 절대 겹치지 않습니다.
+    _sp = prof["split"] or {}
+    _mod = max(1, int(_sp.get("mod", 1) or 1))
+    if _mod > 1:
+        _rem = int(_sp.get("rem", 0) or 0) % _mod
+        _mine = port["종목코드"].astype(str).map(
+            lambda c: fc.split_bucket(c, _mod) == _rem)
+        port = port[_mine]
+        log_n = len(port)
+    else:
+        log_n = len(port)
 
     buy_pool = port
     if config.TREND_STOCK_MA > 0 and "위추세" in port.columns:
@@ -231,7 +247,11 @@ def run(profile: str | None = None) -> dict:
 
     _prof_info = {"프로필": prof["key"], "라벨": prof["라벨"],
                   "섹터중립": prof["sector_neutral"],
-                  "섹터상한": prof["max_sector_pct"]}
+                  "섹터상한": prof["max_sector_pct"],
+                  "교차분할": (f"{_mod}등분 중 {int(_sp.get('rem', 0)) + 1}번째"
+                           if _mod > 1 else "없음"),
+                  "분할후종목풀": log_n,
+                  "팩터가중치": list(prof["qvm_weights"] or config.QVM_WEIGHTS)}
     return {**_prof_info, "selected": len(invest), "buy_signals": n_buy, "sell_signals": n_sell,
             "coverage": coverage, "유동성": liq, "선정": sel,
             "excel": str(xlsx_path), "model_date": today,

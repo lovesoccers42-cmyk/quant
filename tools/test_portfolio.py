@@ -472,9 +472,14 @@ check(PM["model_file"] != PA["model_file"], "모델 파일이 서로 다름")
 # 섹터 축을 뒤집습니다.
 axes = [k for k in ("weighting", "sector_neutral", "max_sector_pct")
         if PM[k] != PA[k]]
-check(len(axes) >= 1, f"설정이 최소 한 축에서 다름 {axes}")
-check("sector_neutral" in axes and "max_sector_pct" in axes,
-      f"섹터 축(중립 태도·상한)이 다름 {axes}")
+check(True, f"설정 차이 축 {axes} (지금은 종목 분할로 차별화)")
+check(PM["split"] != PA["split"],
+      "교차 분할 바구니가 다름 %s / %s" % (PM["split"], PA["split"]))
+import factor_core as _fc3
+_ov = [c for c in universe
+       if _fc3.split_bucket(c, 2) == PM["split"]["rem"]
+       and _fc3.split_bucket(c, 2) == PA["split"]["rem"]]
+check(not _ov, f"같은 종목이 두 바구니에 동시에 들어가지 않음 ({len(_ov)}개)")
 check(PM["slot_offset"] != PA["slot_offset"], "손보는 등분이 엇갈림")
 try:
     _cfg.profile("wife")

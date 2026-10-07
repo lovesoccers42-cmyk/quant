@@ -216,23 +216,43 @@ TELEGRAM_CHAT_ID = os.getenv("QUANT_TG_CHAT_ID", "")
 # 두 축(비중 기준 · 섹터 태도)이 정반대입니다. slot_offset으로 손보는 등분을
 # 엇갈리게 해서 같은 주에 같은 종목을 동시에 거래하지 않게 합니다.
 PROFILES: dict[str, dict] = {
+    # split: 같은 모델의 순위 명단을 번갈아 나눠 갖습니다.
+    #   {"mod": 2, "rem": 0} = 1,3,5,7...위   {"mod": 2, "rem": 1} = 2,4,6,8...위
+    # 이게 '종목만 다르게'를 가장 정직하게 만드는 방법입니다. 두 번째로 잘 나오는
+    # 설정을 찾아 헤매면 그건 과거에 맞추는 일이고, 교차 분할은 검증된 같은
+    # 신호에서 뽑으므로 기대수익이 구조적으로 같습니다.
+    #
+    # 대가: 둘 다 상위 200위까지 손을 벌려야 100종목을 채웁니다(혼자면 100위까지).
+    # 101~200위가 섞이는 만큼 양쪽 다 조금 희석됩니다 — 아내분만이 아니라
+    # 상수님 쪽도요. 그 희석이 얼마인지는 돌려봐야 압니다.
     "main": {
         "라벨": "상수",
         "weighting": "score",
         "sector_neutral": "no_mom",
         "max_sector_pct": 1.0,
         "slot_offset": 0,
+        "qvm_weights": None,          # None이면 config.QVM_WEIGHTS
+        "split": {"mod": 2, "rem": 0},
     },
+    # alt는 main과 '설정이 같고 종목만 다른' 계좌입니다.
+    #
+    # 성격이 다른 설정을 찾아보려 했지만 전부 더 나빴습니다 — 역변동성 가중은
+    # 전종목 동일가중에도 -5.32%p로 졌고(t -0.27), 전 팩터 섹터중립+캡25%는
+    # +11.30%p(t 0.25)로 main의 +60.79%p(t 1.12)에 크게 못 미쳤습니다.
+    # 두 번째로 잘 나오는 설정을 더 찾는 것은 과거에 맞추는 일이므로 멈췄습니다.
+    #
+    # 대신 검증된 같은 모델에서 종목만 나눕니다. 코드 해시로 고정 배정하므로
+    # 보유가 구조적으로 0% 겹치고, 같은 신호에서 뽑으므로 기대수익이 같습니다.
+    # 대가는 둘 다 자기 바구니(약 350종목)에서 100종목을 채워야 해서 양쪽 다
+    # 조금 희석된다는 것 — 상수님 쪽도 포함입니다.
     "alt": {
         "라벨": "배우자",
-        # 역변동성 가중은 측정해 보니 전종목 동일가중에도 -5.32%p로 졌습니다
-        # (t -0.27). 시총가중과 같은 이유 — 비중을 '신호'가 아닌 다른 기준에
-        # 연동하면 팩터를 거스릅니다. 그래서 비중은 main과 같은 점수가중을
-        # 유지하고, 섹터 축만 뒤집습니다: 섹터 로테이션 안 함 + 쏠림 제한.
         "weighting": "score",
-        "sector_neutral": "all",
-        "max_sector_pct": 0.25,
+        "sector_neutral": "no_mom",
+        "max_sector_pct": 1.0,
         "slot_offset": 2,
+        "qvm_weights": None,
+        "split": {"mod": 2, "rem": 1},
     },
 }
 DEFAULT_PROFILE = os.getenv("QUANT_PROFILE", "main").strip().lower()
@@ -244,6 +264,8 @@ def profile(name: str | None = None) -> dict:
     if key not in PROFILES:
         raise ValueError(f"모르는 프로필 '{key}'. 쓸 수 있는 값: {list(PROFILES)}")
     out = dict(PROFILES[key])
+    out.setdefault("qvm_weights", None)
+    out.setdefault("split", None)
     out["key"] = key
     # 프로필별 테이블·파일 이름 — main은 기존 이름을 그대로 써서 호환됩니다
     suffix = "" if key == "main" else f"_{key}"

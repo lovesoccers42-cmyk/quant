@@ -26,6 +26,34 @@ import config
 log = logging.getLogger("quant_agent.backtest")
 
 
+def _parse_weights(text: str):
+    """'0.25,0.5,0.25' → [0.25, 0.5, 0.25]. 빈 값이면 None(기본값)."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        out = [float(x) for x in text.replace(" ", "").split(",") if x]
+    except ValueError:
+        raise ValueError(f"팩터 가중치를 못 읽었습니다: {text!r}. "
+                         f"'퀄리티,밸류,모멘텀' 형식으로 주세요 (예 0.25,0.5,0.25)")
+    if len(out) not in (3, 4) or sum(out) <= 0:
+        raise ValueError(f"팩터 가중치는 3개(QVM) 또는 4개(QVML)여야 합니다: {out}")
+    return out
+
+
+def _parse_split(text: str):
+    """'2/1' → 2등분 중 2번째. 빈 값이나 '0'이면 분할 없음."""
+    text = (text or "").strip()
+    if not text or text in ("0", "1", "none", "없음"):
+        return None
+    try:
+        mod, rem = text.split("/")
+        return {"mod": int(mod), "rem": int(rem)}
+    except Exception:
+        raise ValueError(f"교차분할을 못 읽었습니다: {text!r}. "
+                         f"'등분수/몇번째(0부터)' 형식 — 예 2/0, 2/1")
+
+
 def _summary_rows(s: dict) -> pd.DataFrame:
     rows = []
     for k, v in s.items():
@@ -47,7 +75,8 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
          weighting: str = "", max_weight: float = -1.0,
          rebal_band: float = -1.0, rank_buffer: float = -1.0,
          sector_neutral: str = "", use_lowvol: int = -1,
-         trend_stock: int = -1, max_sector_weight: float = -1.0) -> int:
+         trend_stock: int = -1, max_sector_weight: float = -1.0,
+         qvm_weights: str = "", split: str = "") -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -86,7 +115,9 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                                     else int(trend_stock)),
                        max_sector_weight=(config.MAX_SECTOR_WEIGHT
                                           if max_sector_weight < 0
-                                          else float(max_sector_weight)))
+                                          else float(max_sector_weight)),
+                       qvm_weights=_parse_weights(qvm_weights),
+                       split=_parse_split(split))
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
 
@@ -171,5 +202,7 @@ if __name__ == "__main__":
     lv = int(sys.argv[15]) if len(sys.argv) > 15 else -1
     ts = int(sys.argv[16]) if len(sys.argv) > 16 else -1
     sw = float(sys.argv[17]) if len(sys.argv) > 17 else -1.0
+    qw = sys.argv[18] if len(sys.argv) > 18 else ""
+    spl = sys.argv[19] if len(sys.argv) > 19 else ""
     sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff,
-                  wgt, mw, bnd, buf, sn, lv, ts, sw))
+                  wgt, mw, bnd, buf, sn, lv, ts, sw, qw, spl))

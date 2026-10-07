@@ -79,6 +79,14 @@ on:
         description: "보유 기준 섹터 비중 상한 (0.3=30%). 0이면 끔. 살 때 종목수 제한과 달리 실제로 걸립니다"
         required: false
         default: "0"
+      qvm_weights:
+        description: "팩터 가중치 '퀄리티,밸류,모멘텀' (예 0.25,0.5,0.25). 비우면 1/3씩"
+        required: false
+        default: ""
+      split:
+        description: "교차 분할 '등분수/몇번째' — 2/0=상수 바구니, 2/1=배우자 바구니. 비우면 분할 없음"
+        required: false
+        default: ""
 
 concurrency:
   group: quant-backtest
@@ -137,7 +145,9 @@ jobs:
             "${{ github.event.inputs.sector_neutral || 'all' }}" \
             "${{ github.event.inputs.use_lowvol || '0' }}" \
             "${{ github.event.inputs.trend_stock || '0' }}" \
-            "${{ github.event.inputs.max_sector_weight || '0' }}"
+            "${{ github.event.inputs.max_sector_weight || '0' }}" \
+            "${{ github.event.inputs.qvm_weights }}" \
+            "${{ github.event.inputs.split }}"
 
       - name: 결과 올리기
         if: always()
