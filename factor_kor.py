@@ -223,6 +223,19 @@ def run(profile: str | None = None) -> dict:
         buy_pool, symbol="종목코드", sector="SEC_NM_KOR", n=config.N_PORTFOLIO,
         max_sector_pct=prof["max_sector_pct"], eligible=eligible)
 
+    # 주문 엔진에 넘기는 파일은 상위 100종목보다 깊게 씁니다.
+    #
+    # 왜: 한국 주식은 1주 단위라 주가가 배정액보다 비싼 종목은 못 삽니다.
+    # 그 자리는 '다음 순위'로 채워야 하는데, 파일에 100종목만 있으면 채울
+    # 후보가 없습니다. 실측(배우자 1,000만원 첫 주문서): 7종목이 가격으로
+    # 빠져 100종목이 아니라 93종목만 사고 167만원이 현금으로 남았습니다.
+    # 백테스트는 전체 풀을 들고 계산하므로 이 구멍이 없습니다 — 실전을
+    # 백테스트에 맞추려면 명단이 더 깊어야 합니다.
+    wide, _ = fc.select_portfolio(
+        buy_pool, symbol="종목코드", sector="SEC_NM_KOR",
+        n=max(config.MODEL_ROWS, config.N_PORTFOLIO),
+        max_sector_pct=prof["max_sector_pct"], eligible=eligible)
+
     # 유지 판정용 넓은 명단 (순위 버퍼). 살 때는 위의 invest(상위 100위,
     # 섹터 상한 적용)에서만 고르고, 팔 때는 이 명단 밖으로 밀려나야 팝니다.
     # 100위 경계를 오가는 종목을 매달 팔고 되사는 왕복 거래를 막습니다.
@@ -235,18 +248,20 @@ def run(profile: str | None = None) -> dict:
                  .reset_index(drop=True))
     hold_list.to_parquet(config.OUTPUT_DIR / prof["hold_file"], index=False)
 
-    codes = [c for c in invest["종목코드"] if c in price_pivot.columns]
+    codes = [c for c in wide["종목코드"] if c in price_pivot.columns]
 
     tech = _technical_signals(price_pivot, codes)
-    invest = invest.merge(tech, how="left", left_on="종목코드", right_index=True)
-    invest = invest.sort_values("qvm").reset_index(drop=True).round(4)
+    wide = wide.merge(tech, how="left", left_on="종목코드", right_index=True)
+    wide = wide.sort_values("qvm").reset_index(drop=True).round(4)
+    # 사람이 읽는 엑셀은 상위 100종목만, 주문 엔진이 읽는 parquet은 전체.
+    invest = wide.head(config.N_PORTFOLIO).copy()
 
     today = f"{date.today():%Y%m%d}"
     _tag = "한국" if prof["key"] == "main" else f"한국-{prof['라벨']}"
     xlsx_path = config.OUTPUT_DIR / config.report_filename(
         _tag, today, token=f"model-kr-{prof['key']}")
     invest.to_excel(xlsx_path, index=False)
-    invest.to_parquet(config.OUTPUT_DIR / prof["model_file"], index=False)
+    wide.to_parquet(config.OUTPUT_DIR / prof["model_file"], index=False)
 
     n_buy = int(invest["매수/매도"].str.contains("매수", na=False).sum())
     n_sell = int(invest["매수/매도"].str.contains("매도", na=False).sum())
@@ -264,7 +279,7 @@ def run(profile: str | None = None) -> dict:
                                  f"{1 - _shared:.0%}")),
                   "분할후종목풀": log_n,
                   "팩터가중치": list(prof["qvm_weights"] or config.QVM_WEIGHTS)}
-    return {**_prof_info, "selected": len(invest), "buy_signals": n_buy, "sell_signals": n_sell,
+    return {**_prof_info, "selected": len(invest), "model_rows": len(wide), "buy_signals": n_buy, "sell_signals": n_sell,
             "coverage": coverage, "유동성": liq, "선정": sel,
             "excel": str(xlsx_path), "model_date": today,
             "top_buys": top_buys.to_dict(orient="records")}

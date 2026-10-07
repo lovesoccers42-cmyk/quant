@@ -6,6 +6,7 @@
     python run_weekly.py seed 보유종목.csv   # 처음 한 번 — 보유 종목을 등분에 배분
     python run_weekly.py resync 보유종목.csv 350000   # 월 1회 — 평가액·현금 갱신
     python run_weekly.py capital 10000000 -p alt    # 현금으로 시작할 때 한 번
+    python run_weekly.py reset -p alt               # 체결 전 상태 되돌리기
 
 처음 시작할 때 (이미 한국 주식을 들고 있는 경우)
 ------------------------------------------------
@@ -115,10 +116,18 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
              "값": (f"{r['배정액범위'][0]:,}원 ~ {r['배정액범위'][1]:,}원"
                    if r.get("배정액범위") else "-")},
             {"항목": "이번에 손보는 등분",
-             "값": ("첫 실행 — 전 등분을 한 번에 채움" if r["첫실행"]
+             "값": (("첫 실행(분할 진입) — "
+                    f"{r['이번등분']}번 등분부터 매주 한 등분씩 "
+                    f"{tranches}주에 걸쳐 채웁니다"
+                    if r["첫실행"] and r["이번등분"] is not None
+                    else "첫 실행 — 전 등분을 한 번에 채움")
+                   if r["첫실행"]
                    else f"{r['이번등분']}번 / 총 {tranches}등분")},
             {"항목": "목표 종목 수", "값": r["목표종목수"]},
             {"항목": "현재 보유", "값": r["보유종목수"]},
+            {"항목": "배정됐지만 아직 안 산 종목",
+             "값": (f"{r['미매수']}종목 — 다음 등분 차례에 삽니다"
+                   if r.get("미매수") else "없음")},
             {"항목": "매도 (전량)", "값": r["매도"]},
             {"항목": "비중조절 (일부만)", "값": r.get("비중조절", 0)},
             {"항목": "현금투입",
@@ -167,6 +176,7 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
         "기준일": f"{date.today():%Y-%m-%d}", "이번등분": r["이번등분"],
         "등분수": tranches, "매도": r["매도"], "매수": r["매수"], "유지": r["유지"],
         "보유종목수": r["보유종목수"], "첫실행": r["첫실행"],
+        "미매수": r.get("미매수", 0), "배정완료종목수": r.get("배정완료종목수"),
         "종목당배정액": r.get("종목당배정액"), "가격초과제외": r.get("가격초과제외"),
         "orders": r["orders"].to_dict(orient="records"),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -174,7 +184,11 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
     print("\n" + "=" * 60)
     print(f"  한국장 주간 주문서 · {prof['라벨']} · {date.today():%Y-%m-%d}")
     print("=" * 60)
-    if r["첫실행"]:
+    if r["첫실행"] and r["이번등분"] is not None:
+        print(f"  첫 실행(분할 진입) — {tranches}등분 중 {r['이번등분']}번 등분 "
+              f"{r['매수']}종목만 담습니다. 나머지 {r.get('미매수', 0)}종목은 "
+              f"다음 차례에.")
+    elif r["첫실행"]:
         print(f"  첫 실행입니다 — {r['매수']}종목을 한 번에 담습니다.")
     else:
         print(f"  {tranches}등분 중 {r['이번등분']}번 등분 차례")
@@ -258,6 +272,19 @@ def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
     return 0
 
 
+def reset_main(prof: dict | None = None) -> int:
+    """아직 체결하지 않은 계좌의 보유 상태를 비웁니다."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    prof = prof or config.profile()
+    n = portfolio.reset_state(prof["state_table"])
+    print("\n" + "=" * 60)
+    print(f"  보유 상태 초기화 — {prof['라벨']} 계좌")
+    print("=" * 60)
+    print(f"  {n}종목 → 0종목. 다음 주문서가 '첫 실행'으로 나옵니다.")
+    print("  (이미 체결한 계좌라면 이걸 쓰지 말고 resync를 쓰세요)")
+    return 0
+
+
 def capital_main(total: float, cash: float = 0.0,
                  prof: dict | None = None) -> int:
     """현금으로 처음 시작하는 계좌 — 운용금액을 적어 둡니다 (처음 한 번만)."""
@@ -305,6 +332,8 @@ if __name__ == "__main__":
         _cash = float(rest[0]) if rest else 0.0
         _tr = int(rest[1]) if len(rest) > 1 else 4
         sys.exit(resync_main(src, _cash, _tr, _prof))
+    if len(sys.argv) > 1 and sys.argv[1] == "reset":
+        sys.exit(reset_main(_prof))
     if len(sys.argv) > 1 and sys.argv[1] == "capital":
         if len(sys.argv) < 3:
             print("사용법: python run_weekly.py capital 10000000 [대기현금] "

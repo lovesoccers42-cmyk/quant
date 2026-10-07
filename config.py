@@ -129,6 +129,19 @@ REBAL_BAND = float(os.getenv("QUANT_REBAL_BAND", "0.20"))
 # 제외에 쓰는 관례적인 방식이고, 좋은 값을 찾으려 여러 배수를 돌리지 않습니다.
 RANK_BUFFER = float(os.getenv("QUANT_RANK_BUFFER", "0.5"))
 
+# 주문 엔진에 넘기는 모델 파일의 종목 수. 상위 100종목만 쓰면, 1주 가격이
+# 배정액보다 비싼 종목이 빠진 자리를 '다음 순위'로 채울 수 없습니다.
+# (실측: 배우자 1,000만원 계좌에서 7자리가 비어 93종목 · 현금 167만원 잔류)
+MODEL_ROWS = int(os.getenv("QUANT_MODEL_ROWS", "200"))
+
+# 현금으로 시작하는 계좌의 첫 주문서를 4주에 나눌지(1) 하루에 다 넣을지(0).
+#
+# 백테스트 첫 회차는 전액을 한 번에 넣습니다. 나눠 넣으면 그와 달라지는데,
+# 상승장이면 1.5주치 상승분을 덜 먹습니다(연 10% 기준 약 0.3%). 대신 전
+# 재산이 하루의 주가에 걸리지 않습니다. 기대값이 아니라 분산의 문제라
+# 숫자가 답을 주지 않으므로, 적립식 방식에 맞춰 분할을 기본으로 둡니다.
+STAGED_FIRST = os.getenv("QUANT_STAGED_FIRST", "1") not in ("0", "false", "False")
+
 # ── 실전 운용 자금 ───────────────────────────────────────────
 # 주간 주문서에 '몇 주 살지'를 적으려면 총 평가액이 필요합니다.
 # 종목당 배정액 = CAPITAL_KRW ÷ N_PORTFOLIO, 수량 = 배정액 ÷ 주가 (내림).
@@ -264,7 +277,7 @@ PROFILES: dict[str, dict] = {
         # 공용 70%는 그 사이의 보간이고 직접 측정하지는 않았습니다.
         # 희석은 완전 분할의 30% 수준(약 7~8%p)으로 예상되지만 예상입니다.
         # 2/0@0.7 · 2/1@0.7 백테스트 2회로 확인할 수 있습니다.
-        "split": {"mod": 2, "rem": 0, "shared": 0.7},
+        "split": {"mod": 2, "rem": 0, "shared": 0.5},
     },
     # alt는 main과 '설정이 같고 종목만 다른' 계좌입니다.
     #
@@ -284,7 +297,7 @@ PROFILES: dict[str, dict] = {
         "max_sector_pct": 1.0,
         "slot_offset": 2,
         "qvm_weights": None,
-        "split": {"mod": 2, "rem": 1, "shared": 0.7},
+        "split": {"mod": 2, "rem": 1, "shared": 0.5},
     },
 }
 DEFAULT_PROFILE = os.getenv("QUANT_PROFILE", "main").strip().lower()

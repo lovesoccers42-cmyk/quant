@@ -389,7 +389,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
               hold_universe=None, cash: float = 0.0,
               table: str = STATE, slot_offset: int = 0,
               weighting: str = "equal", max_weight: float = 0.0,
-              vol: str = "VOL") -> dict:
+              vol: str = "VOL", staged_first: bool | None = None) -> dict:
     """모델 순위표(picks)를 받아 이번 회차 주문을 계산하고 상태를 갱신합니다.
 
     picks는 qvm 오름차순(좋은 종목이 위)으로 정렬돼 있어야 합니다.
@@ -455,15 +455,30 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     trims: list[dict] = []          # 유지하지만 비중을 조절할 종목
     cash_orders: list[dict] = []    # 투입 대기 현금으로 채우는 주문
     if first:
-        # 첫 실행 — 전액을 한 번에 넣습니다. 순위를 등분에 번갈아 나눠
-        # 어느 한 등분만 상위권을 독차지하지 않게 합니다.
-        rows, slot_used = [], None
+        # 첫 실행 — 순위를 등분에 번갈아 나눠 어느 한 등분만 상위권을
+        # 독차지하지 않게 합니다.
+        #
+        # staged_first면 **이번 차례 등분만** 사고 나머지는 '배정만' 해 둡니다
+        # (기준금액 0 = 아직 안 산 종목). 그러면 4주에 걸쳐 들어갑니다.
+        # 끄면 전액을 하루에 넣습니다 — 백테스트 첫 회차와 같은 구조지만
+        # 전 재산이 그 하루의 주가에 걸립니다. 어느 쪽이 맞다고 숫자가
+        # 말해주지 않으므로(진입 시점은 기대값이 아니라 분산 문제입니다)
+        # 기본값은 분할이고, 설정으로 바꿉니다.
+        staged = (config.STAGED_FIRST if staged_first is None
+                  else bool(staged_first))
+        slot_used = (current_slot(tranches, today, offset=slot_offset)
+                     if (staged and tranches > 1) else None)
+        rows = []
         for i, code in enumerate(target[:n]):
-            rows.append({"종목코드": code, "등분": i % tranches, "편입일": today,
-                         "기준금액": (amount_of(code) if unit > 0
-                                   else np.nan)})
+            j = i % tranches
+            now = slot_used is None or j == slot_used
+            rows.append({"종목코드": code, "등분": j, "편입일": today,
+                         "기준금액": (amount_of(code) if (now and unit > 0)
+                                   else (0.0 if not now else np.nan))})
         new_state = pd.DataFrame(rows)
-        buys, sells, keeps = [r["종목코드"] for r in rows], [], []
+        buys = [r["종목코드"] for r in rows
+                if slot_used is None or r["등분"] == slot_used]
+        sells, keeps = [], []
     else:
         slot_used = current_slot(tranches, today, offset=slot_offset)
         mine = state[state["등분"] == slot_used]["종목코드"].tolist()
@@ -475,6 +490,16 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
                     else buy_set)
         base = dict(zip(state["종목코드"], pd.to_numeric(state["기준금액"],
                                                      errors="coerce")))
+
+        # 기준금액 0 = 분할 진입에서 '배정만 했고 아직 안 산' 종목입니다.
+        # 들고 있지 않으므로 매도 대상이 아니고, 비중 조절 대상도 아닙니다.
+        # 이번 차례면 아래 매수 로직이 순위대로 다시 집어 올립니다(상위 n위
+        # 밖으로 밀려났다면 그냥 빠지고 다른 종목이 들어옵니다 — 산 적이
+        # 없으니 팔 것도 없습니다).
+        pending = {c for c in mine
+                   if base.get(c) is not None
+                   and pd.notna(base.get(c)) and float(base.get(c)) == 0.0}
+        mine = [c for c in mine if c not in pending]
 
         keeps = [c for c in mine if c in hold_set]      # 버퍼 안이면 그대로
         sells = [c for c in mine if c not in hold_set]
@@ -667,7 +692,12 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         "이번등분": slot_used,
         "등분수": tranches,
         "목표종목수": n,
-        "보유종목수": len(new_state),
+        # 미매수(기준금액 0)는 아직 들고 있는 게 아닙니다.
+        "보유종목수": int((pd.to_numeric(new_state["기준금액"], errors="coerce")
+                       .fillna(-1) != 0).sum()),
+        "배정완료종목수": len(new_state),
+        "미매수": int((pd.to_numeric(new_state["기준금액"], errors="coerce")
+                    == 0).sum()),
         "매도": len(sells), "매수": len(buys), "유지": len(keeps),
         "비중조절": len(trims),
         "현금투입": len(cash_orders),
@@ -698,6 +728,24 @@ def load_capital(table: str = CAPITAL) -> dict:
     r = df.sort_values("기준일").iloc[-1]
     return {"기준일": r["기준일"], "평가액": float(r["평가액"]),
             "현금": float(r.get("현금", 0) or 0), "총자본": float(r["총자본"])}
+
+
+def reset_state(table: str = STATE) -> int:
+    """보유 상태를 비웁니다 — **아직 한 주도 체결하지 않은 계좌만**.
+
+    쓰는 경우: 주문서를 뽑았지만 거래하지 않았고, 설정을 바꿔 처음부터
+    다시 뽑으려는 경우. 주문서를 만들면 그 시점에 "샀다"고 상태에 적히기
+    때문에, 안 사고 다시 돌리면 두 번째 주문서가 '이미 보유 중'을 전제로
+    나옵니다.
+
+    이미 체결한 계좌에 쓰면 보유 이력과 등분 배정이 날아갑니다. 그 경우는
+    reset이 아니라 resync(실제 보유 목록으로 다시 맞추기)를 쓰세요.
+    """
+    cols = list(store.SCHEMAS.get(table) or store.SCHEMAS["kor_portfolio"])
+    before = len(load_state(table))
+    store.write(table, pd.DataFrame(columns=cols))
+    log.info("보유 상태 초기화 — %s (%d종목 → 0)", table, before)
+    return before
 
 
 def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,

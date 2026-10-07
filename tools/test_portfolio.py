@@ -24,6 +24,19 @@ import pandas as pd  # noqa: E402
 import portfolio  # noqa: E402
 import store  # noqa: E402
 
+# 이 파일의 대부분은 '이미 100종목을 들고 있는 상태'의 주차별 동작을 봅니다.
+# 그래서 기본값은 일괄 진입으로 두고, 분할 진입(config.STAGED_FIRST)은 아래
+# [분할 진입] 절에서 staged_first=True로 명시해 따로 검증합니다.
+_rebalance = portfolio.rebalance
+
+
+def _rebalance_default_oneshot(*a, **kw):
+    kw.setdefault("staged_first", False)
+    return _rebalance(*a, **kw)
+
+
+portfolio.rebalance = _rebalance_default_oneshot
+
 fails = []
 
 
@@ -50,7 +63,10 @@ N, TR = 100, 4
 universe = [f"{i:06d}" for i in range(1, 401)]
 
 # ── 1. 첫 실행 ───────────────────────────────────────────────
-r1 = portfolio.rebalance(model(universe), n=N, tranches=TR, today=date(2026, 10, 9))
+# 분할 진입은 아래 [분할 진입] 절에서 따로 봅니다. 여기서는 등분 배분과
+# 주차별 동작을 보려고 일괄 진입으로 상태를 만듭니다.
+r1 = portfolio.rebalance(model(universe), n=N, tranches=TR,
+                         today=date(2026, 10, 9))
 check(r1["첫실행"], "첫 실행으로 인식")
 check(r1["보유종목수"] == N, f"100종목을 한 번에 채움 ({r1['보유종목수']})")
 check(r1["매수"] == N and r1["매도"] == 0, f"전량 매수 ({r1['매수']}매수/{r1['매도']}매도)")
@@ -633,9 +649,11 @@ cash_state = "kor_portfolio_cash_test"
 rc = portfolio.rebalance(
     model_cash(universe), n=N, tranches=TR, today=date(2026, 10, 8),
     capital=ci["총자본"], cash=ci["현금"], table=cash_state,
-    weighting="score")
-check(rc["첫실행"] and rc["매수"] == N,
-      f"현금 계좌 첫 주문서가 100종목 신규매수 ({rc['매수']})")
+    weighting="score", staged_first=True)
+check(rc["첫실행"] and 20 <= rc["매수"] <= 26,
+      f"현금 계좌 첫 주문서는 한 등분만 ({rc['매수']}종목 매수)")
+check(rc["배정완료종목수"] == N and rc["미매수"] == N - rc["매수"],
+      f"나머지 {rc['미매수']}종목은 배정만 해두고 다음 등분 차례에")
 check(not rc.get("현금투입"), "첫 주문서에 현금투입 주문이 섞이지 않음")
 qty = pd.to_numeric(rc["orders"]["수량"], errors="coerce")
 check(qty.notna().all() and (qty > 0).all(),
@@ -655,6 +673,86 @@ check(rp.get("가격초과제외", 0) >= 2,
 check(rp["보유종목수"] == N, f"제외한 자리를 다음 순위로 채움 ({rp['보유종목수']})")
 check(universe[0] not in set(rp["orders"]["종목코드"]),
       "1주도 못 사는 종목은 주문서에 없음")
+
+# ── 분할 진입 (현금 계좌 첫 주문서를 4주에 나눠 담기) ────────────
+print("\n[분할 진입]")
+ST = "kor_portfolio_staged_test"
+CAPS = 10_000_000
+WEEKS = [date(2026, 10, 8), date(2026, 10, 15), date(2026, 10, 22),
+         date(2026, 10, 29)]
+slots = [portfolio.current_slot(TR, d) for d in WEEKS]
+check(sorted(slots) == [0, 1, 2, 3], f"4주가 서로 다른 등분을 짚음 {slots}")
+
+r_1 = portfolio.rebalance(model_cash(universe), n=N, tranches=TR,
+                          today=WEEKS[0], capital=CAPS, table=ST,
+                          weighting="score", staged_first=True)
+check(r_1["첫실행"] and r_1["이번등분"] == slots[0],
+      f"첫 실행이지만 이번 등분({r_1['이번등분']})만 손봄")
+check(20 <= r_1["매수"] <= 26, f"한 등분(약 25종목)만 매수 ({r_1['매수']})")
+check(r_1["미매수"] == N - r_1["매수"],
+      f"나머지는 배정만 ({r_1['미매수']}종목 미매수)")
+check(r_1["배정완료종목수"] == N, f"배정은 100종목 전부 ({r_1['배정완료종목수']})")
+check(r_1["보유종목수"] == r_1["매수"],
+      f"보유 집계는 실제 산 것만 ({r_1['보유종목수']})")
+spend1 = pd.to_numeric(r_1["orders"]["예상금액"], errors="coerce").sum()
+check(spend1 < CAPS * 0.35,
+      f"이번 주 투입액은 전체의 1/4 수준 ({spend1:,.0f}원 / {CAPS:,}원)")
+
+# 주차가 지나면 남은 등분을 순서대로 채우고, 산 적 없는 종목을 팔지 않습니다
+held = [r_1["매수"]]
+for i, d in enumerate(WEEKS[1:], start=1):
+    rr = portfolio.rebalance(model_cash(universe), n=N, tranches=TR, today=d,
+                             capital=CAPS, table=ST, weighting="score",
+                             staged_first=True)
+    check(rr["매도"] == 0,
+          f"{i + 1}주차: 산 적 없는 종목을 팔지 않음 (매도 {rr['매도']})")
+    held.append(rr["보유종목수"])
+check(held[-1] == N, f"4주 뒤 100종목 완성 (주차별 보유 {held})")
+last = portfolio.load_state(ST)
+zeros = int((pd.to_numeric(last["기준금액"], errors="coerce") == 0).sum())
+check(zeros == 0, f"미매수 종목이 남지 않음 ({zeros}종목)")
+check(all(held[i] < held[i + 1] for i in range(len(held) - 1)),
+      f"매주 늘어남 {held}")
+
+# 중간에 순위에서 밀려난 '미매수' 종목은 매도가 아니라 그냥 빠져야 합니다
+ST2 = "kor_portfolio_staged_drop_test"
+portfolio.rebalance(model_cash(universe), n=N, tranches=TR, today=WEEKS[0],
+                    capital=CAPS, table=ST2, weighting="score",
+                    staged_first=True)
+shifted = universe[60:] + universe[:60]      # 상위 60종목이 통째로 밀려남
+rd = portfolio.rebalance(model_cash(shifted), n=N, tranches=TR, today=WEEKS[1],
+                         capital=CAPS, table=ST2, weighting="score",
+                         staged_first=True)
+sold = set(rd["orders"].query("구분 == '매도'")["종목코드"])
+st2 = portfolio.load_state(ST2)
+check(not sold, f"순위에서 밀려난 미매수 종목은 매도 주문이 안 나옴 ({len(sold)})")
+check(rd["매수"] > 0, f"그 자리는 새 종목으로 채움 (매수 {rd['매수']})")
+
+# 분할을 끄면 예전처럼 하루에 다 담습니다
+ST3 = "kor_portfolio_oneshot_test"
+r_os = portfolio.rebalance(model_cash(universe), n=N, tranches=TR,
+                           today=WEEKS[0], capital=CAPS, table=ST3,
+                           weighting="score", staged_first=False)
+check(r_os["매수"] == N and r_os["미매수"] == 0,
+      f"staged_first=False면 100종목 일괄 ({r_os['매수']}매수)")
+
+# 모델 파일이 깊어야 1주 제약으로 빈 자리를 채울 수 있습니다 (실측 버그)
+ST4 = "kor_portfolio_depth_test"
+expensive = {c: 400_000.0 for c in universe[:10]}      # 배정액의 4배
+px_mix = {**{c: 15_000.0 for c in universe}, **expensive}
+r_d = portfolio.rebalance(model_cash(universe, prices=px_mix), n=N,
+                          tranches=TR, today=WEEKS[0], capital=CAPS,
+                          table=ST4, weighting="score", staged_first=False)
+check(r_d["가격초과제외"] == 10, f"비싼 10종목 제외 ({r_d['가격초과제외']})")
+check(r_d["배정완료종목수"] == N,
+      f"명단이 깊으면 빈 자리를 다음 순위로 채워 100종목 ({r_d['배정완료종목수']})")
+only100 = model_cash(universe[:100], prices=px_mix)
+r_s = portfolio.rebalance(only100, n=N, tranches=TR, today=WEEKS[0],
+                          capital=CAPS, table="kor_portfolio_shallow_test",
+                          weighting="score", staged_first=False)
+check(r_s["배정완료종목수"] <= 92,
+      f"명단이 100종목뿐이면 {r_s['배정완료종목수']}종목밖에 못 채움 "
+      f"(빈 자리를 메울 101위 이하가 없음) — 그래서 모델 파일을 200종목으로 씁니다")
 
 shutil.rmtree(TMP, ignore_errors=True)
 
