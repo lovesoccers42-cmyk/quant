@@ -230,23 +230,37 @@ print("\n[수량 계산]")
 store.write("kor_portfolio",
             pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
 CAP = 30_000_000                       # 3,000만원 → 종목당 30만원
-# 상위 5종목을 '1주에 50만원'으로 만들어 배정액을 넘게 합니다
-pricey = {c: 500_000 for c in universe[:5]}
-px = {c: pricey.get(c, 20_000) for c in universe}
+# 상위 3종목은 1주 50만원(배정액의 1.67배) — 2배 안이므로 1주만 담아야 합니다.
+# 그다음 3종목은 1주 150만원(5배) — 이건 포기하고 다음 순위로 채워야 합니다.
+near = {c: 500_000 for c in universe[:3]}
+far = {c: 1_500_000 for c in universe[3:6]}
+px = {c: near.get(c, far.get(c, 20_000)) for c in universe}
 r8 = portfolio.rebalance(model(universe, px), n=N, tranches=TR,
                          today=date(2026, 11, 6), capital=CAP)
 check(r8["종목당배정액"] == 300_000, f"종목당 배정액 30만원 ({r8['종목당배정액']:,})")
-check(r8["가격초과제외"] == 5, f"배정액보다 비싼 5종목 제외 ({r8['가격초과제외']})")
-bought = set(r8["orders"].query("구분 == '매수'")["종목코드"])
-check(not (bought & set(universe[:5])), "1주도 못 사는 종목은 주문에 없음")
+check(r8["가격초과제외"] == 3,
+      f"2배를 넘는 3종목만 제외 ({r8['가격초과제외']}) — 1.67배는 1주로 담습니다")
+buys = r8["orders"].query("구분 == '매수'")
+bought = set(buys["종목코드"])
+check(not (bought & set(universe[3:6])), "2배를 넘는 종목은 주문에 없음")
+check(set(universe[:3]) <= bought, "2배 안쪽 비싼 종목은 1주로 담김")
+one = buys[buys["종목코드"].isin(universe[:3])]
+check(bool((pd.to_numeric(one["수량"]) == 1).all()),
+      f"비싼 종목은 정확히 1주 ({sorted(set(pd.to_numeric(one['수량'])))})")
 check(r8["보유종목수"] == N, f"그래도 100종목을 채움 ({r8['보유종목수']})")
-qty = r8["orders"].query("구분 == '매수'")["수량"]
+qty = pd.to_numeric(buys["수량"])
 check(bool((qty > 0).all()), "모든 매수 종목의 수량이 1주 이상")
-check(int(qty.iloc[0]) == 300_000 // 20_000, f"수량 = 배정액÷주가 내림 ({int(qty.iloc[0])}주)")
-amt = r8["orders"].query("구분 == '매수'")["예상금액"]
-check(bool((amt <= 300_000 + 1).all()), "예상금액이 배정액을 넘지 않음")
-print(f"    → 매수 {len(qty)}종목 · 1종목당 {int(qty.iloc[0])}주 "
-      f"· 합계 {amt.sum():,.0f}원")
+cheap = buys[~buys["종목코드"].isin(universe[:3])]
+cq = pd.to_numeric(cheap["수량"])
+# 비싼 3종목에 150만원이 가므로 나머지 목표는 비례로 조금 줄어듭니다
+check(bool(((cq >= 13) & (cq <= 15)).all()),
+      f"나머지 종목 수량은 배정액 축소분만큼만 줄어듦 ({cq.min()}~{cq.max()}주)")
+amt = pd.to_numeric(buys["예상금액"])
+check(amt.sum() <= CAP + 1,
+      f"예상금액 합계가 총자본을 넘지 않음 ({amt.sum():,.0f} / {CAP:,})")
+check(bool((amt <= 600_000 + 1).all()),
+      f"어떤 종목도 배정액의 2배를 넘지 않음 (최대 {amt.max():,.0f}원)")
+print(f"    → 매수 {len(qty)}종목 · 합계 {amt.sum():,.0f}원")
 
 # 자금을 안 주면 수량 칸이 비어야 합니다 (조용히 1주로 넣으면 안 됨)
 store.write("kor_portfolio",
@@ -318,7 +332,7 @@ portfolio.seed([{"종목코드": "000111", "평가금액": 1_000_000},
 pricey_code = portfolio.load_state()["종목코드"].iloc[0]
 order3 = [pricey_code] + [c for c in universe]
 px3 = {c: 20_000 for c in order3}
-px3[pricey_code] = 400_000                 # 1주 40만 > 목표 30만
+px3[pricey_code] = 1_000_000               # 1주 100만 > 목표 30만의 2배
 found = False
 for d in range(1, 6):
     rr = portfolio.rebalance(model(order3, px3), n=N, tranches=TR,

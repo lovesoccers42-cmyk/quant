@@ -9,6 +9,12 @@ on:
         default: "kr"
         type: choice
         options: ["kr", "us"]
+      probe:
+        description: "생존편향 측정도 같이 돌릴지 (1=돌림). 느립니다"
+        required: false
+        default: "0"
+        type: choice
+        options: ["0", "1"]
       top_n:
         description: "보유 종목 수 (확정 100). 30은 -10.9%p, 150은 더 나빴습니다"
         required: false
@@ -131,6 +137,10 @@ jobs:
       - name: 데이터 기간 점검 (미국장만)
         if: ${{ github.event.inputs.market == 'us' }}
         run: python tools/probe_us.py
+
+      - name: 생존편향 측정 (한국장만 · probe=1)
+        if: ${{ github.event.inputs.market != 'us' && github.event.inputs.probe == '1' }}
+        run: python tools/probe_survivorship.py "${{ github.event.inputs.top_n }}"
 
       - name: 백테스트 실행
         run: |

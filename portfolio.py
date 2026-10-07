@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import config
 import store
 
 log = logging.getLogger("quant_agent.portfolio")
@@ -214,9 +215,57 @@ def seed(holdings, *, tranches: int = 4, today: date | None = None,
 
 
 
+def _lot_fit(out: dict, keep: list, price_map, capital: float,
+             tol: float) -> dict:
+    """비싼 종목도 '1주'는 담도록 목표 금액을 손봅니다.
+
+    왜 필요한가: 한국 주식은 1주 단위라 목표 금액보다 주가가 비싸면 아예 못
+    삽니다. 1000만원·100종목이면 종목당 10만원이라 **상위 100종목 중 평균
+    9종목**이 그렇게 빠집니다. 빠진 자리는 다음 순위로 채우는데, 그러면
+    '비싼 주식은 안 사는' 전략이 됩니다 — 백테스트에는 없던 제약입니다.
+    2024~2025 7개 시점 실측: 그렇게 채운 포트폴리오는 제약 없는 포트폴리오보다
+    12개월 수익률이 평균 4.26%p 낮았고 7개 시점 모두 낮았습니다.
+
+    그래서 목표의 tol배까지는 '1주 값'을 목표로 바꿔 한 주만 담고, 나머지
+    종목의 목표를 비례로 줄여 총액을 맞춥니다. tol=2로 실측하면 제약 없는
+    포트폴리오와의 차이가 +0.67%p(표준편차 4.16%p) — 사실상 같아집니다.
+    tol=3은 +4.85%p였지만 비싼 9종목에 전체의 15~20%가 실립니다. 그건
+    '비싼 주식에 베팅'이라 2배로 멈춥니다.
+    """
+    if not price_map or tol <= 1 or capital <= 0:
+        return out
+    cur = dict(out)
+    for _ in range(3):
+        fixed, rest = {}, []
+        for c in keep:
+            px, amt = price_map.get(c), cur.get(c, 0.0)
+            if (px is None or not np.isfinite(px) or px <= 0 or amt <= 0
+                    or px <= amt):
+                rest.append(c)
+                continue
+            if px <= amt * tol:
+                fixed[c] = float(px)      # 1주만
+            else:
+                rest.append(c)            # 2배를 넘으면 포기 (다음 순위로)
+        if not fixed:
+            return cur
+        rem = float(capital) - sum(fixed.values())
+        base = sum(cur.get(c, 0.0) for c in rest)
+        if rem <= 0 or base <= 0:
+            return out                    # 비싼 종목이 너무 많으면 손대지 않음
+        nxt = dict(fixed)
+        for c in rest:
+            nxt[c] = cur.get(c, 0.0) * rem / base
+        if all(abs(nxt[c] - cur.get(c, 0.0)) < 1.0 for c in keep):
+            return nxt
+        cur = nxt
+    return cur
+
+
 def target_amounts(ranked, *, capital: float, n: int, weighting: str = "equal",
                    price_map=None, vol_map=None, cap: float = 0.0,
-                   rank_map=None, universe_n: int = 0) -> dict:
+                   rank_map=None, universe_n: int = 0,
+                   lot_tol: float = 0.0) -> dict:
     """종목별 목표 금액. 백테스트의 비중 방식을 실전 주문서에 그대로 옮깁니다.
 
     이게 없으면 주문서는 전 종목에 같은 금액을 배정합니다 — 그러면 점수가중을
@@ -279,6 +328,8 @@ def target_amounts(ranked, *, capital: float, n: int, weighting: str = "equal",
         sub = sub / sub.sum()
 
     out = {c: float(capital) * float(x) for c, x in zip(keep, sub)}
+    # 1주 제약 보정 — 비싼 종목도 한 주는 담고 나머지를 비례로 줄입니다.
+    out = _lot_fit(out, keep, price_map, capital, float(lot_tol or 0.0))
     # 버퍼 구간 종목도 목표가 있어야 비중 조절을 계산할 수 있습니다.
     # 순위 밖이니 n위 종목의 목표를 그대로 씁니다 (더 싣지는 않음).
     tail = float(min(out.values())) if out else 0.0
@@ -387,7 +438,8 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     amounts = target_amounts(ranked_all, capital=float(capital or 0.0), n=n,
                              weighting=weighting, price_map=price_map,
                              vol_map=vol_map, cap=float(max_weight or 0.0),
-                             rank_map=rank_map, universe_n=universe_n)
+                             rank_map=rank_map, universe_n=universe_n,
+                             lot_tol=config.LOT_TOLERANCE)
     avg_unit = (float(capital) / max(n, 1)) if capital and capital > 0 else 0.0
 
     def amount_of(c):
