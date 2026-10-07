@@ -27,6 +27,7 @@ PRIMARY_KEYS: dict[str, list[str]] = {
     "kor_fs": ["계정", "기준일", "종목코드", "공시구분"],
     "kor_value": ["종목코드", "기준일", "지표"],
     "kor_portfolio": ["종목코드"],        # 실전 보유 상태 (분할 리밸런싱)
+    "kor_capital": ["기준일"],           # 운용자금 (월 1회 재동기화)
     # 미국장
     "global_ticker": ["Symbol", "country", "date"],
     "global_price": ["Date", "Symbol"],
@@ -58,6 +59,9 @@ SCHEMAS: dict[str, dict[str, str]] = {
                   "값": "DOUBLE"},
     # 기준금액 = 그 종목을 마지막으로 손봤을 때의 목표 금액. 실시간 평가액이
     # 아니라 '그때 맞춰 둔 값'입니다. 비중 조절 수량을 계산하는 데 씁니다.
+    # 운용자금 — 월 1회 재동기화로 갱신. 한 줄만 유지합니다.
+    "kor_capital": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
+                    "총자본": "DOUBLE"},
     "kor_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
                       "기준금액": "DOUBLE",
                       "종목명": "VARCHAR", "섹터": "VARCHAR"},

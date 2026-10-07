@@ -393,6 +393,72 @@ for d in (23, 30, 6, 13):
         break
 check(sold_far, "버퍼 밖으로 완전히 밀려난 종목은 매도됨")
 
+# ── 11. 월 재동기화 + 투입 대기 현금 ────────────────────────
+print("\n[재동기화 · 현금투입]")
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+CAP3 = 30_000_000
+held3 = [{"종목코드": f"{i:06d}", "평가금액": 300_000, "종목명": f"보유{i}"}
+         for i in range(1, 101)]
+portfolio.seed(held3, tranches=TR, today=date(2026, 10, 2))
+
+# 한 달 뒤: 전 종목이 10% 올랐고 현금 120만원이 쌓였습니다.
+grown = [{"종목코드": h["종목코드"], "평가금액": 330_000, "종목명": h["종목명"]}
+         for h in held3]
+rs = portfolio.resync(grown, cash=1_200_000, tranches=TR, today=date(2026, 11, 6))
+check(rs["보유종목수"] == 100, f"보유 100종목 유지 ({rs['보유종목수']})")
+check(abs(rs["평가액"] - 33_000_000) < 1, f"평가액 갱신 ({rs['평가액']:,.0f})")
+check(abs(rs["총자본"] - 34_200_000) < 1, f"총자본 = 평가액+현금 ({rs['총자본']:,.0f})")
+check(abs(rs["종목당배정액"] - 342_000) < 1, f"배정액 재계산 ({rs['종목당배정액']:,.0f})")
+check(not rs["사라진종목"] and not rs["새로들어온종목"], "종목 변화 없음")
+cp = portfolio.load_capital()
+check(abs(cp["총자본"] - 34_200_000) < 1, "총자본이 저장돼 다시 읽힘")
+st11 = portfolio.load_state()
+check(abs(float(st11["기준금액"].iloc[0]) - 330_000) < 1,
+      f"기준금액이 실제 평가액으로 갱신 ({float(st11['기준금액'].iloc[0]):,.0f})")
+
+# 배정액 34.2만 vs 기준금액 33만 = 3.6% 차이 → 밴드(±20%) 안.
+# 현금이 없으면 아무것도 사지 않아야 하고(불필요한 거래 없음),
+# 현금이 있으면 밴드를 건너뛰고 사야 합니다(현금이 쌓이지 않게).
+px3 = {f"{i:06d}": 30_000 for i in range(1, 401)}
+order3 = [f"{i:06d}" for i in range(1, 101)] + universe[100:]
+# rebalance는 손본 등분의 기준금액을 목표로 갱신합니다. 두 설정을 같은 주로
+# 비교하려면 사이에 상태를 되돌려야 합니다 — 안 그러면 두 번째 호출은
+# "이미 목표에 맞춰져 있다"고 보고 아무것도 하지 않습니다.
+snap = portfolio.load_state().copy()
+no_cash = portfolio.rebalance(model(order3, px3), n=N, tranches=TR,
+                              today=date(2026, 11, 13), capital=34_200_000)
+check(no_cash.get("비중조절", 0) == 0,
+      f"현금이 없으면 밴드 안에서는 거래 없음 ({no_cash.get('비중조절')}건)")
+check(no_cash.get("현금투입", 0) == 0, "현금이 없으면 현금투입도 없음")
+
+store.write("kor_portfolio", snap)          # 같은 출발점으로 되돌림
+with_cash = portfolio.rebalance(model(order3, px3), n=N, tranches=TR,
+                                today=date(2026, 11, 13), capital=34_200_000,
+                                cash=1_200_000)
+check(with_cash["현금투입"] > 0,
+      f"현금이 있으면 밴드를 건너뛰고 매수 ({with_cash['현금투입']}종목)")
+budget = 1_200_000 / TR
+check(with_cash["현금투입금액"] <= budget + 1,
+      f"이번 주 예산(현금÷등분수={budget:,.0f}) 안에서만 씀 "
+      f"({with_cash['현금투입금액']:,}원)")
+check(with_cash["현금투입금액"] >= budget - 30_000,
+      f"예산을 거의 다 씀 ({with_cash['현금투입금액']:,}원)")
+co = with_cash["orders"].query("구분 == '현금투입'")
+check(bool((co["수량"] > 0).all()), "현금투입 수량이 1주 이상")
+check(set(co["종목코드"]) <= set(st11["종목코드"]), "현금투입은 보유 종목에만")
+print(f"    → 현금 1,200,000원 중 이번 주 {with_cash['현금투입금액']:,}원 투입 "
+      f"({with_cash['현금투입']}종목)")
+
+# 잘못된 재동기화는 조용히 넘어가지 않아야 합니다
+store.write("kor_portfolio",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio"])))
+try:
+    portfolio.resync(grown, cash=0, tranches=TR)
+    check(False, "보유 상태 없이 재동기화를 허용함")
+except ValueError as e:
+    check("seed" in str(e), "상태가 없으면 seed를 먼저 하라고 안내")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

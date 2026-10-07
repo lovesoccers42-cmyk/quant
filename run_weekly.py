@@ -3,7 +3,8 @@
 
     python run_weekly.py                    # 이번 주 주문서
     python run_weekly.py 4                  # 등분 수를 직접 지정
-    python run_weekly.py seed 보유종목.csv   # 이미 들고 있는 종목을 등분에 배분
+    python run_weekly.py seed 보유종목.csv   # 처음 한 번 — 보유 종목을 등분에 배분
+    python run_weekly.py resync 보유종목.csv 350000   # 월 1회 — 평가액·현금 갱신
 
 처음 시작할 때 (이미 한국 주식을 들고 있는 경우)
 ------------------------------------------------
@@ -67,8 +68,20 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
         log.warning("model_kr_hold.parquet이 없어 순위 버퍼 없이 돌립니다 "
                     "— 백테스트와 규칙이 달라집니다")
 
+    # 총자본 — 월 1회 재동기화 값이 있으면 그걸 씁니다 (환경변수는 폴백).
+    cap_info = portfolio.load_capital()
+    capital = float(cap_info.get("총자본") or config.CAPITAL_KRW)
+    cash = float(cap_info.get("현금") or 0.0)
+    if cap_info:
+        log.info("재동기화 기준 총자본 %.0f원 (평가액 %.0f + 현금 %.0f) · %s",
+                 capital, cap_info.get("평가액", 0), cash,
+                 pd.Timestamp(cap_info["기준일"]).date())
+    else:
+        log.warning("재동기화 기록이 없습니다 — QUANT_CAPITAL_KRW(%.0f)를 씁니다. "
+                    "`run_weekly.py resync`를 한 번 돌리세요.", config.CAPITAL_KRW)
+
     r = portfolio.rebalance(picks, n=config.N_PORTFOLIO, tranches=tranches,
-                            capital=config.CAPITAL_KRW,
+                            capital=capital, cash=cash,
                             hold_universe=hold_universe)
 
     today = f"{date.today():%Y%m%d}"
@@ -85,11 +98,18 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
             {"항목": "현재 보유", "값": r["보유종목수"]},
             {"항목": "매도 (전량)", "값": r["매도"]},
             {"항목": "비중조절 (일부만)", "값": r.get("비중조절", 0)},
+            {"항목": "현금투입",
+             "값": (f"{r.get('현금투입', 0)}종목 / "
+                   f"{r.get('현금투입금액', 0):,}원" if r.get("현금투입")
+                   else "없음")},
             {"항목": "매수", "값": r["매수"]},
             {"항목": "유지 (손 안 댐)", "값": r["유지"] - r.get("비중조절", 0)},
             {"항목": "총 운용금액",
-             "값": (f"{config.CAPITAL_KRW:,.0f}원" if config.CAPITAL_KRW > 0
-                   else "미설정 — QUANT_CAPITAL_KRW를 넣으면 수량까지 계산합니다")},
+             "값": (f"{capital:,.0f}원" if capital > 0
+                   else "미설정 — resync를 돌리거나 QUANT_CAPITAL_KRW를 넣으세요")},
+            {"항목": "투입 대기 현금",
+             "값": (f"{cash:,.0f}원 (이번 주 예산 "
+                   f"{r.get('이번주현금예산', 0):,}원)" if cash > 0 else "없음")},
             {"항목": "종목당 배정액",
              "값": (f"{r['종목당배정액']:,}원" if r.get("종목당배정액")
                    else "수량 계산 안 함")},
@@ -105,7 +125,8 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
                                  "나머지 등분은 이번 주에 손대지 않습니다."},
             {"항목": "구분 읽는 법",
              "값": "매도=전량 비우기 · 비중축소/비중확대=적힌 수량만큼만 "
-                  "(종목은 계속 보유) · 매수=신규 편입"},
+                  "(종목은 계속 보유) · 현금투입=쌓인 현금으로 추가 매수 "
+                  "· 매수=신규 편입"},
             {"항목": "돈이 모자라면",
              "값": "매도·비중축소를 먼저 체결하고, 들어온 현금으로 살 수 있는 "
                   "만큼만 위에서부터 사세요. 못 산 종목은 다음 차례에 채웁니다. "
@@ -182,7 +203,43 @@ def seed_main(src: str, tranches: int = 4) -> int:
     return 0
 
 
+def resync_main(src: str, cash: float = 0.0, tranches: int = 4) -> int:
+    """월 1회 — 실제 보유 평가액으로 기준금액과 총자본을 다시 맞춥니다."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    r = portfolio.resync(src, cash=cash, tranches=tranches)
+    print("\n" + "=" * 60)
+    print("  재동기화 완료")
+    print("=" * 60)
+    print(f"  보유 {r['보유종목수']}종목")
+    print(f"  평가액 {r['평가액']:>14,.0f}원")
+    print(f"  현금   {r['현금']:>14,.0f}원")
+    print(f"  총자본 {r['총자본']:>14,.0f}원  → 종목당 배정액 "
+          f"{r['종목당배정액']:,.0f}원")
+    if r["사라진종목"]:
+        print(f"\n  목록에 없어 상태에서 뺀 종목 {len(r['사라진종목'])}개: "
+              f"{', '.join(r['사라진종목'][:10])}"
+              f"{' …' if len(r['사라진종목']) > 10 else ''}")
+    if r["새로들어온종목"]:
+        print(f"  상태에 없던 보유 {len(r['새로들어온종목'])}개를 등분에 넣었습니다: "
+              f"{', '.join(r['새로들어온종목'][:10])}"
+              f"{' …' if len(r['새로들어온종목']) > 10 else ''}")
+    print(f"\n  등분별 금액: {r['등분별금액']}")
+    print("\n  이제 평소대로 `python run_weekly.py`를 돌리세요.")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "resync":
+        if len(sys.argv) > 2 and sys.argv[2] != "-":
+            src, rest = sys.argv[2], sys.argv[3:]
+        else:
+            src, rest = sys.stdin.read(), sys.argv[3:]
+            if not src.strip():
+                print("사용법: python run_weekly.py resync 보유종목.csv [현금] [등분수]")
+                sys.exit(2)
+        _cash = float(rest[0]) if rest else 0.0
+        _tr = int(rest[1]) if len(rest) > 1 else 4
+        sys.exit(resync_main(src, _cash, _tr))
     if len(sys.argv) > 1 and sys.argv[1] == "seed":
         # 인자로 경로를 주거나, 표준입력으로 붙여넣은 내용을 흘려보내도 됩니다.
         if len(sys.argv) > 2 and sys.argv[2] != "-":

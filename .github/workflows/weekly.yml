@@ -18,6 +18,14 @@ on:
         description: "처음 한 번만 — 보유 종목 CSV를 그대로 붙여넣으세요 (종목코드,평가금액,종목명)"
         required: false
         default: ""
+      resync_csv:
+        description: "월 1회 — 지금 보유 목록을 붙여넣으면 평가액·기준금액·총자본을 다시 맞춥니다"
+        required: false
+        default: ""
+      cash:
+        description: "투입 대기 현금(원). 수익 재투자분·추가 입금. 4주에 나눠 들어갑니다"
+        required: false
+        default: "0"
       tranches:
         description: "등분 수 (주간 4등분이면 4)"
         required: false
@@ -86,6 +94,17 @@ jobs:
           echo "--- 붙여넣은 보유 종목 ---"
           cat holdings.csv
           python run_weekly.py seed holdings.csv "${{ github.event.inputs.tranches || '4' }}"
+
+      - name: 보유·자금 재동기화 (월 1회)
+        if: ${{ github.event.inputs.resync_csv != '' }}
+        env:
+          RESYNC_CSV: ${{ github.event.inputs.resync_csv }}
+          CASH: ${{ github.event.inputs.cash || '0' }}
+        run: |
+          printf '%s\n' "$RESYNC_CSV" > resync.csv
+          echo "--- 붙여넣은 보유 목록 ---"
+          cat resync.csv
+          python run_weekly.py resync resync.csv "$CASH" "${{ github.event.inputs.tranches || '4' }}"
 
       - name: 주간 주문서 만들기
         run: python run_weekly.py "${{ github.event.inputs.tranches || '4' }}"
