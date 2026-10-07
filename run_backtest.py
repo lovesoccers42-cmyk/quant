@@ -182,7 +182,8 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
 
     label = backtest.SPECS[market].label
     today = f"{date.today():%Y%m%d}"
-    name = f"{config.REPORT_NAME} 백테스트 {label} {today[4:]}_{config.REPORT_SUFFIX}"
+    name = (f"{config.REPORT_NAME} 백테스트 {label} "
+            f"backtest-{market}-{today[4:]}_{config.REPORT_SUFFIX}")
 
     xlsx = config.OUTPUT_DIR / f"{name}.xlsx"
     with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:

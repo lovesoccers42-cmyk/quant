@@ -189,14 +189,23 @@ MAX_ERROR_RATE = float(os.getenv("QUANT_MAX_ERROR_RATE", "0.05"))
 MIN_SECTORS = int(os.getenv("QUANT_MIN_SECTORS", "10"))
 
 # ── 결과 엑셀 파일명 ─────────────────────────────────────────
-# 예) "상수리 퀀트투자 알고리즘 미국 0913_100.xlsx"
+# 예) "상수리 퀀트투자 알고리즘 미국 us-0913_100.xlsx"
+#
+# 파일명에 영문 토큰(us-, kr-, weekly-main- 같은)을 꼭 넣습니다. GitHub 릴리스는
+# 에셋 이름에서 한글을 떼어내기 때문에, 토큰이 없으면 서로 다른 리포트가 모두
+# "0913_100.xlsx" 하나로 합쳐지고 --clobber로 덮어써집니다. 실제로 10-06에
+# 주간 주문서가 같은 날 돌아간 백테스트 리포트에 덮여 사라졌습니다.
 REPORT_NAME = os.getenv("QUANT_REPORT_NAME", "상수리 퀀트투자 알고리즘")
 REPORT_SUFFIX = os.getenv("QUANT_REPORT_SUFFIX", "100")
 
 
-def report_filename(market_label: str, yyyymmdd: str) -> str:
-    """market_label은 '한국' 또는 '미국', yyyymmdd는 8자리."""
-    return f"{REPORT_NAME} {market_label} {yyyymmdd[4:]}_{REPORT_SUFFIX}.xlsx"
+def report_filename(market_label: str, yyyymmdd: str, token: str = "") -> str:
+    """market_label은 '한국' 또는 '미국', yyyymmdd는 8자리.
+
+    token은 파일명에 남길 영문 식별자입니다(릴리스에서 한글이 떨어져도 구분되게).
+    """
+    tok = f"{token}-" if token else ""
+    return f"{REPORT_NAME} {market_label} {tok}{yyyymmdd[4:]}_{REPORT_SUFFIX}.xlsx"
 
 
 # ── 알림 설정 ────────────────────────────────────────────────

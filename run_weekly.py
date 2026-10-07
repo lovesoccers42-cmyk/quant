@@ -100,9 +100,11 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
                             max_weight=config.MAX_WEIGHT)
 
     today = f"{date.today():%Y%m%d}"
+    # 파일명에 weekly-main / weekly-alt 토큰을 넣습니다 — GitHub 릴리스가
+    # 한글을 떼어내므로 토큰이 없으면 백테스트 리포트와 이름이 겹쳐 덮입니다.
     name = (f"{config.REPORT_NAME} 한국 주간주문 "
             f"{'' if prof['key'] == 'main' else prof['라벨'] + ' '}"
-            f"{today[4:]}_{config.REPORT_SUFFIX}")
+            f"weekly-{prof['key']}-{today[4:]}_{config.REPORT_SUFFIX}")
     xlsx = config.OUTPUT_DIR / f"{name}.xlsx"
     with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
         meta = pd.DataFrame([

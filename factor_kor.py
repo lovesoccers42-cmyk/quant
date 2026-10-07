@@ -243,7 +243,8 @@ def run(profile: str | None = None) -> dict:
 
     today = f"{date.today():%Y%m%d}"
     _tag = "한국" if prof["key"] == "main" else f"한국-{prof['라벨']}"
-    xlsx_path = config.OUTPUT_DIR / config.report_filename(_tag, today)
+    xlsx_path = config.OUTPUT_DIR / config.report_filename(
+        _tag, today, token=f"model-kr-{prof['key']}")
     invest.to_excel(xlsx_path, index=False)
     invest.to_parquet(config.OUTPUT_DIR / prof["model_file"], index=False)
 

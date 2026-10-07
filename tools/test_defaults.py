@@ -102,6 +102,32 @@ print(("[OK ] " if blank_ok else "[FAIL] ")
 if not blank_ok:
     fails.append("blank")
 
+# 리포트 파일명 — GitHub 릴리스는 에셋 이름에서 한글을 떼어냅니다. 영문 토큰이
+# 없으면 서로 다른 리포트가 "1006_100.xlsx" 하나로 합쳐져 덮어써집니다
+# (10-06에 주간 주문서가 백테스트 리포트에 덮여 실제로 사라졌습니다).
+def ascii_only(name: str) -> str:
+    return "".join(c for c in name if ord(c) < 128).strip()
+
+
+day = "20261008"
+names = {
+    "모델-main": config.report_filename("한국", day, token="model-kr-main"),
+    "모델-alt": config.report_filename("한국-배우자", day, token="model-kr-alt"),
+    "모델-미국": config.report_filename("미국", day, token="model-us"),
+    "주간-main": f"x 한국 주간주문 weekly-main-{day[4:]}_100.xlsx",
+    "주간-alt": f"x 한국 주간주문 배우자 weekly-alt-{day[4:]}_100.xlsx",
+    "백테스트-kr": f"x 백테스트 한국 backtest-kr-{day[4:]}_100.xlsx",
+}
+stripped = {k: ascii_only(v) for k, v in names.items()}
+uniq = len(set(stripped.values())) == len(stripped)
+print(("[OK ] " if uniq else "[FAIL] ")
+      + f"한글을 떼어내도 리포트 이름이 서로 다름 ({len(set(stripped.values()))}"
+        f"/{len(stripped)}종)")
+if not uniq:
+    fails.append("filename")
+    for k, v in stripped.items():
+        print(f"    {k} -> {v}")
+
 print("\n전체 통과 — 인자 없이 돌려도 확정 설정이 들어갑니다." if not fails
       else "\n실패: " + ", ".join(fails))
 sys.exit(1 if fails else 0)
