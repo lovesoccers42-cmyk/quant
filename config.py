@@ -232,7 +232,12 @@ PROFILES: dict[str, dict] = {
         "max_sector_pct": 1.0,
         "slot_offset": 0,
         "qvm_weights": None,          # None이면 config.QVM_WEIGHTS
-        "split": {"mod": 2, "rem": 0},
+        # shared = 두 계좌가 함께 보는 종목 비중. 0.7이면 보유 종목의 약 80%가
+        # 공통이고 20%만 각자 전용입니다. 왜 중간을 쓰나: 완전 분할(shared 0)은
+        # 두 계좌 성과를 운에 맡깁니다 — 같은 전략의 두 바구니가 9.5년에 91.6%p
+        # 벌어졌습니다. 공용 비중을 키우면 그 분산이 전용 비중에 비례해 줄고,
+        # 더 넓은 풀에서 고르니 희석도 줄어듭니다.
+        "split": {"mod": 2, "rem": 0, "shared": 0.7},
     },
     # alt는 main과 '설정이 같고 종목만 다른' 계좌입니다.
     #
@@ -252,7 +257,7 @@ PROFILES: dict[str, dict] = {
         "max_sector_pct": 1.0,
         "slot_offset": 2,
         "qvm_weights": None,
-        "split": {"mod": 2, "rem": 1},
+        "split": {"mod": 2, "rem": 1, "shared": 0.7},
     },
 }
 DEFAULT_PROFILE = os.getenv("QUANT_PROFILE", "main").strip().lower()

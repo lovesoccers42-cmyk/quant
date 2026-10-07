@@ -324,3 +324,25 @@ def split_mask(codes, mod: int, rem: int) -> pd.Series:
         return pd.Series(True, index=idx)
     return pd.Series([split_bucket(c, mod) == (int(rem) % int(mod)) for c in idx],
                      index=idx)
+
+
+def split_keep(code, shared: float, rem: int, mod: int = 2) -> bool:
+    """부분 분할 — 일부는 두 계좌가 함께 보고, 나머지는 나눠 봅니다.
+
+    shared=1.0 이면 전부 공용(분할 없음), 0.0 이면 전부 전용(완전 분할),
+    0.7 이면 종목의 70%는 양쪽이 함께 보고 30%만 나눠 갖습니다.
+
+    왜 중간이 필요한가: 완전 분할은 두 계좌의 성과를 운에 맡깁니다 — 같은
+    전략의 두 바구니가 9.5년에 91.6%p 벌어졌습니다. 공용 비중을 키우면 그
+    분산이 전용 비중에 비례해 줄고, 각자 더 넓은 풀에서 100종목을 고르니
+    희석도 줄어듭니다. 겹침 정도를 조절하는 손잡이입니다.
+
+    같은 코드에 대해 같은 값을 영구히 돌려줘야 합니다. 그래서 md5의 서로 다른
+    자리를 씁니다 — 공용 판정과 전용 배정이 서로 독립이 되도록.
+    """
+    h = int(hashlib.md5(str(code).zfill(6).encode("utf-8")).hexdigest(), 16)
+    shared = min(1.0, max(0.0, float(shared)))
+    if (h % 10000) / 10000.0 < shared:
+        return True                      # 공용 — 두 계좌가 함께 봄
+    mod = max(1, int(mod))
+    return ((h // 10000) % mod) == (int(rem) % mod)

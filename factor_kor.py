@@ -196,10 +196,18 @@ def run(profile: str | None = None) -> dict:
     # 고정되므로 두 계좌의 보유가 절대 겹치지 않습니다.
     _sp = prof["split"] or {}
     _mod = max(1, int(_sp.get("mod", 1) or 1))
+    _shared = _sp.get("shared")
+    _shared = None if _shared is None else min(1.0, max(0.0, float(_shared)))
+    if _shared is not None and _shared >= 1.0:
+        _mod = 1
     if _mod > 1:
         _rem = int(_sp.get("rem", 0) or 0) % _mod
-        _mine = port["종목코드"].astype(str).map(
-            lambda c: fc.split_bucket(c, _mod) == _rem)
+        if _shared is None:
+            _mine = port["종목코드"].astype(str).map(
+                lambda c: fc.split_bucket(c, _mod) == _rem)
+        else:
+            _mine = port["종목코드"].astype(str).map(
+                lambda c: fc.split_keep(c, _shared, _rem, _mod))
         port = port[_mine]
         log_n = len(port)
     else:
@@ -248,8 +256,11 @@ def run(profile: str | None = None) -> dict:
     _prof_info = {"프로필": prof["key"], "라벨": prof["라벨"],
                   "섹터중립": prof["sector_neutral"],
                   "섹터상한": prof["max_sector_pct"],
-                  "교차분할": (f"{_mod}등분 중 {int(_sp.get('rem', 0)) + 1}번째"
-                           if _mod > 1 else "없음"),
+                  "교차분할": ("없음" if _mod <= 1 else
+                           (f"{_mod}등분 중 {int(_sp.get('rem', 0)) + 1}번째"
+                            if _shared is None
+                            else f"공용 {_shared:.0%} + 전용 "
+                                 f"{1 - _shared:.0%}")),
                   "분할후종목풀": log_n,
                   "팩터가중치": list(prof["qvm_weights"] or config.QVM_WEIGHTS)}
     return {**_prof_info, "selected": len(invest), "buy_signals": n_buy, "sell_signals": n_sell,

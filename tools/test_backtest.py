@@ -600,6 +600,37 @@ print(f"    누적수익: 홀수쪽 {r0}% · 짝수쪽 {r1}% (분할 없음 "
 check(abs(r0 - r1) < max(40.0, abs(r0) * 0.8),
       f"두 쪽 성과가 같은 신호답게 비슷한 수준 ({r0} vs {r1})")
 
+# ── 4h-2. 부분 분할 — 겹침이 손잡이대로 움직이는가 ──────────
+print("\n[부분 분할]")
+_p5 = backtest.run(**_base, split={"mod": 2, "rem": 0, "shared": 0.5})
+_p5b = backtest.run(**_base, split={"mod": 2, "rem": 1, "shared": 0.5})
+g5 = _p5["holdings"].groupby("리밸런싱일")["종목코드"].apply(set)
+g5b = _p5b["holdings"].groupby("리밸런싱일")["종목코드"].apply(set)
+ov5 = [len(g5[d] & g5b[d]) / max(len(g5[d]), 1)
+       for d in g5.index if d in g5b.index]
+print(f"    공용 50% → 보유 겹침 평균 {np.mean(ov5):.0%}")
+check(0.05 < np.mean(ov5) < 0.95,
+      f"일부는 겹치고 일부는 안 겹침 ({np.mean(ov5):.0%})")
+check(np.mean(ov5) > 0, "완전 분할과 달리 겹치는 종목이 있음")
+
+# 공용 비중이 커지면 겹침도 커져야 합니다 (손잡이가 작동하는지)
+_p9 = backtest.run(**_base, split={"mod": 2, "rem": 0, "shared": 0.9})
+_p9b = backtest.run(**_base, split={"mod": 2, "rem": 1, "shared": 0.9})
+g9 = _p9["holdings"].groupby("리밸런싱일")["종목코드"].apply(set)
+g9b = _p9b["holdings"].groupby("리밸런싱일")["종목코드"].apply(set)
+ov9 = [len(g9[d] & g9b[d]) / max(len(g9[d]), 1)
+       for d in g9.index if d in g9b.index]
+print(f"    공용 90% → 보유 겹침 평균 {np.mean(ov9):.0%}")
+check(np.mean(ov9) > np.mean(ov5),
+      f"공용 비중을 키우면 겹침도 커짐 ({np.mean(ov5):.0%} → {np.mean(ov9):.0%})")
+check("공용" in _p5["summary"]["제약"]["교차분할"], "요약에 공용 비중이 적힘")
+
+# shared=1.0 이면 분할이 꺼져야 합니다
+_p10 = backtest.run(**_base, split={"mod": 2, "rem": 1, "shared": 1.0})
+check(set(_p10["holdings"]["종목코드"]) == set(_plain["holdings"]["종목코드"]),
+      "공용 100%면 분할 없는 것과 완전히 동일")
+check("없음" in _p10["summary"]["제약"]["교차분할"], "공용 100%는 '없음'으로 표기")
+
 # ── 4i. 팩터 가중치 ─────────────────────────────────────────
 print("\n[팩터 가중치]")
 _val = backtest.run(**_base, qvm_weights=[0.25, 0.50, 0.25])

@@ -46,12 +46,22 @@ def _parse_split(text: str):
     text = (text or "").strip()
     if not text or text in ("0", "1", "none", "없음"):
         return None
+    shared = None
+    if "@" in text:
+        text, sh = text.split("@", 1)
+        shared = float(sh)          # 공용 비중 (0.7 = 70%는 두 계좌 공통)
     try:
         mod, rem = text.split("/")
-        return {"mod": int(mod), "rem": int(rem)}
+        out = {"mod": int(mod), "rem": int(rem)}
     except Exception:
         raise ValueError(f"교차분할을 못 읽었습니다: {text!r}. "
-                         f"'등분수/몇번째(0부터)' 형식 — 예 2/0, 2/1")
+                         f"'등분수/몇번째' 또는 '등분수/몇번째@공용비중' — "
+                         f"예 2/0, 2/1, 2/0@0.7")
+    if shared is not None:
+        if not 0.0 <= shared <= 1.0:
+            raise ValueError(f"공용 비중은 0~1 사이여야 합니다: {shared}")
+        out["shared"] = shared
+    return out
 
 
 def _summary_rows(s: dict) -> pd.DataFrame:

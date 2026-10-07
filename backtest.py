@@ -395,6 +395,12 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     sp = dict(split or {})
     split_mod = max(1, int(sp.get("mod", 1) or 1))
     split_rem = int(sp.get("rem", 0) or 0) % split_mod
+    # shared: 두 계좌가 함께 보는 종목 비중 (1.0이면 분할 없음)
+    split_shared = sp.get("shared")
+    split_shared = (None if split_shared is None
+                    else min(1.0, max(0.0, float(split_shared))))
+    if split_shared is not None and split_shared >= 1.0:
+        split_mod = 1
     sec_w_cap = max(0.0, float(max_sector_weight))
     price, fs, ticker, sector = _load(spec)
 
@@ -489,8 +495,13 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         # 한 칸 움직일 때 소속이 뒤바뀌고, 4주간 들고 있는 동안 두 계좌가 같은
         # 종목을 동시에 보유합니다 (순위 방식 실측: 회차당 최대 17종목 겹침).
         if split_mod > 1:
-            mine = scored["symbol"].astype(str).map(
-                lambda c: fc.split_bucket(c, split_mod) == split_rem)
+            if split_shared is None:
+                mine = scored["symbol"].astype(str).map(
+                    lambda c: fc.split_bucket(c, split_mod) == split_rem)
+            else:
+                mine = scored["symbol"].astype(str).map(
+                    lambda c: fc.split_keep(c, split_shared, split_rem,
+                                            split_mod))
             scored = scored[mine]
 
         # 매수 후보 — 추세 필터는 여기에만 걸립니다 (유지 판정은 아래 hold_set)
@@ -809,8 +820,11 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                  "invvol": f"역변동성 ({config.VOL_WINDOW}일 변동성의 역수)",
                  }[weighting],
         "교차분할": ("없음" if split_mod <= 1
-                 else f"종목코드 해시 {split_mod}등분 중 {split_rem + 1}번째 "
-                      f"— 다른 계좌와 종목이 겹치지 않음(구조적으로 0)"),
+                 else (f"종목코드 해시 {split_mod}등분 중 {split_rem + 1}번째 "
+                       f"— 다른 계좌와 겹침 0" if split_shared is None
+                       else f"공용 {split_shared:.0%} + 전용 "
+                            f"{1 - split_shared:.0%}({split_mod}등분 중 "
+                            f"{split_rem + 1}번째)")),
         "팩터가중치": "/".join(f"{w:.2f}" for w in qvm_weights),
         "저변동성팩터": ("켬 (QVML — 네 팩터 1/4씩)" if use_lowvol
                      else "끔 (QVM — 변동성 정보 없음)"),
