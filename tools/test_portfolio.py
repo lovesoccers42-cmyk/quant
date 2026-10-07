@@ -473,13 +473,24 @@ check(PM["model_file"] != PA["model_file"], "모델 파일이 서로 다름")
 axes = [k for k in ("weighting", "sector_neutral", "max_sector_pct")
         if PM[k] != PA[k]]
 check(True, f"설정 차이 축 {axes} (지금은 종목 분할로 차별화)")
-check(PM["split"] != PA["split"],
-      "교차 분할 바구니가 다름 %s / %s" % (PM["split"], PA["split"]))
+# 분할은 운용 시작 시점에 꺼져 있습니다(측정 안 된 설정이라). 켜져 있으면
+# 바구니가 서로 달라야 하고, 꺼져 있으면 등분 위상으로만 구분됩니다.
 import factor_core as _fc3
-_ov = [c for c in universe
-       if _fc3.split_bucket(c, 2) == PM["split"]["rem"]
-       and _fc3.split_bucket(c, 2) == PA["split"]["rem"]]
-check(not _ov, f"같은 종목이 두 바구니에 동시에 들어가지 않음 ({len(_ov)}개)")
+if PM["split"] and PA["split"]:
+    check(PM["split"] != PA["split"],
+          "교차 분할 바구니가 다름 %s / %s" % (PM["split"], PA["split"]))
+    _mod = int(PM["split"]["mod"])
+    _ov = [c for c in universe
+           if _fc3.split_bucket(c, _mod) == int(PM["split"]["rem"])
+           and _fc3.split_bucket(c, _mod) == int(PA["split"]["rem"])]
+    check(not _ov, f"같은 종목이 두 바구니에 동시에 들어가지 않음 ({len(_ov)}개)")
+else:
+    check(PM["split"] is None and PA["split"] is None,
+          "분할은 양쪽 모두 꺼져 있음 (한쪽만 켜면 한 계좌만 희석됩니다)")
+    # 분할 함수 자체는 계속 작동해야 합니다 — 나중에 켤 수 있도록
+    _b = [_fc3.split_bucket(c, 2) for c in universe]
+    check(set(_b) == {0, 1} and abs(_b.count(0) - _b.count(1)) < len(_b) * 0.2,
+          f"분할 함수는 정상 (바구니 {_b.count(0)}/{_b.count(1)})")
 check(PM["slot_offset"] != PA["slot_offset"], "손보는 등분이 엇갈림")
 try:
     _cfg.profile("wife")

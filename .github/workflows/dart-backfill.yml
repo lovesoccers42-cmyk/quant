@@ -22,6 +22,14 @@ on:
         description: "동시 요청 수. DART가 막으면 낮추세요(3 정도)"
         required: false
         default: "6"
+      probe_ticker:
+        description: "원본 응답을 찍어볼 종목코드 (예: 005930). 비우면 안 함"
+        required: false
+        default: ""
+      probe_year:
+        description: "원본 응답을 찍어볼 연도"
+        required: false
+        default: "2026"
 
 concurrency:
   group: quant-pipeline
@@ -77,6 +85,13 @@ jobs:
           python run_dart.py \
             "${{ github.event.inputs.budget || '19000' }}" \
             "${{ github.event.inputs.start_year || '2015' }}"
+
+      - name: DART 원본 응답 확인
+        if: github.event.inputs.probe_ticker != ''
+        run: |
+          python tools/probe_dart.py \
+            "${{ github.event.inputs.probe_ticker }}" \
+            "${{ github.event.inputs.probe_year || '2026' }}"
 
       - name: 재무제표 정합성 점검
         if: always()
