@@ -102,10 +102,17 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
           else getattr(config, "CONFIRMED_US", {}) if market == "us" else {})
 
     def pick(name, given, fallback):
-        """인자 → 확정 설정 → config 순서로 고릅니다."""
-        if given is not None and not (isinstance(given, (int, float))
-                                      and given < 0):
-            if not (isinstance(given, str) and not given.strip()):
+        """인자 → 확정 설정 → config 순서로 고릅니다.
+
+        빈 문자열과 음수는 '안 줬음'으로 봅니다. 워크플로우가 모든 칸을 항상
+        채워 보내면 확정 설정이 적용될 틈이 없어서, 미국 런에 한국 숫자
+        (유동성 5억 → 5억 달러)가 그대로 들어간 일이 있었습니다.
+        """
+        if given is not None:
+            if isinstance(given, str):
+                if given.strip():
+                    return given
+            elif not (isinstance(given, (int, float)) and given < 0):
                 return given
         if name in CK:
             return CK[name]
@@ -129,6 +136,20 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
     trend_ma = int(pick("trend_ma", trend_ma if trend_ma else None, trend_ma))
     risk_off = float(pick("risk_off", risk_off if risk_off else None, risk_off))
 
+    # 시장을 바꿀 때 가장 쉽게 틀리는 값입니다. 한국 5억(원)을 미국에
+    # 그대로 넣으면 5억 달러가 되고, 통과 종목이 1~2개로 줄어 런이 무효가
+    # 됩니다. 실제로 그렇게 한 번 날렸으니 코드가 막습니다.
+    if market == "us" and min_turnover > 1e8:
+        raise ValueError(
+            f"미국장 유동성 하한이 {min_turnover:,.0f} 달러입니다 — 한국 원화 "
+            f"기준값을 그대로 넣은 것 같습니다. 미국은 "
+            f"{config.MIN_TURNOVER_US:,.0f}(500만 달러) 안팎입니다. "
+            f"비워 두면 확정값이 들어갑니다.")
+    if market == "kr" and 0 < min_turnover < 1e7:
+        raise ValueError(
+            f"한국장 유동성 하한이 {min_turnover:,.0f}원입니다 — 달러 기준값을 "
+            f"넣은 것 같습니다. 한국은 {config.MIN_TURNOVER_KR:,.0f}원 안팎입니다.")
+
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
                        cost_bps=cost_bps, max_sector_pct=max_sector_pct,
                        min_turnover=min_turnover, tranches=max(1, int(tranches)),
@@ -150,6 +171,13 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
                                     or CK.get("qvm_weights")),
                        split=_parse_split(split))
     s = res["summary"]
+    _n = int(s.get("리밸런싱횟수", 0))
+    _yrs = _n / {"B": 252, "W-FRI": 52, "ME": 12, "QE": 4}.get(rebalance, 52)
+    if _yrs < 4:
+        s["한계"].insert(0, f"검증 기간이 {_yrs:.1f}년({_n}회차)뿐입니다. "
+                           f"t값은 기간의 제곱근에 비례하므로 9.5년 기준의 "
+                           f"{(_yrs / 9.5) ** 0.5:.2f}배로 줄어듭니다 — "
+                           f"통과/실패를 단정할 근거가 못 됩니다")
     perf, holdings = res["perf"], res["holdings"]
 
     label = backtest.SPECS[market].label

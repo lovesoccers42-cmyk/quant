@@ -123,14 +123,32 @@ def _load(spec: Spec):
     return price, fs, ticker, sector
 
 
-def _shares(ticker: pd.DataFrame, spec: Spec) -> pd.Series:
-    """현재 시총 ÷ 현재 종가 = 주식수(근사). 과거 시총 추정에 씁니다."""
-    if spec.t_close is None or spec.t_close not in ticker.columns:
-        return pd.Series(dtype="float64")
-    close = pd.to_numeric(ticker[spec.t_close], errors="coerce")
+def _shares(ticker: pd.DataFrame, spec: Spec,
+            price_pivot: pd.DataFrame | None = None) -> pd.Series:
+    """시총 ÷ 종가 = 주식수(근사). 과거 시총 추정과 지수 벤치마크에 씁니다.
+
+    종목표에 종가 컬럼이 없는 시장(미국)에서는 주가 피벗의 마지막 종가로
+    대신합니다. 이게 없으면 shares가 비고, 그러면 지수 벤치마크가 조용히
+    '전종목 동일가중'으로 떨어집니다 — 미국 런에서 두 벤치마크가 똑같이
+    16.36%로 찍힌 게 그 증상이었습니다.
+    """
     mcap = pd.to_numeric(ticker[spec.t_mcap], errors="coerce")
+    sym = ticker[spec.t_sym].astype(str)
+
+    close = None
+    if spec.t_close is not None and spec.t_close in ticker.columns:
+        close = pd.to_numeric(ticker[spec.t_close], errors="coerce")
+        close.index = sym
+    elif price_pivot is not None and len(price_pivot):
+        last = price_pivot.ffill().iloc[-1]
+        close = pd.Series(sym.map(last).values, index=sym)
+    if close is None:
+        return pd.Series(dtype="float64")
+
+    mcap.index = sym
     sh = (mcap / close).replace([np.inf, -np.inf], np.nan)
-    return pd.Series(sh.values, index=ticker[spec.t_sym].values)
+    sh = sh[sh > 0]
+    return sh[~sh.index.duplicated()]
 
 
 # ── 종목별 비중 ──────────────────────────────────────────────
@@ -416,7 +434,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     price_pivot = price.pivot_table(index=spec.p_date, columns=spec.p_sym,
                                     values=spec.p_close, aggfunc="last").sort_index()
 
-    shares = _shares(ticker, spec)
+    shares = _shares(ticker, spec, price_pivot)
 
     # 전역 섹터 지도 — 보유 종목의 섹터는 점수표에 그 종목이 있든 없든
     # 항상 알 수 있어야 합니다 (섹터 비중 상한이 '기타' 뒤로 숨지 않도록).
@@ -865,6 +883,11 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                     else f"시장지수 {trend_ma}일 이동평균 아래면 주식비중 {risk_off:.0%}"
                          f" · 현금 이자 연 {cash_rate:.1%}"),
     }
+    if ("벤치마크_지수" in perf.columns
+            and float((perf["벤치마크_지수"] - perf["벤치마크"]).abs().max()) < 1e-12):
+        summary["한계"].insert(0, "지수 벤치마크를 만들지 못해 '전종목 동일가중'과 "
+                                 "같은 값입니다 (주식수를 못 구함). 지수 대비 "
+                                 "숫자를 쓰지 마세요")
     if "최대섹터비중" in perf.columns and float(perf["최대섹터비중"].max()) > 0:
         summary["제약"]["실제 최대섹터비중 평균"] = f"{perf['최대섹터비중'].mean():.1%}"
         summary["제약"]["실제 최대섹터비중 최악"] = f"{perf['최대섹터비중'].max():.1%}"

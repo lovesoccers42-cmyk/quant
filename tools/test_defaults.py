@@ -71,7 +71,37 @@ print(f"       비용 {captured.get('cost_bps')}bp · 유동성 {captured.get('m
       f" · 구조는 한국과 동일(비중 {captured.get('weighting')}, 등분 {captured.get('tranches')})")
 if not us_ok:
     fails.append("us")
-sys.exit(1 if fails else 0)
+
+# 시장을 바꿀 때 가장 쉽게 틀리는 값 — 코드가 막아야 합니다
+for mkt, turn, why in (("us", 500_000_000, "미국에 한국 원화 기준값"),
+                       ("kr", 5_000_000, "한국에 달러 기준값")):
+    try:
+        rb.main(mkt, 0, "", -1.0, -1.0, turn)
+        print(f"[FAIL] {why}을 그냥 받아들임")
+        fails.append(f"{mkt}-turnover")
+    except SystemExit:
+        print(f"[FAIL] {why}을 그냥 받아들임 (백테스트까지 진행)")
+        fails.append(f"{mkt}-turnover")
+    except ValueError as e:
+        ok = "그대로 넣은 것 같습니다" in str(e) or "넣은 것 같습니다" in str(e)
+        print(("[OK ] " if ok else "[FAIL] ") + f"{why}은 막힘")
+        if not ok:
+            fails.append(f"{mkt}-turnover")
+
+# 빈 문자열은 '안 줬음'으로 처리돼야 합니다 (워크플로우가 빈 칸을 보냄)
+captured.clear()
+try:
+    rb.main("us", 0, "", -1.0, -1.0, -1.0, 1, 0, 0.0, "", -1.0, -1.0, -1.0, "")
+except SystemExit:
+    pass
+blank_ok = (captured.get("weighting") == config.CONFIRMED_US["weighting"]
+            and abs(captured.get("cost_bps") - config.CONFIRMED_US["cost_bps"]) < 1e-9)
+print(("[OK ] " if blank_ok else "[FAIL] ")
+      + f"빈 칸은 확정값으로 채워짐 (비중 {captured.get('weighting')}, "
+        f"비용 {captured.get('cost_bps')}bp)")
+if not blank_ok:
+    fails.append("blank")
 
 print("\n전체 통과 — 인자 없이 돌려도 확정 설정이 들어갑니다." if not fails
       else "\n실패: " + ", ".join(fails))
+sys.exit(1 if fails else 0)
