@@ -648,6 +648,32 @@ def load_capital(table: str = CAPITAL) -> dict:
             "현금": float(r.get("현금", 0) or 0), "총자본": float(r["총자본"])}
 
 
+def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
+                table: str = CAPITAL) -> dict:
+    """현금만 들고 시작하는 계좌의 운용금액을 한 번에 적어 둡니다.
+
+    왜 resync로 안 되는가: resync는 '보유 종목 평가액'에서 총자본을 역산합니다.
+    보유가 0이면 쓸 수 없습니다. 그래서 처음 현금으로 시작할 때만 이걸 씁니다.
+
+    cash 기본값이 0인 이유: 첫 주문서는 총자본 전액을 100종목에 배분하므로
+    '투입 대기 현금'이 따로 없습니다. 여기에 현금을 남겨두면 다음 주 주문서가
+    이미 투자한 돈을 또 넣으려고 합니다(현금투입 주문). 첫 매수를 체결한 뒤에는
+    평소대로 resync를 돌려 실제 평가액·잔여현금으로 맞추세요.
+    """
+    today = today or date.today()
+    total = float(total)
+    if total <= 0:
+        raise ValueError("운용금액은 0보다 커야 합니다.")
+    cash = min(max(0.0, float(cash)), total)
+    store.write(table, pd.DataFrame([{
+        "기준일": pd.Timestamp(today), "평가액": total - cash,
+        "현금": cash, "총자본": total}]))
+    log.info("운용금액 설정 — 총자본 %.0f (평가액 %.0f + 현금 %.0f)",
+             total, total - cash, cash)
+    return {"총자본": total, "평가액": total - cash, "현금": cash,
+            "종목당배정액": total / 100}
+
+
 def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
            today: date | None = None, table: str = STATE,
            capital_table: str = CAPITAL) -> dict:

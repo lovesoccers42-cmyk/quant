@@ -597,6 +597,51 @@ check(set(before_a["종목코드"]) == set(after_a["종목코드"]),
       "main 거래가 alt 보유를 바꾸지 않음")
 check(len(before_a) == len(after_a), "alt 종목 수 그대로")
 
+# ── 현금으로 시작하는 계좌 (배우자 1000만원) ────────────────────
+CASH_TB = "kor_capital_alt"
+portfolio.set_capital(10_000_000, table=CASH_TB)
+ci = portfolio.load_capital(CASH_TB)
+check(ci["총자본"] == 10_000_000, f"총자본이 적힘 ({ci['총자본']:,.0f})")
+check(ci["현금"] == 0,
+      "대기현금은 0 — 다음 주에 이미 투자한 돈을 또 넣지 않음")
+
+def model_cash(order, prices=None):
+    """실전 파일과 같은 모양 — 전체순위까지 들어 있어야 기울기가 같습니다."""
+    df = model4(order) if prices is None else model(order, prices)
+    if "VOL" not in df.columns:
+        df["VOL"] = [vols[c] for c in order]
+    df["전체순위"] = range(1, len(order) + 1)
+    df["전체종목수"] = len(order)
+    return df
+
+
+cash_state = "kor_portfolio_cash_test"
+rc = portfolio.rebalance(
+    model_cash(universe), n=N, tranches=TR, today=date(2026, 10, 8),
+    capital=ci["총자본"], cash=ci["현금"], table=cash_state,
+    weighting="score")
+check(rc["첫실행"] and rc["매수"] == N,
+      f"현금 계좌 첫 주문서가 100종목 신규매수 ({rc['매수']})")
+check(not rc.get("현금투입"), "첫 주문서에 현금투입 주문이 섞이지 않음")
+qty = pd.to_numeric(rc["orders"]["수량"], errors="coerce")
+check(qty.notna().all() and (qty > 0).all(),
+      f"모든 주문에 1주 이상 수량이 붙음 (최소 {qty.min():.0f}주)")
+spend = pd.to_numeric(rc["orders"]["예상금액"], errors="coerce").sum()
+check(spend <= 10_000_000,
+      f"예상금액 합계가 투자금 이내 ({spend:,.0f}원)")
+
+# 비싼 주식은 1주도 못 삽니다 — 다음 순위로 채워야 합니다
+pricey = {universe[0]: 500_000.0, universe[1]: 300_000.0}
+rp = portfolio.rebalance(
+    model_cash(universe, prices={**{c: 10_000.0 for c in universe}, **pricey}),
+    n=N, tranches=TR, today=date(2026, 10, 8), capital=10_000_000,
+    table="kor_portfolio_pricey_test", weighting="score")
+check(rp.get("가격초과제외", 0) >= 2,
+      f"배정액보다 비싼 종목을 제외 ({rp.get('가격초과제외')}종목)")
+check(rp["보유종목수"] == N, f"제외한 자리를 다음 순위로 채움 ({rp['보유종목수']})")
+check(universe[0] not in set(rp["orders"]["종목코드"]),
+      "1주도 못 사는 종목은 주문서에 없음")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

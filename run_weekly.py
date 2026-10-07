@@ -5,6 +5,7 @@
     python run_weekly.py 4                  # 등분 수를 직접 지정
     python run_weekly.py seed 보유종목.csv   # 처음 한 번 — 보유 종목을 등분에 배분
     python run_weekly.py resync 보유종목.csv 350000   # 월 1회 — 평가액·현금 갱신
+    python run_weekly.py capital 10000000 -p alt    # 현금으로 시작할 때 한 번
 
 처음 시작할 때 (이미 한국 주식을 들고 있는 경우)
 ------------------------------------------------
@@ -255,6 +256,23 @@ def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
     return 0
 
 
+def capital_main(total: float, cash: float = 0.0,
+                 prof: dict | None = None) -> int:
+    """현금으로 처음 시작하는 계좌 — 운용금액을 적어 둡니다 (처음 한 번만)."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    prof = prof or config.profile()
+    r = portfolio.set_capital(total, cash=cash, table=prof["capital_table"])
+    print("\n" + "=" * 60)
+    print(f"  운용금액 설정 — {prof['라벨']} 계좌")
+    print("=" * 60)
+    print(f"  총자본 {r['총자본']:>14,.0f}원  → 종목당 배정액 "
+          f"{r['종목당배정액']:,.0f}원")
+    print(f"  (평가액 {r['평가액']:,.0f} + 현금 {r['현금']:,.0f})")
+    print("\n  첫 매수를 체결한 뒤에는 `resync`로 실제 평가액·잔여현금을 "
+          "맞추세요.")
+    return 0
+
+
 def _pop_profile(argv: list) -> tuple[str, list]:
     """--profile alt 또는 -p alt 를 찾아 떼어냅니다."""
     prof = None
@@ -285,6 +303,15 @@ if __name__ == "__main__":
         _cash = float(rest[0]) if rest else 0.0
         _tr = int(rest[1]) if len(rest) > 1 else 4
         sys.exit(resync_main(src, _cash, _tr, _prof))
+    if len(sys.argv) > 1 and sys.argv[1] == "capital":
+        if len(sys.argv) < 3:
+            print("사용법: python run_weekly.py capital 10000000 [대기현금] "
+                  "[-p alt]")
+            sys.exit(2)
+        _total = float(str(sys.argv[2]).replace(",", "").strip())
+        _cash = float(str(sys.argv[3]).replace(",", "").strip()) \
+            if len(sys.argv) > 3 else 0.0
+        sys.exit(capital_main(_total, _cash, _prof))
     if len(sys.argv) > 1 and sys.argv[1] == "seed":
         # 인자로 경로를 주거나, 표준입력으로 붙여넣은 내용을 흘려보내도 됩니다.
         if len(sys.argv) > 2 and sys.argv[2] != "-":
