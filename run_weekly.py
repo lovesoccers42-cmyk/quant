@@ -43,7 +43,14 @@ import store
 log = logging.getLogger("quant_agent.weekly")
 
 
-def main(tranches: int = 4, dry_run: bool = False) -> int:
+def _setting_text(prof: dict) -> str:
+    cap = ("없음" if prof["max_sector_pct"] >= 1
+           else f"{prof['max_sector_pct']:.0%}")
+    return (f"비중 {prof['weighting']} · 섹터중립 {prof['sector_neutral']}"
+            f" · 섹터상한 {cap}")
+
+
+def main(tranches: int = 4, profile: str | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -52,24 +59,27 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
             logging.StreamHandler()], force=True)
     http_util.install_log_redaction()
 
-    log.info("모델 실행 — 순위 갱신")
-    res = factor_kor.run()
-    picks = pd.read_parquet(config.OUTPUT_DIR / "model_kr_latest.parquet")
+    prof = config.profile(profile)
+    log.info("모델 실행 — %s(%s) 순위 갱신 · 비중 %s · 섹터중립 %s · 섹터상한 %s",
+             prof["라벨"], prof["key"], prof["weighting"],
+             prof["sector_neutral"], prof["max_sector_pct"])
+    res = factor_kor.run(prof["key"])
+    picks = pd.read_parquet(config.OUTPUT_DIR / prof["model_file"])
     if picks.empty:
         raise RuntimeError("모델 결과가 비어 있습니다.")
 
-    hold_path = config.OUTPUT_DIR / "model_kr_hold.parquet"
+    hold_path = config.OUTPUT_DIR / prof["hold_file"]
     hold_universe = None
     if hold_path.exists():
         hold_universe = (pd.read_parquet(hold_path)["종목코드"]
                          .astype(str).str.zfill(6).tolist())
         log.info("순위 버퍼 명단 %d종목 사용", len(hold_universe))
     else:
-        log.warning("model_kr_hold.parquet이 없어 순위 버퍼 없이 돌립니다 "
+        log.warning("%s이 없어 순위 버퍼 없이 돌립니다 " % prof["hold_file"] +
                     "— 백테스트와 규칙이 달라집니다")
 
     # 총자본 — 월 1회 재동기화 값이 있으면 그걸 씁니다 (환경변수는 폴백).
-    cap_info = portfolio.load_capital()
+    cap_info = portfolio.load_capital(prof["capital_table"])
     capital = float(cap_info.get("총자본") or config.CAPITAL_KRW)
     cash = float(cap_info.get("현금") or 0.0)
     if cap_info:
@@ -82,15 +92,25 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
 
     r = portfolio.rebalance(picks, n=config.N_PORTFOLIO, tranches=tranches,
                             capital=capital, cash=cash,
-                            hold_universe=hold_universe)
+                            hold_universe=hold_universe,
+                            table=prof["state_table"],
+                            slot_offset=prof["slot_offset"],
+                            weighting=prof["weighting"],
+                            max_weight=config.MAX_WEIGHT)
 
     today = f"{date.today():%Y%m%d}"
-    name = (f"{config.REPORT_NAME} 한국 주간주문 {today[4:]}_"
-            f"{config.REPORT_SUFFIX}")
+    name = (f"{config.REPORT_NAME} 한국 주간주문 "
+            f"{'' if prof['key'] == 'main' else prof['라벨'] + ' '}"
+            f"{today[4:]}_{config.REPORT_SUFFIX}")
     xlsx = config.OUTPUT_DIR / f"{name}.xlsx"
     with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
         meta = pd.DataFrame([
             {"항목": "기준일", "값": f"{date.today():%Y-%m-%d}"},
+            {"항목": "계좌", "값": f"{prof['라벨']} ({prof['key']})"},
+            {"항목": "설정", "값": _setting_text(prof)},
+            {"항목": "종목별 배정액 범위",
+             "값": (f"{r['배정액범위'][0]:,}원 ~ {r['배정액범위'][1]:,}원"
+                   if r.get("배정액범위") else "-")},
             {"항목": "이번에 손보는 등분",
              "값": ("첫 실행 — 전 등분을 한 번에 채움" if r["첫실행"]
                    else f"{r['이번등분']}번 / 총 {tranches}등분")},
@@ -138,7 +158,9 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
          ).to_excel(xw, sheet_name="주문", index=False)
         r["holdings"].to_excel(xw, sheet_name="보유현황", index=False)
 
-    (config.OUTPUT_DIR / "weekly_kr_latest.json").write_text(json.dumps({
+    (config.OUTPUT_DIR / (f"weekly_kr{'' if prof['key'] == 'main' else '_' + prof['key']}"
+                          f"_latest.json")).write_text(json.dumps({
+        "프로필": prof["key"], "라벨": prof["라벨"],
         "기준일": f"{date.today():%Y-%m-%d}", "이번등분": r["이번등분"],
         "등분수": tranches, "매도": r["매도"], "매수": r["매수"], "유지": r["유지"],
         "보유종목수": r["보유종목수"], "첫실행": r["첫실행"],
@@ -147,7 +169,7 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("\n" + "=" * 60)
-    print(f"  한국장 주간 주문서 · {date.today():%Y-%m-%d}")
+    print(f"  한국장 주간 주문서 · {prof['라벨']} · {date.today():%Y-%m-%d}")
     print("=" * 60)
     if r["첫실행"]:
         print(f"  첫 실행입니다 — {r['매수']}종목을 한 번에 담습니다.")
@@ -173,7 +195,7 @@ def main(tranches: int = 4, dry_run: bool = False) -> int:
     return 0
 
 
-def seed_main(src: str, tranches: int = 4) -> int:
+def seed_main(src: str, tranches: int = 4, prof: dict | None = None) -> int:
     """보유 종목 목록을 읽어 등분에 배분합니다. 전환 시작 전에 한 번만.
 
     src는 파일 경로여도 되고, 엑셀에서 복사한 문자열을 그대로 줘도 됩니다
@@ -187,10 +209,11 @@ def seed_main(src: str, tranches: int = 4) -> int:
     for _, h in pd.concat([parsed.head(3), parsed.tail(3)]).iterrows():
         print(f"    {h['종목코드']}  {h['평가금액']:>12,.0f}원  {h['종목명']}")
 
-    r = portfolio.seed(parsed, tranches=tranches)
+    prof = prof or config.profile()
+    r = portfolio.seed(parsed, tranches=tranches, table=prof["state_table"])
 
     print("\n" + "=" * 60)
-    print("  보유 종목을 등분에 배분했습니다")
+    print(f"  보유 종목을 등분에 배분했습니다 — {prof['라벨']} 계좌")
     print("=" * 60)
     print(f"  보유 {r['보유종목수']}종목 · 총 {r['총평가액']:,.0f}원")
     for j, (amt, sh) in enumerate(zip(r["등분별금액"], r["등분별비중"])):
@@ -203,12 +226,16 @@ def seed_main(src: str, tranches: int = 4) -> int:
     return 0
 
 
-def resync_main(src: str, cash: float = 0.0, tranches: int = 4) -> int:
+def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
+                prof: dict | None = None) -> int:
     """월 1회 — 실제 보유 평가액으로 기준금액과 총자본을 다시 맞춥니다."""
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
-    r = portfolio.resync(src, cash=cash, tranches=tranches)
+    prof = prof or config.profile()
+    r = portfolio.resync(src, cash=cash, tranches=tranches,
+                         table=prof["state_table"],
+                         capital_table=prof["capital_table"])
     print("\n" + "=" * 60)
-    print("  재동기화 완료")
+    print(f"  재동기화 완료 — {prof['라벨']} 계좌")
     print("=" * 60)
     print(f"  보유 {r['보유종목수']}종목")
     print(f"  평가액 {r['평가액']:>14,.0f}원")
@@ -228,7 +255,25 @@ def resync_main(src: str, cash: float = 0.0, tranches: int = 4) -> int:
     return 0
 
 
+def _pop_profile(argv: list) -> tuple[str, list]:
+    """--profile alt 또는 -p alt 를 찾아 떼어냅니다."""
+    prof = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--profile", "-p") and i + 1 < len(argv):
+            prof = argv[i + 1]; i += 2; continue
+        if a.startswith("--profile="):
+            prof = a.split("=", 1)[1]; i += 1; continue
+        rest.append(a); i += 1
+    return (prof or config.DEFAULT_PROFILE), rest
+
+
 if __name__ == "__main__":
+    _profile, _argv = _pop_profile(sys.argv[1:])
+    _prof = config.profile(_profile)
+    sys.argv = [sys.argv[0]] + _argv
     if len(sys.argv) > 1 and sys.argv[1] == "resync":
         if len(sys.argv) > 2 and sys.argv[2] != "-":
             src, rest = sys.argv[2], sys.argv[3:]
@@ -239,7 +284,7 @@ if __name__ == "__main__":
                 sys.exit(2)
         _cash = float(rest[0]) if rest else 0.0
         _tr = int(rest[1]) if len(rest) > 1 else 4
-        sys.exit(resync_main(src, _cash, _tr))
+        sys.exit(resync_main(src, _cash, _tr, _prof))
     if len(sys.argv) > 1 and sys.argv[1] == "seed":
         # 인자로 경로를 주거나, 표준입력으로 붙여넣은 내용을 흘려보내도 됩니다.
         if len(sys.argv) > 2 and sys.argv[2] != "-":
@@ -250,6 +295,6 @@ if __name__ == "__main__":
                 print("사용법: python run_weekly.py seed 보유종목.csv [등분수]\n"
                       "      또는 표준입력으로: ... | python run_weekly.py seed - 4")
                 sys.exit(2)
-        sys.exit(seed_main(src, int(rest[0]) if rest else 4))
+        sys.exit(seed_main(src, int(rest[0]) if rest else 4, _prof))
     tr = int(sys.argv[1]) if len(sys.argv) > 1 else 4
-    sys.exit(main(tr))
+    sys.exit(main(tr, _prof["key"]))

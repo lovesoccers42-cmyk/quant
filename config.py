@@ -198,3 +198,53 @@ REPORT_EMAIL = os.getenv("QUANT_REPORT_EMAIL", "lovesoccers42@gmail.com")
 
 TELEGRAM_BOT_TOKEN = os.getenv("QUANT_TG_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("QUANT_TG_CHAT_ID", "")
+
+# ── 포트폴리오 프로필 ────────────────────────────────────────
+# 두 사람이 같은 엔진을 쓰되 '성격이 다른 설정'으로 돌립니다.
+#
+# 왜 다르게 하나: 종목을 달리해도 둘 다 한국 주식 100% 롱이라 상관계수가
+# 0.9 안팎입니다. 분산 효과는 작습니다. 진짜 이유는 지금 main 설정이 측정
+# 13번 끝에 고른 값이라는 것 — 성격이 다른 설정을 병행하면 "그 설정이 과거에만
+# 맞았다"는 위험을 반만 지게 됩니다. 그리고 같은 소형주를 두 계좌가 같은 날
+# 사면 서로 호가를 밀어올립니다.
+#
+#   main  점수가중 + 모멘텀 섹터중립 해제 + 섹터캡 없음
+#         → 신호 순위에 싣고, 섹터 로테이션을 허용. 집중도 높음(한 섹터 44%)
+#   alt   역변동성가중 + 전 팩터 섹터중립 + 섹터캡 25%
+#         → 변동성으로 싣고, 섹터 로테이션 안 함. 쏠림 없음
+#
+# 두 축(비중 기준 · 섹터 태도)이 정반대입니다. slot_offset으로 손보는 등분을
+# 엇갈리게 해서 같은 주에 같은 종목을 동시에 거래하지 않게 합니다.
+PROFILES: dict[str, dict] = {
+    "main": {
+        "라벨": "상수",
+        "weighting": "score",
+        "sector_neutral": "no_mom",
+        "max_sector_pct": 1.0,
+        "slot_offset": 0,
+    },
+    "alt": {
+        "라벨": "배우자",
+        "weighting": "invvol",
+        "sector_neutral": "all",
+        "max_sector_pct": 0.25,
+        "slot_offset": 2,
+    },
+}
+DEFAULT_PROFILE = os.getenv("QUANT_PROFILE", "main").strip().lower()
+
+
+def profile(name: str | None = None) -> dict:
+    """프로필 설정을 돌려줍니다. 모르는 이름은 조용히 main으로 넘기지 않습니다."""
+    key = (name or DEFAULT_PROFILE or "main").strip().lower()
+    if key not in PROFILES:
+        raise ValueError(f"모르는 프로필 '{key}'. 쓸 수 있는 값: {list(PROFILES)}")
+    out = dict(PROFILES[key])
+    out["key"] = key
+    # 프로필별 테이블·파일 이름 — main은 기존 이름을 그대로 써서 호환됩니다
+    suffix = "" if key == "main" else f"_{key}"
+    out["state_table"] = f"kor_portfolio{suffix}"
+    out["capital_table"] = f"kor_capital{suffix}"
+    out["model_file"] = f"model_kr{suffix}_latest.parquet"
+    out["hold_file"] = f"model_kr{suffix}_hold.parquet"
+    return out

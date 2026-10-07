@@ -31,7 +31,10 @@ import store
 
 log = logging.getLogger("quant_agent.portfolio")
 
-STATE = "kor_portfolio"     # 종목코드 · 등분 · 편입일 · 기준금액 · 종목명 · 섹터
+# 보유 상태는 프로필마다 다른 테이블에 들어갑니다. 섞이면 한 사람의 매도가
+# 다른 사람 주문서에 나타납니다. 그래서 테이블 이름을 인자로 받고, 기본값은
+# 두지 않습니다 — 실수로 main 테이블에 alt를 쓰는 일을 막습니다.
+STATE = "kor_portfolio"     # main 프로필 (기존 이름 유지)
 
 # 무매매 밴드 — 목표 금액에서 이 비율 안으로 벗어난 건 되돌리지 않습니다.
 # 백테스트(config.REBAL_BAND)와 같은 값이어야 합니다. 비중 조절과 현금 투입이
@@ -156,7 +159,8 @@ def parse_holdings(src) -> pd.DataFrame:
     return df[["종목코드", "평가금액", "종목명"]].reset_index(drop=True)
 
 
-def seed(holdings, *, tranches: int = 4, today: date | None = None) -> dict:
+def seed(holdings, *, tranches: int = 4, today: date | None = None,
+         table: str = STATE) -> dict:
     """이미 들고 있는 종목을 등분에 나눠 넣습니다 — 전환의 출발점.
 
     이걸 안 하면 첫 주문서가 '100종목 신규 매수'로 나옵니다. 이미 주식을
@@ -193,7 +197,7 @@ def seed(holdings, *, tranches: int = 4, today: date | None = None) -> dict:
 
     state = pd.DataFrame(rows)
     state["편입일"] = pd.to_datetime(state["편입일"])
-    store.write(STATE, state)
+    store.write(table, state)
 
     total = float(df["평가금액"].sum())
     share = [round(v / total, 4) if total else 0.0 for v in totals]
@@ -209,25 +213,103 @@ def seed(holdings, *, tranches: int = 4, today: date | None = None) -> dict:
                              f"만큼만 사고 다음 차례에 채우세요.")}
 
 
-def _affordable(codes, price_map, unit_krw: float):
-    """1주 가격이 종목당 배정액보다 비싼 종목을 걸러냅니다 (한국 주식은 1주 단위)."""
-    if unit_krw <= 0 or price_map is None:
+
+def target_amounts(ranked, *, capital: float, n: int, weighting: str = "equal",
+                   price_map=None, vol_map=None, cap: float = 0.0,
+                   rank_map=None, universe_n: int = 0) -> dict:
+    """종목별 목표 금액. 백테스트의 비중 방식을 실전 주문서에 그대로 옮깁니다.
+
+    이게 없으면 주문서는 전 종목에 같은 금액을 배정합니다 — 그러면 점수가중을
+    검증해 놓고 실제로는 동일가중을 사게 됩니다. 백테스트에서 그 둘의 차이가
+    9.5년 누적 +12.75%p였습니다.
+
+    ranked는 점수 좋은 순 전체 명단입니다(버퍼 구간 포함). 순위는 그 전체에서
+    매깁니다 — 상위 n위 안에서만 매기면 버퍼 구간 종목이 꼴찌 비중을 받고
+    n위 안에 들어오는 순간 비중이 튑니다.
+    """
+    codes = [str(c).zfill(6) for c in ranked]
+    if not codes or capital <= 0:
+        return {}
+    w = {}
+    if weighting == "score":
+        # 전체 유니버스 순위가 있으면 그걸 씁니다 (백테스트와 동일).
+        # 없으면 받은 명단 안에서의 순서로 물러섭니다.
+        if rank_map and universe_n > 0:
+            m = float(universe_n)
+            for c in codes:
+                rk = rank_map.get(c)
+                rk = float(rk) if rk is not None and np.isfinite(rk) else m
+                w[c] = max(m - rk + 1.0, 1.0)
+        else:
+            m = len(codes)
+            for i, c in enumerate(codes):
+                w[c] = float(m - i)
+    elif weighting == "invvol":
+        vol = vol_map or {}
+        vals = [v for v in (vol.get(c) for c in codes)
+                if v is not None and np.isfinite(v) and v > 0]
+        if len(vals) < max(5, len(codes) // 2):
+            w = {c: 1.0 for c in codes}          # 데이터가 모자라면 동일가중
+        else:
+            med = float(np.median(vals))
+            for c in codes:
+                v = vol.get(c)
+                v = float(v) if (v is not None and np.isfinite(v) and v > 0) else med
+                w[c] = 1.0 / v
+    else:
+        w = {c: 1.0 for c in codes}
+
+    # 상한 적용 후 상위 n종목에 배분
+    keep = codes[:n]
+    sub = np.array([w[c] for c in keep], dtype="float64")
+    sub = sub / sub.sum()
+    if 0 < cap < 1 and len(keep) * cap >= 1:
+        for _ in range(100):
+            over = sub > cap + 1e-12
+            if not over.any():
+                break
+            excess = float((sub[over] - cap).sum())
+            sub[over] = cap
+            free = ~over
+            base_ = float(sub[free].sum())
+            if base_ <= 0:
+                sub[free] += excess / max(int(free.sum()), 1)
+                break
+            sub[free] += excess * (sub[free] / base_)
+        sub = sub / sub.sum()
+
+    out = {c: float(capital) * float(x) for c, x in zip(keep, sub)}
+    # 버퍼 구간 종목도 목표가 있어야 비중 조절을 계산할 수 있습니다.
+    # 순위 밖이니 n위 종목의 목표를 그대로 씁니다 (더 싣지는 않음).
+    tail = float(min(out.values())) if out else 0.0
+    for c in codes[n:]:
+        out.setdefault(c, tail)
+    return out
+
+
+def _affordable(codes, price_map, amount_of):
+    """1주 가격이 그 종목의 목표 금액보다 비싸면 걸러냅니다 (한국 주식은 1주 단위).
+
+    amount_of는 종목코드 → 목표 금액 함수입니다. 비중 방식에 따라 종목마다
+    목표가 다르므로 하나의 '종목당 배정액'으로는 판정할 수 없습니다.
+    """
+    if price_map is None:
         return list(codes), []
     ok, over = [], []
     for c in codes:
-        px = price_map.get(c)
-        if px is None or not np.isfinite(px) or px <= 0:
-            ok.append(c)          # 주가를 모르면 통과시키고 수량 칸을 비웁니다
-        elif float(px) <= unit_krw:
+        px, amt = price_map.get(c), amount_of(c)
+        if px is None or not np.isfinite(px) or px <= 0 or not amt or amt <= 0:
+            ok.append(c)          # 주가나 목표를 모르면 통과 (수량 칸은 비움)
+        elif float(px) <= float(amt):
             ok.append(c)
         else:
             over.append(c)
     return ok, over
 
 
-def load_state() -> pd.DataFrame:
+def load_state(table: str = STATE) -> pd.DataFrame:
     cols = ["종목코드", "등분", "편입일", "기준금액", "종목명", "섹터"]
-    df = store.read(STATE)
+    df = store.read(table)
     if df.empty:
         return pd.DataFrame(columns=cols)
     df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
@@ -237,17 +319,26 @@ def load_state() -> pd.DataFrame:
     return df
 
 
-def current_slot(tranches: int, today: date | None = None) -> int:
-    """이번에 손볼 등분 번호. ISO 주차 기준이라 한 주 걸러도 안 꼬입니다."""
+def current_slot(tranches: int, today: date | None = None,
+                 offset: int = 0) -> int:
+    """이번에 손볼 등분 번호. ISO 주차 기준이라 한 주 걸러도 안 꼬입니다.
+
+    offset은 프로필마다 손보는 등분을 엇갈리게 합니다. 두 계좌가 같은 주에
+    같은 소형주를 동시에 사면 서로 호가를 밀어올리기 때문입니다.
+    """
     today = today or date.today()
-    return int(today.isocalendar()[1]) % max(1, tranches)
+    tr = max(1, tranches)
+    return (int(today.isocalendar()[1]) + int(offset)) % tr
 
 
 def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
               today: date | None = None, symbol: str = "종목코드",
               name: str = "종목명", sector: str = "SEC_NM_KOR",
               capital: float = 0.0, close: str = "종가",
-              hold_universe=None, cash: float = 0.0) -> dict:
+              hold_universe=None, cash: float = 0.0,
+              table: str = STATE, slot_offset: int = 0,
+              weighting: str = "equal", max_weight: float = 0.0,
+              vol: str = "VOL") -> dict:
     """모델 순위표(picks)를 받아 이번 회차 주문을 계산하고 상태를 갱신합니다.
 
     picks는 qvm 오름차순(좋은 종목이 위)으로 정렬돼 있어야 합니다.
@@ -272,18 +363,41 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     picks[symbol] = picks[symbol].astype(str).str.zfill(6)
     info = picks.drop_duplicates(symbol).set_index(symbol)
 
-    unit = (float(capital) / max(n, 1)) if capital and capital > 0 else 0.0
     price_map = None
     if close in info.columns:
         price_map = {str(k): float(v) for k, v in
                      pd.to_numeric(info[close], errors="coerce").items()
                      if pd.notna(v)}
+    vol_map = None
+    if vol in info.columns:
+        vol_map = {str(k): float(v) for k, v in
+                   pd.to_numeric(info[vol], errors="coerce").items()
+                   if pd.notna(v)}
 
-    ranked = picks[symbol].tolist()
-    ranked, too_pricey = _affordable(ranked, price_map, unit)
+    ranked_all = picks[symbol].tolist()
+    # 종목별 목표 금액 — 비중 방식이 여기서 반영됩니다
+    rank_map, universe_n = None, 0
+    if "전체순위" in info.columns:
+        rank_map = {str(k2): float(v) for k2, v in
+                    pd.to_numeric(info["전체순위"], errors="coerce").items()
+                    if pd.notna(v)}
+        if "전체종목수" in info.columns:
+            universe_n = int(pd.to_numeric(info["전체종목수"],
+                                           errors="coerce").max() or 0)
+    amounts = target_amounts(ranked_all, capital=float(capital or 0.0), n=n,
+                             weighting=weighting, price_map=price_map,
+                             vol_map=vol_map, cap=float(max_weight or 0.0),
+                             rank_map=rank_map, universe_n=universe_n)
+    avg_unit = (float(capital) / max(n, 1)) if capital and capital > 0 else 0.0
+
+    def amount_of(c):
+        return amounts.get(c, avg_unit)
+
+    ranked, too_pricey = _affordable(ranked_all, price_map, amount_of)
     target = ranked[:max(n * 2, n + sum(sizes))]
+    unit = avg_unit          # 요약 표시용 평균 배정액
 
-    state = load_state()
+    state = load_state(table)
     first = state.empty
 
     trims: list[dict] = []          # 유지하지만 비중을 조절할 종목
@@ -294,11 +408,12 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         rows, slot_used = [], None
         for i, code in enumerate(target[:n]):
             rows.append({"종목코드": code, "등분": i % tranches, "편입일": today,
-                         "기준금액": unit or np.nan})
+                         "기준금액": (amount_of(code) if unit > 0
+                                   else np.nan)})
         new_state = pd.DataFrame(rows)
         buys, sells, keeps = [r["종목코드"] for r in rows], [], []
     else:
-        slot_used = current_slot(tranches, today)
+        slot_used = current_slot(tranches, today, offset=slot_offset)
         mine = state[state["등분"] == slot_used]["종목코드"].tolist()
         others = state[state["등분"] != slot_used]["종목코드"].tolist()
         buy_set = set(target[:n])
@@ -315,7 +430,8 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         # 목표 비중으로 1주도 담을 수 없는 종목은 들고 있을 수 없습니다.
         # (종목당 30만원인데 1주가 50만원이면 1%를 만들 방법이 없습니다)
         if unit > 0 and price_map:
-            unholdable = [c for c in keeps if (price_map.get(c) or 0) > unit]
+            unholdable = [c for c in keeps
+                          if (price_map.get(c) or 0) > amount_of(c)]
             if unholdable:
                 keeps = [c for c in keeps if c not in set(unholdable)]
                 sells += unholdable
@@ -333,15 +449,18 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
                 cur, px = base.get(c), price_map.get(c)
                 if not px or px <= 0 or cur is None or not np.isfinite(cur):
                     continue
-                gap = cur - unit
-                if abs(gap) <= unit * BAND:
+                tgt = amount_of(c)
+                if not tgt or tgt <= 0:
+                    continue
+                gap = cur - tgt
+                if abs(gap) <= tgt * BAND:
                     continue
                 qty = int(abs(gap) // px)
                 if qty <= 0:
                     continue
                 trims.append({"종목코드": c, "구분": "비중축소" if gap > 0 else "비중확대",
                               "수량": qty, "주가": px,
-                              "현재기준": round(cur), "목표": round(unit)})
+                              "현재기준": round(cur), "목표": round(tgt)})
 
         # 새로 담는 건 상위 n위에서만 — 버퍼 구간(n위~버퍼)은
         # '들고 있으면 유지, 없으면 안 산다'는 중립 구간입니다.
@@ -358,16 +477,17 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
                 cur, px = base.get(c), price_map.get(c)
                 if not px or px <= 0 or cur is None or not np.isfinite(cur):
                     continue
-                if unit - cur > 0:
-                    gaps.append((unit - cur, c, px))
+                tgt = amount_of(c)
+                if tgt and tgt - cur > 0:
+                    gaps.append((tgt - cur, c, px, tgt))
             gaps.sort(reverse=True)
             spent = 0.0
-            for gap, c, px in gaps:
+            for gap, c, px, tgt in gaps:
                 # 목표 '정확히'까지만 채우면 1주도 못 사는 일이 생깁니다.
                 # 배정액 34.2만 · 기준 33만 · 주가 3만이면 부족분이 1.2만이라
                 # 1주(3만)가 안 들어갑니다. 밴드가 ±20%를 허용하니 밴드 위끝
                 # 까지 채웁니다 — 덜 담긴 종목에 자연스럽게 몰리게 됩니다.
-                ceiling = unit * (1 + BAND) - cur
+                ceiling = tgt * (1 + BAND) - cur
                 room = min(max(gap, ceiling), budget - spent)
                 qty = int(room // px)
                 if qty <= 0:
@@ -391,10 +511,12 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         # 올 때 다시 맞춥니다.
         rows = [{"종목코드": c, "등분": slot_used,
                  "편입일": state.loc[state["종목코드"] == c, "편입일"].iloc[0],
-                 "기준금액": unit if unit > 0 else base.get(c, np.nan)}
+                 "기준금액": (amount_of(c) if unit > 0
+                           else base.get(c, np.nan))}
                 for c in keeps]
         rows += [{"종목코드": c, "등분": slot_used, "편입일": today,
-                  "기준금액": unit or np.nan} for c in buys]
+                  "기준금액": (amount_of(c) if unit > 0 else np.nan)}
+                 for c in buys]
         state_cols = ["종목코드", "등분", "편입일", "기준금액"]
         new_state = pd.concat([kept[state_cols],
                                pd.DataFrame(rows, columns=state_cols)],
@@ -406,7 +528,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     new_state["섹터"] = new_state["종목코드"].map(
         info[sector] if sector in info.columns else {})
     new_state["편입일"] = pd.to_datetime(new_state["편입일"])
-    store.write(STATE, new_state)
+    store.write(table, new_state)
 
     # 팔 종목은 모델 상위권에서 밀려났으니 picks에 없습니다. 이름을 info에서만
     # 찾으면 매도 줄이 종목코드만 남은 빈 줄이 됩니다 — 22개를 코드만 보고
@@ -429,7 +551,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
             # 수량을 여기서 정하지 않습니다 — 보유 수량은 증권사 앱에 있습니다.
             qty = None
             if kind == "매수" and unit > 0 and px and px > 0:
-                qty = int(unit // px)
+                qty = int(amount_of(c) // px)
             out.append({"구분": kind, "종목코드": c,
                         "종목명": _label(c, name, held_name),
                         "섹터": _label(c, sector, held_sector),
@@ -499,7 +621,11 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         "현금투입": len(cash_orders),
         "현금투입금액": round(sum(t["수량"] * t["주가"] for t in cash_orders)),
         "이번주현금예산": round(max(0.0, float(cash)) / max(1, tranches)),
-        "종목당배정액": round(unit) if unit > 0 else None,
+        "비중방식": weighting,
+        "평균배정액": round(unit) if unit > 0 else None,
+        "종목당배정액": round(unit) if unit > 0 else None,   # 하위호환
+        "배정액범위": ((round(min(amounts.values())), round(max(amounts.values())))
+                  if amounts else None),
         "가격초과제외": len(too_pricey),
         # 전량매도 종목의 금액은 보유 수량을 몰라 셀 수 없습니다.
         # 그래서 '비중축소로 확보되는 금액'만 셉니다 — 하한입니다.
@@ -509,12 +635,12 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         "holdings": new_state.sort_values(["등분", "종목코드"]).reset_index(drop=True),
     }
 
-CAPITAL = "kor_capital"      # 기준일 · 평가액 · 현금 · 총자본
+CAPITAL = "kor_capital"      # main 프로필 (기준일 · 평가액 · 현금 · 총자본)
 
 
-def load_capital() -> dict:
+def load_capital(table: str = CAPITAL) -> dict:
     """마지막으로 재동기화한 운용자금. 없으면 빈 dict."""
-    df = store.read(CAPITAL)
+    df = store.read(table)
     if df.empty:
         return {}
     r = df.sort_values("기준일").iloc[-1]
@@ -523,7 +649,8 @@ def load_capital() -> dict:
 
 
 def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
-           today: date | None = None) -> dict:
+           today: date | None = None, table: str = STATE,
+           capital_table: str = CAPITAL) -> dict:
     """월 1회 — 실제 보유 평가액으로 기준금액과 운용자금을 다시 맞춥니다.
 
     왜 필요한가: 기준금액은 '마지막으로 손봤을 때 맞춰 둔 값'입니다. 주가가
@@ -538,7 +665,7 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     if got.empty:
         raise ValueError("재동기화할 보유 종목을 읽지 못했습니다.")
 
-    state = load_state()
+    state = load_state(table)
     if state.empty:
         raise ValueError("보유 상태가 없습니다. 먼저 seed를 돌리세요.")
 
@@ -570,12 +697,12 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     st["종목명"] = st.apply(
         lambda r: names.get(r["종목코드"]) or r.get("종목명") or "", axis=1)
     st["편입일"] = pd.to_datetime(st["편입일"])
-    store.write(STATE, st)
+    store.write(table, st)
 
     평가액 = float(got["평가금액"].sum())
     현금 = max(0.0, float(cash))
     총자본 = 평가액 + 현금
-    store.write(CAPITAL, pd.DataFrame([{
+    store.write(capital_table, pd.DataFrame([{
         "기준일": pd.Timestamp(today), "평가액": 평가액,
         "현금": 현금, "총자본": 총자본}]))
 

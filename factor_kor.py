@@ -113,7 +113,14 @@ def _technical_signals(price_pivot: pd.DataFrame, codes) -> pd.DataFrame:
                          "BB": bb_s, "매수/매도": label})
 
 
-def run() -> dict:
+def run(profile: str | None = None) -> dict:
+    """프로필별로 점수와 명단을 만듭니다.
+
+    프로필이 다르면 섹터중립 태도와 섹터 상한이 달라져 선정 종목이 달라집니다.
+    산출 파일 이름도 프로필마다 다릅니다 — 섞이면 한쪽 명단으로 다른 쪽
+    주문서를 내게 됩니다.
+    """
+    prof = config.profile(profile)
     ticker_list, fs_list, value_list, price_list, sector_list = _load()
 
     if price_list.empty:
@@ -163,7 +170,7 @@ def run() -> dict:
     port = fc.build_scores(
         data_bind, symbol="종목코드", sector="SEC_NM_KOR",
         weights=(config.QVML_WEIGHTS if config.USE_LOWVOL else config.QVM_WEIGHTS),
-        n_portfolio=len(data_bind), neutral=config.SECTOR_NEUTRAL)
+        n_portfolio=len(data_bind), neutral=prof["sector_neutral"])
 
     coverage = {k: int(port[k].notna().sum())
                 for k in ("ROE", "PER", "12M", "K_ratio",
@@ -174,6 +181,14 @@ def run() -> dict:
         price_list, symbol="종목코드", date="날짜", close="종가", volume="거래량",
         window=config.LIQUIDITY_WINDOW, min_value=config.MIN_TURNOVER_KR)
 
+    # 점수가중은 '전체 유니버스 순위'로 비중을 매깁니다. 상위 100위 안에서만
+    # 매기면 1위가 100위의 100배를 받아 백테스트와 달라집니다 (백테스트는 전
+    # 종목 순위를 써서 쏠림이 훨씬 완만합니다). 순위와 전체 종목 수를 같이
+    # 넘겨 주문서가 같은 비중을 재현하게 합니다.
+    port = port.copy()
+    port["전체순위"] = port["qvm"].rank(method="first")
+    port["전체종목수"] = int(port["qvm"].notna().sum())
+
     buy_pool = port
     if config.TREND_STOCK_MA > 0 and "위추세" in port.columns:
         _up = port["위추세"].fillna(True).astype(bool)
@@ -182,7 +197,7 @@ def run() -> dict:
 
     invest, sel = fc.select_portfolio(
         buy_pool, symbol="종목코드", sector="SEC_NM_KOR", n=config.N_PORTFOLIO,
-        max_sector_pct=config.MAX_SECTOR_PCT, eligible=eligible)
+        max_sector_pct=prof["max_sector_pct"], eligible=eligible)
 
     # 유지 판정용 넓은 명단 (순위 버퍼). 살 때는 위의 invest(상위 100위,
     # 섹터 상한 적용)에서만 고르고, 팔 때는 이 명단 밖으로 밀려나야 팝니다.
@@ -194,7 +209,7 @@ def run() -> dict:
     hold_list = (hold_pool.dropna(subset=["qvm"]).nsmallest(hold_n, "qvm")
                  [["종목코드", "종목명", "SEC_NM_KOR", "qvm"]]
                  .reset_index(drop=True))
-    hold_list.to_parquet(config.OUTPUT_DIR / "model_kr_hold.parquet", index=False)
+    hold_list.to_parquet(config.OUTPUT_DIR / prof["hold_file"], index=False)
 
     codes = [c for c in invest["종목코드"] if c in price_pivot.columns]
 
@@ -203,9 +218,10 @@ def run() -> dict:
     invest = invest.sort_values("qvm").reset_index(drop=True).round(4)
 
     today = f"{date.today():%Y%m%d}"
-    xlsx_path = config.OUTPUT_DIR / config.report_filename("한국", today)
+    _tag = "한국" if prof["key"] == "main" else f"한국-{prof['라벨']}"
+    xlsx_path = config.OUTPUT_DIR / config.report_filename(_tag, today)
     invest.to_excel(xlsx_path, index=False)
-    invest.to_parquet(config.OUTPUT_DIR / "model_kr_latest.parquet", index=False)
+    invest.to_parquet(config.OUTPUT_DIR / prof["model_file"], index=False)
 
     n_buy = int(invest["매수/매도"].str.contains("매수", na=False).sum())
     n_sell = int(invest["매수/매도"].str.contains("매도", na=False).sum())
@@ -213,7 +229,10 @@ def run() -> dict:
                 [["종목코드", "종목명", "SEC_NM_KOR", "qvm", "MACD", "RSI", "BB", "매수/매도"]]
                 .sort_values("매수/매도", ascending=False).head(15))
 
-    return {"selected": len(invest), "buy_signals": n_buy, "sell_signals": n_sell,
+    _prof_info = {"프로필": prof["key"], "라벨": prof["라벨"],
+                  "섹터중립": prof["sector_neutral"],
+                  "섹터상한": prof["max_sector_pct"]}
+    return {**_prof_info, "selected": len(invest), "buy_signals": n_buy, "sell_signals": n_sell,
             "coverage": coverage, "유동성": liq, "선정": sel,
             "excel": str(xlsx_path), "model_date": today,
             "top_buys": top_buys.to_dict(orient="records")}

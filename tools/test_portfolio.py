@@ -459,6 +459,117 @@ try:
 except ValueError as e:
     check("seed" in str(e), "상태가 없으면 seed를 먼저 하라고 안내")
 
+# ── 12. 두 계좌(프로필) ─────────────────────────────────────
+# 핵심은 두 가지입니다: 상태가 섞이지 않는가, 비중 방식이 주문서에 반영되는가.
+print("\n[두 계좌 · 비중 방식]")
+import config as _cfg  # noqa: E402
+
+PM, PA = _cfg.profile("main"), _cfg.profile("alt")
+check(PM["state_table"] != PA["state_table"], "보유 테이블이 서로 다름")
+check(PM["model_file"] != PA["model_file"], "모델 파일이 서로 다름")
+check(PM["weighting"] != PA["weighting"],
+      f"비중 방식이 다름 ({PM['weighting']} / {PA['weighting']})")
+check(PM["sector_neutral"] != PA["sector_neutral"], "섹터중립 태도가 다름")
+try:
+    _cfg.profile("wife")
+    check(False, "모르는 프로필을 받아들임")
+except ValueError as e:
+    check("모르는 프로필" in str(e), "모르는 프로필은 명확히 거부")
+
+for t in (PM["state_table"], PA["state_table"]):
+    store.write(t, pd.DataFrame(columns=list(store.SCHEMAS[t])))
+
+CAP4 = 30_000_000
+# alt는 변동성이 작은 종목에 더 싣습니다 — 앞쪽 종목의 변동성을 작게 둡니다
+vols = {c: 0.01 + 0.0004 * i for i, c in enumerate(universe)}
+px4 = {c: 20_000 for c in universe}
+
+
+def model4(order):
+    df = model(order, px4)
+    df["VOL"] = [vols[c] for c in order]
+    return df
+
+
+rm = portfolio.rebalance(model4(universe), n=N, tranches=TR,
+                         today=date(2026, 10, 9), capital=CAP4,
+                         table=PM["state_table"], slot_offset=PM["slot_offset"],
+                         weighting=PM["weighting"])
+ra = portfolio.rebalance(model4(universe), n=N, tranches=TR,
+                         today=date(2026, 10, 9), capital=CAP4,
+                         table=PA["state_table"], slot_offset=PA["slot_offset"],
+                         weighting=PA["weighting"])
+check(len(portfolio.load_state(PM["state_table"])) == N, "main 계좌 100종목")
+check(len(portfolio.load_state(PA["state_table"])) == N, "alt 계좌 100종목")
+
+# 비중 방식이 실제로 주문서에 들어갔는가 — 동일가중이면 범위가 한 점입니다
+lo_m, hi_m = rm["배정액범위"]
+lo_a, hi_a = ra["배정액범위"]
+print(f"    main(score)  배정액 {lo_m:,} ~ {hi_m:,}원")
+print(f"    alt(invvol)  배정액 {lo_a:,} ~ {hi_a:,}원")
+# 점수가중은 '전체 유니버스 순위'로 매기므로 상위 100위 안의 기울기는
+# 완만합니다 (백테스트가 그렇게 돌았고, 실전이 그걸 재현해야 합니다).
+check(hi_m > lo_m * 1.05, f"점수가중이 종목별로 다른 금액을 배정 ({lo_m:,}~{hi_m:,})")
+check(hi_m < lo_m * 3, f"다만 극단적으로 쏠리지는 않음 ({hi_m / lo_m:.2f}배)")
+check(hi_a > lo_a * 1.5, f"역변동성도 종목별로 다름 ({lo_a:,}~{hi_a:,})")
+check(abs(sum(portfolio.load_state(PM["state_table"])["기준금액"]) - CAP4)
+      < CAP4 * 0.02, "main 배정액 합이 총자본에 수렴")
+check(abs(sum(portfolio.load_state(PA["state_table"])["기준금액"]) - CAP4)
+      < CAP4 * 0.02, "alt 배정액 합이 총자본에 수렴")
+
+# 점수가중은 1위에, 역변동성은 저변동 종목에 가장 많이 실려야 합니다
+am = portfolio.target_amounts(universe, capital=CAP4, n=N, weighting="score")
+aa = portfolio.target_amounts(universe, capital=CAP4, n=N, weighting="invvol",
+                              vol_map=vols)
+check(max(am, key=am.get) == universe[0], "점수가중 최대 배정 = 1순위")
+check(max(aa, key=aa.get) == min(
+    list(universe)[:N], key=lambda c: vols[c]), "역변동성 최대 배정 = 최저변동성")
+ae = portfolio.target_amounts(universe, capital=CAP4, n=N, weighting="equal")
+check(len(set(round(v) for v in ae.values())) == 1, "동일가중은 전 종목 같은 금액")
+# 상위 n종목의 합만 총자본과 같습니다. 그 밖의 종목은 '버퍼 구간에서 비중
+# 조절을 계산하기 위한 참고 목표'일 뿐 배분 대상이 아닙니다.
+top_m = sum(am[c] for c in universe[:N])
+top_a = sum(aa[c] for c in universe[:N])
+check(abs(top_m - CAP4) < 1 and abs(top_a - CAP4) < 1,
+      f"상위 100종목 목표 합 = 총자본 ({top_m:,.0f} / {top_a:,.0f})")
+check(len(am) > N, "버퍼 구간 종목도 참고 목표를 가짐")
+
+# 상한이 걸리는가
+ac = portfolio.target_amounts(universe, capital=CAP4, n=N, weighting="score",
+                              cap=0.02)
+check(max(ac.values()) <= CAP4 * 0.02 + 1,
+      f"종목 상한 2%를 지킴 (최대 {max(ac.values()):,.0f}원)")
+
+# 전체 유니버스 순위를 넘기면 백테스트와 같은(완만한) 기울기가 나와야 합니다
+ar = portfolio.target_amounts(
+    universe[:N], capital=CAP4, n=N, weighting="score",
+    rank_map={c: i + 1 for i, c in enumerate(universe)},
+    universe_n=len(universe))
+check(max(ar.values()) / min(ar.values()) < 1.5,
+      f"전체순위 기준이면 기울기가 완만 ({max(ar.values())/min(ar.values()):.2f}배)")
+nr = portfolio.target_amounts(universe[:N], capital=CAP4, n=N, weighting="score")
+check(max(nr.values()) / min(nr.values()) > 10,
+      f"명단 안 순위만 쓰면 극단적으로 쏠림 "
+      f"({max(nr.values())/min(nr.values()):.0f}배) — 그래서 전체순위를 넘깁니다")
+
+# 등분 위상이 엇갈리는가 — 같은 주에 다른 등분을 손봐야 합니다
+same_week = [(portfolio.current_slot(TR, date(2026, 10, d), PM["slot_offset"]),
+              portfolio.current_slot(TR, date(2026, 10, d), PA["slot_offset"]))
+             for d in (9, 16, 23, 30)]
+check(all(a != b for a, b in same_week),
+      f"매주 서로 다른 등분을 손봄 {same_week}")
+
+# 한 계좌의 거래가 다른 계좌 상태를 건드리지 않는가
+before_a = portfolio.load_state(PA["state_table"]).copy()
+shifted4 = universe[15:] + universe[:15]
+portfolio.rebalance(model4(shifted4), n=N, tranches=TR, today=date(2026, 10, 16),
+                    capital=CAP4, table=PM["state_table"],
+                    slot_offset=PM["slot_offset"], weighting=PM["weighting"])
+after_a = portfolio.load_state(PA["state_table"])
+check(set(before_a["종목코드"]) == set(after_a["종목코드"]),
+      "main 거래가 alt 보유를 바꾸지 않음")
+check(len(before_a) == len(after_a), "alt 종목 수 그대로")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

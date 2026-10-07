@@ -30,6 +30,18 @@ on:
         description: "등분 수 (주간 4등분이면 4)"
         required: false
         default: "4"
+      profile:
+        description: "계좌 — main(상수) / alt(배우자). seed·resync는 이 계좌에만 적용됩니다"
+        required: false
+        default: "main"
+        type: choice
+        options: ["main", "alt"]
+      run_both:
+        description: "자동 실행 때 두 계좌 주문서를 모두 만들지 (1=둘 다, 0=profile만)"
+        required: false
+        default: "1"
+        type: choice
+        options: ["1", "0"]
 
 concurrency:
   group: quant-pipeline
@@ -93,7 +105,8 @@ jobs:
           printf '%s\n' "$SEED_CSV" > holdings.csv
           echo "--- 붙여넣은 보유 종목 ---"
           cat holdings.csv
-          python run_weekly.py seed holdings.csv "${{ github.event.inputs.tranches || '4' }}"
+          python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
+            seed holdings.csv "${{ github.event.inputs.tranches || '4' }}"
 
       - name: 보유·자금 재동기화 (월 1회)
         if: ${{ github.event.inputs.resync_csv != '' }}
@@ -104,10 +117,34 @@ jobs:
           printf '%s\n' "$RESYNC_CSV" > resync.csv
           echo "--- 붙여넣은 보유 목록 ---"
           cat resync.csv
-          python run_weekly.py resync resync.csv "$CASH" "${{ github.event.inputs.tranches || '4' }}"
+          python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
+            resync resync.csv "$CASH" "${{ github.event.inputs.tranches || '4' }}"
 
       - name: 주간 주문서 만들기
-        run: python run_weekly.py "${{ github.event.inputs.tranches || '4' }}"
+        env:
+          TR: ${{ github.event.inputs.tranches || '4' }}
+          PROFILE: ${{ github.event.inputs.profile || 'main' }}
+          BOTH: ${{ github.event.inputs.run_both || '1' }}
+        run: |
+          # 두 계좌는 상태 테이블·모델 파일이 분리돼 있어 순서대로 돌리면 됩니다.
+          # 한쪽이 실패해도 다른 쪽 주문서는 나와야 하므로 결과를 모아 판정합니다.
+          fail=0
+          if [ "$BOTH" = "1" ]; then
+            targets="main alt"
+          else
+            targets="$PROFILE"
+          fi
+          for prof in $targets; do
+            echo "::group::$prof 주문서"
+            if python run_weekly.py -p "$prof" "$TR"; then
+              echo "$prof OK"
+            else
+              echo "::error::$prof 주문서 생성 실패"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail
 
       - name: 저장소·결과 올리기
         if: always()

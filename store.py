@@ -28,6 +28,8 @@ PRIMARY_KEYS: dict[str, list[str]] = {
     "kor_value": ["종목코드", "기준일", "지표"],
     "kor_portfolio": ["종목코드"],        # 실전 보유 상태 (분할 리밸런싱)
     "kor_capital": ["기준일"],           # 운용자금 (월 1회 재동기화)
+    "kor_portfolio_alt": ["종목코드"],
+    "kor_capital_alt": ["기준일"],
     # 미국장
     "global_ticker": ["Symbol", "country", "date"],
     "global_price": ["Date", "Symbol"],
@@ -62,6 +64,10 @@ SCHEMAS: dict[str, dict[str, str]] = {
     # 운용자금 — 월 1회 재동기화로 갱신. 한 줄만 유지합니다.
     "kor_capital": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
                     "총자본": "DOUBLE"},
+    # 두 번째 프로필(alt) — 같은 스키마, 별도 테이블. 상태가 섞이면
+    # 한 사람의 매도가 다른 사람 주문서에 나타납니다.
+    "kor_capital_alt": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
+                        "총자본": "DOUBLE"},
     "kor_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
                       "기준금액": "DOUBLE",
                       "종목명": "VARCHAR", "섹터": "VARCHAR"},
@@ -78,6 +84,9 @@ SCHEMAS: dict[str, dict[str, str]] = {
 }
 
 # 날짜로 취급할 컬럼 (parquet 왕복 시 타입 고정)
+# alt 프로필의 보유 테이블은 main과 스키마가 같습니다 (복제해 등록).
+SCHEMAS["kor_portfolio_alt"] = dict(SCHEMAS["kor_portfolio"])
+
 DATE_COLS = {"기준일", "날짜", "date", "Date"}
 
 _write_lock = threading.Lock()
