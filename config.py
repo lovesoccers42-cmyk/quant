@@ -279,3 +279,74 @@ def profile(name: str | None = None) -> dict:
     out["model_file"] = f"model_kr{suffix}_latest.parquet"
     out["hold_file"] = f"model_kr{suffix}_hold.parquet"
     return out
+
+# ── 확정 설정 (한국) ─────────────────────────────────────────
+# 2026-10 확정. 백테스트 2017-03-31~2026-10-02, 495회차 기준:
+#   누적 151.09% · 연 10.15% · 샤프 0.46 · MDD -42.74% · 회전율 연 153%
+#   전종목 동일가중 대비 +60.79%p (t 1.12)
+#   유동성통과 대비 연초과 +6.68%p (t 2.38)
+#   시총상위200 지수 대비 -46.66%p  ← 지수는 못 이깁니다
+#
+# 꼬리표 (지우지 마세요):
+#   · 생존편향 — 상장폐지 종목이 데이터에 없어 성과가 과대평가됩니다
+#   · 다중검정 20회 이상 — t값은 보정 전입니다
+#   · 수익과 무관한 기준으로 종목을 반 가르니 두 쪽이 91.6%p 벌어졌습니다.
+#     즉 +60.79%p는 그 잡음 폭 안에 있습니다
+#
+# run_backtest.py는 market="kr"이고 인자를 안 주면 이 값을 씁니다.
+# 미국장(us)은 영향받지 않습니다.
+CONFIRMED_KR: dict = {
+    "top_n": N_PORTFOLIO,       # 100 — 30은 -10.9%p, 150은 더 나빴습니다
+    "rebalance": "W-FRI",
+    "cost_bps": 25.0,
+    "max_sector_pct": 1.0,      # 섹터 상한 해제 (모멘텀 섹터중립을 풀었으므로)
+    "min_turnover": MIN_TURNOVER_KR,
+    "tranches": 4,
+    "trend_ma": 0,              # 시장 타이밍 오버레이 — 측정 결과 실패
+    "risk_off": 0.0,
+    "weighting": "score",
+    "max_weight": 0.0,          # 방식별 기본값(score 3%)
+    "rebal_band": 0.20,
+    "rank_buffer": 0.5,
+    "sector_neutral": "no_mom",
+    "use_lowvol": 0,            # 측정 결과 MDD가 더 나빠져 기각
+    "trend_stock": 0,           # 측정 결과 회전율만 올려 기각
+    "max_sector_weight": 0.0,
+    "qvm_weights": None,        # 1/3씩
+}
+
+# ── 미국장 검증 설정 ────────────────────────────────────────
+# 한국 확정 설정과 '구조'를 똑같이 맞춘 값입니다. 목적은 수익이 아니라 검증 —
+# 한국 데이터를 20번 넘게 돌려 얻은 결과가, 한 번도 건드리지 않은 미국
+# 데이터에서도 재현되는지 보는 것입니다. 재현되면 메커니즘이 실재할 가능성이
+# 크고, 안 되면 한국 9.5년에 맞춘 것일 확률이 큽니다.
+#
+# 구조(종목수·주기·등분·비중·버퍼·밴드·섹터중립)는 한국과 동일하게 둡니다.
+# 시장마다 다를 수밖에 없는 것만 바꿉니다:
+#   · cost_bps 25 → 10 : 한국은 증권거래세 0.20%가 매도에 붙지만 미국은
+#     없습니다. 한국 기준을 그대로 쓰면 미국 쪽을 부당하게 불리하게 만듭니다.
+#   · min_turnover : 5억원 → 500만 달러
+#   · 섹터중립 no_mom 유지 — 한국에서 섹터 로테이션이 핵심이었으므로
+#
+# ※ 비교할 때는 '비용 전 초과수익'과 IC를 먼저 보세요. 비용 가정이 시장마다
+#   다르므로 비용 후 숫자만으로 두 시장을 견주면 가정 차이를 실력 차이로
+#   잘못 읽습니다.
+CONFIRMED_US: dict = {
+    "top_n": N_PORTFOLIO,
+    "rebalance": "W-FRI",
+    "cost_bps": 10.0,
+    "max_sector_pct": 1.0,
+    "min_turnover": MIN_TURNOVER_US,
+    "tranches": 4,
+    "trend_ma": 0,
+    "risk_off": 0.0,
+    "weighting": "score",
+    "max_weight": 0.0,
+    "rebal_band": 0.20,
+    "rank_buffer": 0.5,
+    "sector_neutral": "no_mom",
+    "use_lowvol": 0,
+    "trend_stock": 0,
+    "max_sector_weight": 0.0,
+    "qvm_weights": None,
+}

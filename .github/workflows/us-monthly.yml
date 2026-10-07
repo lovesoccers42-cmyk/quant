@@ -18,6 +18,10 @@ on:
         description: "재무제표·배당 묶음 크기"
         required: false
         default: "50"
+      price_years:
+        description: "주가 수집 연수. 백테스트에는 11년 이상 필요합니다(기본 2는 일상 운용용)"
+        required: false
+        default: "2"
 
 concurrency:
   group: quant-pipeline-us
@@ -42,6 +46,7 @@ jobs:
       QUANT_TICKER_LIMIT: ${{ github.event.inputs.ticker_limit || '0' }}
       QUANT_YF_CHUNK: ${{ github.event.inputs.yf_chunk || '100' }}
       QUANT_FS_CHUNK: ${{ github.event.inputs.fs_chunk || '50' }}
+      QUANT_US_MONTHLY_PRICE_YEARS: ${{ github.event.inputs.price_years || '2' }}
       TZ: Asia/Seoul
 
     steps:

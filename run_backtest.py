@@ -78,8 +78,8 @@ def _summary_rows(s: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
-         cost_bps: float = 25.0, max_sector_pct: float = -1.0,
+def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
+         cost_bps: float = -1.0, max_sector_pct: float = -1.0,
          min_turnover: float = -1.0, tranches: int = 1,
          trend_ma: int = 0, risk_off: float = 0.0,
          weighting: str = "", max_weight: float = -1.0,
@@ -95,19 +95,39 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
             encoding="utf-8"), logging.StreamHandler()],
         force=True)
 
-    # 음수면 config 기본값. 0(섹터상한 1.0)이면 제약 없이 = 예전 동작
-    if max_sector_pct < 0:
-        max_sector_pct = config.MAX_SECTOR_PCT
-    if min_turnover < 0:
-        min_turnover = (config.MIN_TURNOVER_KR if market == "kr"
+    # 확정 설정이 기본값입니다 (한국 CONFIRMED_KR / 미국 CONFIRMED_US).
+    # 인자를 주면 그게 이깁니다. 손으로 입력하다 max_weight 칸에 0.25를 넣어
+    # 런 하나를 통째로 날린 적이 있어, 기본값을 코드에 고정했습니다.
+    CK = (config.CONFIRMED_KR if market == "kr"
+          else getattr(config, "CONFIRMED_US", {}) if market == "us" else {})
+
+    def pick(name, given, fallback):
+        """인자 → 확정 설정 → config 순서로 고릅니다."""
+        if given is not None and not (isinstance(given, (int, float))
+                                      and given < 0):
+            if not (isinstance(given, str) and not given.strip()):
+                return given
+        if name in CK:
+            return CK[name]
+        return fallback
+
+    max_sector_pct = pick("max_sector_pct", max_sector_pct, config.MAX_SECTOR_PCT)
+    min_turnover = pick("min_turnover", min_turnover,
+                        config.MIN_TURNOVER_KR if market == "kr"
                         else config.MIN_TURNOVER_US)
-    weighting = (weighting or config.WEIGHTING or "equal").strip().lower()
-    if max_weight < 0:
-        max_weight = config.MAX_WEIGHT
-    if rebal_band < 0:
-        rebal_band = config.REBAL_BAND
-    if rank_buffer < 0:
-        rank_buffer = config.RANK_BUFFER
+    weighting = str(pick("weighting", weighting,
+                         config.WEIGHTING or "equal")).strip().lower()
+    max_weight = pick("max_weight", max_weight, config.MAX_WEIGHT)
+    rebal_band = pick("rebal_band", rebal_band, config.REBAL_BAND)
+    rank_buffer = pick("rank_buffer", rank_buffer, config.RANK_BUFFER)
+
+    top_n = int(pick("top_n", top_n or None, config.N_PORTFOLIO))
+    rebalance = str(pick("rebalance", rebalance, "ME"))
+    cost_bps = float(pick("cost_bps", cost_bps, 25.0))
+    tranches = int(pick("tranches", tranches if tranches != 1 else None,
+                        tranches))
+    trend_ma = int(pick("trend_ma", trend_ma if trend_ma else None, trend_ma))
+    risk_off = float(pick("risk_off", risk_off if risk_off else None, risk_off))
 
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
                        cost_bps=cost_bps, max_sector_pct=max_sector_pct,
@@ -117,16 +137,17 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                        weighting=weighting, max_weight=float(max_weight),
                        rebal_band=float(rebal_band),
                        rank_buffer=float(rank_buffer),
-                       sector_neutral=(sector_neutral or
-                                       config.SECTOR_NEUTRAL),
-                       use_lowvol=(bool(config.USE_LOWVOL) if use_lowvol < 0
-                                   else bool(use_lowvol)),
-                       trend_stock=(config.TREND_STOCK_MA if trend_stock < 0
-                                    else int(trend_stock)),
-                       max_sector_weight=(config.MAX_SECTOR_WEIGHT
-                                          if max_sector_weight < 0
-                                          else float(max_sector_weight)),
-                       qvm_weights=_parse_weights(qvm_weights),
+                       sector_neutral=pick("sector_neutral", sector_neutral,
+                                           config.SECTOR_NEUTRAL),
+                       use_lowvol=bool(pick("use_lowvol", use_lowvol,
+                                            config.USE_LOWVOL)),
+                       trend_stock=int(pick("trend_stock", trend_stock,
+                                            config.TREND_STOCK_MA)),
+                       max_sector_weight=float(pick("max_sector_weight",
+                                                    max_sector_weight,
+                                                    config.MAX_SECTOR_WEIGHT)),
+                       qvm_weights=(_parse_weights(qvm_weights)
+                                    or CK.get("qvm_weights")),
                        split=_parse_split(split))
     s = res["summary"]
     perf, holdings = res["perf"], res["holdings"]
@@ -196,9 +217,9 @@ def main(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
 
 if __name__ == "__main__":
     market = sys.argv[1] if len(sys.argv) > 1 else "kr"
-    top_n = int(sys.argv[2]) if len(sys.argv) > 2 else 30
-    reb = sys.argv[3] if len(sys.argv) > 3 else "ME"
-    cost = float(sys.argv[4]) if len(sys.argv) > 4 else 25.0
+    top_n = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    reb = sys.argv[3] if len(sys.argv) > 3 else ""
+    cost = float(sys.argv[4]) if len(sys.argv) > 4 else -1.0
     cap = float(sys.argv[5]) if len(sys.argv) > 5 else -1.0
     turn = float(sys.argv[6]) if len(sys.argv) > 6 else -1.0
     tr = int(sys.argv[7]) if len(sys.argv) > 7 else 1

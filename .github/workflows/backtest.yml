@@ -10,29 +10,29 @@ on:
         type: choice
         options: ["kr", "us"]
       top_n:
-        description: "보유 종목 수 (실전에서 살 수 있는 수로)"
+        description: "보유 종목 수 (확정 100). 30은 -10.9%p, 150은 더 나빴습니다"
         required: false
-        default: "30"
+        default: "100"
       rebalance:
-        description: "리밸런싱 주기 — B(일간) / W-FRI(주간) / ME(월말) / QE(분기말)"
+        description: "리밸런싱 주기 — B(일간) / W-FRI(주간) / ME(월말) / QE(분기말). 확정 W-FRI"
         required: false
-        default: "ME"
+        default: "W-FRI"
       cost_bps:
         description: "편도 거래비용 (bp). 한국 주식은 25 안팎"
         required: false
         default: "25"
       max_sector_pct:
-        description: "한 섹터 최대 비중 (0.25 = 25%). 1 이면 제한 없음(예전 동작)"
+        description: "한 섹터 최대 비중 (0.25 = 25%). 1 이면 제한 없음. 확정 1 (모멘텀 섹터중립을 풀었으므로)"
         required: false
-        default: "0.25"
+        default: "1"
       min_turnover:
         description: "20일 평균 거래대금 하한. 0 이면 필터 끔(예전 동작). 한국 5억 = 500000000"
         required: false
         default: "500000000"
       tranches:
-        description: "분할 리밸런싱 등분 수. 1이면 매번 전체 교체. 주간 4등분이면 4"
+        description: "분할 리밸런싱 등분 수. 1이면 매번 전체 교체. 확정 4"
         required: false
-        default: "1"
+        default: "4"
       trend_ma:
         description: "리스크 오버레이 — 시장지수 이동평균 일수. 0이면 끔, 표준값 200"
         required: false
@@ -44,9 +44,9 @@ on:
       weighting:
         description: "종목별 비중 — equal(동일) / mcap(시총) / score(점수순위) / invvol(역변동성)"
         required: false
-        default: "equal"
+        default: "score"
         type: choice
-        options: ["equal", "mcap", "score", "invvol"]
+        options: ["score", "equal", "mcap", "invvol"]
       max_weight:
         description: "한 종목 최대 비중. 0이면 방식별 기본값(mcap 8%, score·invvol 3%). 섹터상한과 혼동하지 마세요"
         required: false
@@ -62,9 +62,9 @@ on:
       sector_neutral:
         description: "섹터 중립 — all(전부 섹터 내 비교) / no_mom(모멘텀만 전 종목 비교) / none(전부 전 종목 비교)"
         required: false
-        default: "all"
+        default: "no_mom"
         type: choice
-        options: ["all", "no_mom", "none"]
+        options: ["no_mom", "all", "none"]
       use_lowvol:
         description: "저변동성 팩터 — 1이면 QVM→QVML (네 팩터 1/4씩). 낙폭을 줄이는 모델 내부 레버"
         required: false
@@ -84,7 +84,7 @@ on:
         required: false
         default: ""
       split:
-        description: "교차 분할 '등분수/몇번째' — 2/0=상수 바구니, 2/1=배우자 바구니. 비우면 분할 없음"
+        description: "분할 '등분수/몇번째@공용비중' — 상수 2/0@0.7 · 배우자 2/1@0.7. 비우면 분할 없음"
         required: false
         default: ""
 
@@ -124,7 +124,13 @@ jobs:
           ls -lh data
 
       - name: 오프라인 점검 (커밋 누락 잡기)
-        run: python tools/test_weighting.py
+        run: |
+          python tools/test_weighting.py
+          python tools/test_defaults.py
+
+      - name: 데이터 기간 점검 (미국장만)
+        if: ${{ github.event.inputs.market == 'us' }}
+        run: python tools/probe_us.py
 
       - name: 백테스트 실행
         run: |
