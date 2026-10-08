@@ -45,6 +45,17 @@ import store
 log = logging.getLogger("quant_agent.weekly")
 
 
+def _price_asof() -> str:
+    """모델이 쓴 주가의 마지막 날짜. 주문서가 언제 종가로 계산됐는지입니다."""
+    try:
+        df = store.read("kor_price")
+        if df.empty:
+            return "없음"
+        return f"{pd.to_datetime(df['날짜']).max():%Y-%m-%d}"
+    except Exception:
+        return "확인 실패"
+
+
 def _setting_text(prof: dict) -> str:
     cap = ("없음" if prof["max_sector_pct"] >= 1
            else f"{prof['max_sector_pct']:.0%}")
@@ -112,6 +123,10 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
             {"항목": "기준일", "값": f"{date.today():%Y-%m-%d}"},
             {"항목": "계좌", "값": f"{prof['라벨']} ({prof['key']})"},
             {"항목": "설정", "값": _setting_text(prof)},
+            # 주문서가 어느 날 종가로 계산됐는지 — 수량과 순위가 모두 이
+            # 날짜의 주가에서 나옵니다. 기준일보다 이틀 이상 뒤처져 있으면
+            # 주가 수집이 실패한 것이니 거래 전에 확인하세요.
+            {"항목": "주가 기준일", "값": _price_asof()},
             {"항목": "종목별 배정액 범위",
              "값": (f"{r['배정액범위'][0]:,}원 ~ {r['배정액범위'][1]:,}원"
                    if r.get("배정액범위") else "-")},
@@ -177,6 +192,7 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
         "등분수": tranches, "매도": r["매도"], "매수": r["매수"], "유지": r["유지"],
         "보유종목수": r["보유종목수"], "첫실행": r["첫실행"],
         "미매수": r.get("미매수", 0), "배정완료종목수": r.get("배정완료종목수"),
+        "주가기준일": _price_asof(),
         "종목당배정액": r.get("종목당배정액"), "가격초과제외": r.get("가격초과제외"),
         "orders": r["orders"].to_dict(orient="records"),
     }, ensure_ascii=False, indent=2), encoding="utf-8")

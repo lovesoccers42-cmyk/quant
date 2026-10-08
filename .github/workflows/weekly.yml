@@ -144,6 +144,10 @@ jobs:
           python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
             capital "$CAP"
 
+      - name: 최신 주가 받기 (일간 실행과의 순서에 의존하지 않도록)
+        continue-on-error: true
+        run: python tools/refresh_kr.py
+
       - name: 주간 주문서 만들기
         env:
           TR: ${{ github.event.inputs.tranches || '4' }}
