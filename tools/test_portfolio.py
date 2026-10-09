@@ -961,6 +961,49 @@ portfolio.resync(held, cash=7_730_000, tranches=TR, today=date(2026, 10, 23),
                  table=ST6, capital_table=CT6)
 check(len(store.read(CT6)) == 2, f"주마다 총자본이 한 점씩 쌓임 ({len(store.read(CT6))}점)")
 
+# ── 예수금 줄 떼어내기 · inbox 파일 이름 해석 ──────────────────
+print("\n[CSV 입력]")
+CASH_CASES = {
+    "예수금 줄": ("종목코드,평가금액,종목명\n005930,520000,삼성전자\n"
+               "예수금,7730000,\n", 1, 7_730_000),
+    "종목명이 현금": ("종목코드,평가금액,종목명\n005930,520000,삼성전자\n"
+                 ",7730000,현금\n", 1, 7_730_000),
+    "D+2예수금": ("종목코드,평가금액,종목명\n005930,520000,삼성전자\n"
+                "D+2예수금,123456,\n", 1, 123_456),
+    "탭 구분": ("종목코드\t평가금액\t종목명\n005930\t520000\t삼성전자\n"
+              "예수금\t7,730,000\t\n", 1, 7_730_000),
+    "줄바꿈 없음": ("종목코드,평가금액,종목명 005930,520000,삼성전자 "
+                "예수금,7730000,", 1, 7_730_000),
+    "현금 줄 없음": ("005930,520000,삼성전자\n000660,310000,하이닉스", 2, 0),
+    "종목명에 '현금배당'": ("종목코드,평가금액,종목명\n"
+                      "005930,520000,삼성전자현금배당\n", 1, 0),
+}
+for label, (txt, n_expect, cash_expect) in CASH_CASES.items():
+    rest, cash = portfolio.extract_cash(txt)
+    got = portfolio.parse_holdings(rest)
+    ok = len(got) == n_expect and abs(cash - cash_expect) < 1
+    check(ok, f"{label} — 보유 {len(got)}종목 · 현금 {cash:,.0f}원 "
+              f"(기대 {n_expect}종목 · {cash_expect:,}원)")
+
+_ia_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "inbox_apply.py")
+import importlib.util as _u  # noqa: E402
+_spec = _u.spec_from_file_location("_inbox_apply", _ia_path)
+_ia = _u.module_from_spec(_spec)
+_spec.loader.exec_module(_ia)
+
+NAME_CASES = {
+    "fills_main_2026-10-08.csv": ("fills", "main", date(2026, 10, 8)),
+    "holdings_alt.csv": ("holdings", "alt", None),
+    "FILLS_ALT_20261016.CSV": ("fills", "alt", date(2026, 10, 16)),
+    "holdings-main-2026_10_16.csv": ("holdings", "main", date(2026, 10, 16)),
+    "엉뚱한파일.csv": (None, None, None),
+    "fills.csv": ("fills", None, None),          # 계좌를 못 읽으면 건너뜀
+}
+for name, want in NAME_CASES.items():
+    got = _ia._parse_name(name)
+    check(got == want, f"파일 이름 해석 {name} → {got}")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

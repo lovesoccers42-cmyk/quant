@@ -76,6 +76,74 @@ def _to_number(v) -> float:
         return 0.0
 
 
+# 증권사 보유 화면에는 예수금(현금) 줄이 섞여 있습니다. 그걸 종목으로 읽으면
+# '예수금'이라는 종목을 들고 있는 것처럼 되고(코드 자릿수를 맞추느라 숫자가
+# 종목코드로 둔갑합니다), 현금은 어디에도 안 잡힙니다. 그래서 **종목코드를
+# 정규화하기 전에** 줄 단위로 떼어냅니다 — 보유 화면을 그대로 내려받아
+# 올려도 되게.
+_CASH_WORDS = ("현금", "예수금", "예수", "cash", "d+2", "증거금",
+               "주문가능", "미수")
+_CASH_SPLIT = re.compile(r"\s+(?=(?:예수금|예수|현금|증거금|주문가능|미수|"
+                         r"[Dd]\s*\+\s*2|[Cc][Aa][Ss][Hh]))")
+
+
+def extract_cash(src) -> tuple:
+    """보유 목록에서 예수금·현금 줄을 떼어내 (나머지, 현금)으로 돌려줍니다.
+
+    판정: 줄에 현금을 뜻하는 낱말이 있고, **첫 칸이 6자리 숫자(종목코드)가
+    아니면** 현금 줄입니다. 금액은 그 줄의 숫자 중 가장 큰 값으로 봅니다
+    ('D+2예수금,123456' 처럼 숫자가 하나뿐인 경우도, 여러 칸이 있는 경우도
+    같은 규칙으로 잡힙니다).
+    """
+    if isinstance(src, pd.DataFrame) or isinstance(src, (list, tuple)):
+        df = src.copy() if isinstance(src, pd.DataFrame) else pd.DataFrame(list(src))
+        if df.empty or "종목코드" not in df.columns:
+            return src, 0.0
+        code = df["종목코드"].astype(str).str.strip()
+        name = df.get("종목명", pd.Series("", index=df.index)).astype(str)
+        blob = (code + " " + name).str.lower()
+        is_cash = blob.apply(lambda t: any(w in t for w in _CASH_WORDS))
+        is_cash &= ~code.str.fullmatch(r"\d{6}").fillna(False)
+        if not is_cash.any():
+            return src, 0.0
+        cash = float(pd.to_numeric(df.loc[is_cash, "평가금액"],
+                                   errors="coerce").fillna(0).sum())
+        return df[~is_cash].copy(), cash
+
+    text = str(src)
+    if len(text) < 4096 and "\n" not in text and "\t" not in text:
+        try:
+            pp = Path(text)
+            if pp.exists():
+                text = pp.read_text(encoding="utf-8-sig")
+        except (OSError, ValueError):
+            pass
+    lines = [ln for ln in text.replace("\r\n", "\n").split("\n") if ln.strip()]
+    if len(lines) <= 1:
+        # 줄바꿈이 사라진 붙여넣기 — 레코드 경계를 되살립니다. 기본 규칙은
+        # '공백 뒤에 숫자+구분자'인데, 예수금 줄은 숫자로 시작하지 않아 앞
+        # 종목에 붙어버립니다(그러면 현금이 조용히 사라집니다). 그래서 현금
+        # 낱말 앞에서도 끊습니다.
+        rough = _RECORD_SPLIT.split(text.strip())
+        lines = []
+        for part in rough:
+            lines.extend(x for x in _CASH_SPLIT.split(part) if x.strip())
+
+    keep, cash = [], 0.0
+    for ln in lines:
+        low = ln.lower()
+        first = re.split(r"[\t,;|]", ln)[0].strip().strip('"')
+        if (any(w in low for w in _CASH_WORDS)
+                and not re.fullmatch(r"\d{6}", first)):
+            nums = [_to_number(x) for x in re.findall(r"[\d,]+(?:\.\d+)?", ln)]
+            nums = [n for n in nums if n > 0]
+            if nums:
+                cash += max(nums)
+                continue
+        keep.append(ln)
+    return "\n".join(keep), cash
+
+
 def parse_holdings(src) -> pd.DataFrame:
     """보유 종목 목록을 어떤 모양으로 받아도 종목코드·평가금액·종목명으로.
 
