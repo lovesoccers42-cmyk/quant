@@ -30,6 +30,9 @@ PRIMARY_KEYS: dict[str, list[str]] = {
     "kor_capital": ["기준일"],           # 운용자금 (월 1회 재동기화)
     "kor_portfolio_alt": ["종목코드"],
     "kor_capital_alt": ["기준일"],
+    # 거래·보유 기록 (덮어쓰지 않고 쌓습니다 — 성과 계산의 원장)
+    "kor_trades": ["기준일", "계좌", "종목코드", "구분"],
+    "kor_holdings_log": ["기준일", "계좌", "종목코드"],
     # 미국장
     "global_ticker": ["Symbol", "country", "date"],
     "global_price": ["Date", "Symbol"],
@@ -68,6 +71,28 @@ SCHEMAS: dict[str, dict[str, str]] = {
     # 한 사람의 매도가 다른 사람 주문서에 나타납니다.
     "kor_capital_alt": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
                         "총자본": "DOUBLE"},
+    # 주문서가 낸 모든 주문. 매주 덮어쓰지 않고 쌓습니다.
+    #
+    # 왜 필요한가: 상태 테이블(kor_portfolio)은 '지금 들고 있는 것'만 담습니다.
+    # 팔린 종목은 통째로 사라지므로 실현손익을 계산할 방법이 없고, 주문서
+    # 엑셀과 weekly_*.json은 매주 같은 이름으로 덮어써집니다. 즉 기록을
+    # 남기지 않으면 그 주의 거래는 영구히 사라집니다.
+    #
+    # '주가·수량·예상금액'은 주문서가 계산한 **계획**입니다. 실제 체결가는
+    # 다를 수 있어 체결가/체결수량/체결일을 따로 둡니다(비면 계획값으로
+    # 추정한다는 뜻).
+    "kor_trades": {"기준일": "TIMESTAMP", "계좌": "VARCHAR", "구분": "VARCHAR",
+                   "종목코드": "VARCHAR", "종목명": "VARCHAR", "섹터": "VARCHAR",
+                   "주가": "DOUBLE", "수량": "DOUBLE", "예상금액": "DOUBLE",
+                   "등분": "BIGINT", "메모": "VARCHAR",
+                   "체결가": "DOUBLE", "체결수량": "DOUBLE",
+                   "체결일": "TIMESTAMP"},
+    # 재동기화 때의 종목별 평가금액 — 실제 계좌와 맞춰 본 유일한 지점입니다.
+    # 수량을 모르는 종목(이어받은 보유)의 주식 수를 평가금액÷종가로
+    # 되살리는 기준점이 되고, 계획과 실제가 얼마나 벌어졌는지도 여기서 봅니다.
+    "kor_holdings_log": {"기준일": "TIMESTAMP", "계좌": "VARCHAR",
+                         "종목코드": "VARCHAR", "종목명": "VARCHAR",
+                         "평가금액": "DOUBLE"},
     "kor_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
                       "기준금액": "DOUBLE",
                       "종목명": "VARCHAR", "섹터": "VARCHAR"},

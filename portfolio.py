@@ -718,6 +718,230 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     }
 
 CAPITAL = "kor_capital"      # main 프로필 (기준일 · 평가액 · 현금 · 총자본)
+TRADES = "kor_trades"        # 주문 원장 (계좌별 · 쌓임)
+HOLDINGS_LOG = "kor_holdings_log"   # 재동기화 시점의 종목별 평가금액
+
+
+def log_trades(orders, *, account: str, today: date | None = None,
+               table: str = TRADES) -> int:
+    """주문서가 낸 주문을 원장에 쌓습니다 (덮어쓰지 않음).
+
+    성과를 보려면 '무엇을 언제 얼마에 사고팔았는지'가 남아 있어야 합니다.
+    상태 테이블은 지금 보유만 담고 팔린 종목은 사라지므로, 이 기록이 없으면
+    실현손익을 영구히 계산할 수 없습니다. 주문서 엑셀·json은 매주 같은
+    이름으로 덮어써지니 그것도 기록이 되지 못합니다.
+
+    여기 들어가는 주가·수량은 주문서의 **계획값**입니다. 실제 체결가는
+    다를 수 있고, 체결가/체결수량이 비어 있으면 '계획값으로 추정'한다는
+    뜻입니다. 체결 내역을 넣으면 그때부터 실제 값으로 계산됩니다.
+    """
+    today = today or date.today()
+    if orders is None or not len(orders):
+        return 0
+    df = orders.copy()
+    qty = pd.to_numeric(df.get("수량"), errors="coerce")
+    rows = pd.DataFrame({
+        "기준일": pd.Timestamp(today),
+        "계좌": str(account),
+        "구분": df["구분"].astype(str),
+        "종목코드": df["종목코드"].astype(str).str.zfill(6),
+        "종목명": df.get("종목명", "").astype(str),
+        "섹터": df.get("섹터", "").astype(str),
+        "주가": pd.to_numeric(df.get("주가"), errors="coerce"),
+        "수량": qty,
+        "예상금액": pd.to_numeric(df.get("예상금액"), errors="coerce"),
+        "메모": np.where(qty.isna(), df["구분"].astype(str).radd("수량미정 "), ""),
+        "체결가": np.nan, "체결수량": np.nan,
+        "체결일": pd.NaT,
+    })
+    rows["등분"] = pd.NA
+    # 같은 날 같은 계좌의 같은 종목·구분이 두 번 나오면 뒤엣것만 남깁니다
+    # (같은 주에 두 번 돌린 경우 — 중복 주문이 쌓이면 안 됩니다).
+    rows = rows.drop_duplicates(subset=["기준일", "계좌", "종목코드", "구분"],
+                                keep="last")
+    return store.upsert(table, rows)
+
+
+_FILL_WORDS = {
+    "종목코드": ("종목코드", "코드", "티커", "code", "ticker", "단축코드"),
+    "종목명": ("종목명", "종목", "이름", "name"),
+    "구분": ("구분", "매매", "매도수", "주문구분", "거래구분", "side"),
+    "체결수량": ("체결수량", "체결량", "수량", "주문수량", "qty"),
+    "체결가": ("체결가", "체결단가", "단가", "평균단가", "가격", "price"),
+}
+
+
+def parse_fills(src) -> pd.DataFrame:
+    """증권사 체결내역을 붙여넣은 그대로 읽습니다.
+
+    필요한 것은 네 가지입니다 — 어느 종목(코드 또는 이름), 사고팔았는지,
+    몇 주, 얼마에. 헤더가 있으면 순서가 달라도 맞추고, 없으면 왼쪽부터
+    종목코드·구분·체결수량·체결가로 봅니다. 숫자의 쉼표·'원'·'주'는
+    떼어냅니다.
+
+    구분 칸이 없으면 비워 둡니다 — 그때는 원장에 적힌 그 주의 주문 구분으로
+    맞춥니다(매수 주문서에 있던 종목이면 매수 체결로 봅니다).
+    """
+    if isinstance(src, pd.DataFrame):
+        df = src.copy()
+    elif isinstance(src, (list, tuple)):
+        df = pd.DataFrame(list(src))
+    else:
+        text = str(src)
+        if len(text) < 4096 and "\n" not in text and "\t" not in text:
+            try:
+                pp = Path(text)
+                if pp.exists():
+                    text = pp.read_text(encoding="utf-8-sig")
+            except (OSError, ValueError):
+                pass
+        lines = [ln for ln in text.replace("\r\n", "\n").split("\n") if ln.strip()]
+        if len(lines) <= 1:
+            lines = [ln for ln in _RECORD_SPLIT.split(text.strip()) if ln.strip()]
+        if "\t" in lines[0]:
+            parts = list(csv.reader(lines, delimiter="\t"))
+        elif "," in lines[0]:
+            parts = list(csv.reader(lines))
+        else:
+            parts = [re.split(r"\s{2,}|\s(?=\d)", ln.strip()) for ln in lines]
+        parts = [[c.strip() for c in row] for row in parts
+                 if any(c.strip() for c in row)]
+        first = parts[0]
+        idx = {}
+        for i, c in enumerate(first):
+            lc = str(c).lower()
+            for key, words in _FILL_WORDS.items():
+                if key not in idx and any(w in lc for w in words):
+                    idx[key] = i
+        has_header = len(idx) >= 2
+        body = parts[1:] if has_header else parts
+        if has_header:
+            df = pd.DataFrame([{k: (r[i] if i < len(r) else "")
+                                for k, i in idx.items()} for r in body])
+        else:
+            cols = ["종목코드", "구분", "체결수량", "체결가"]
+            df = pd.DataFrame(body).iloc[:, :4]
+            df.columns = cols[:df.shape[1]]
+
+    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+    if "종목코드" not in df.columns and "종목명" not in df.columns:
+        raise ValueError(
+            "종목을 식별할 칸(종목코드 또는 종목명)을 찾지 못했습니다. "
+            f"읽어낸 컬럼: {list(df.columns)}")
+    if "체결수량" not in df.columns or "체결가" not in df.columns:
+        raise ValueError(
+            "'체결수량'과 '체결가'를 찾지 못했습니다. "
+            f"읽어낸 컬럼: {list(df.columns)}")
+
+    # 인덱스를 먼저 맞춥니다 — 빈 DataFrame에 스칼라를 넣으면 행이 0개로
+    # 남아, 종목명만 있는 체결내역이 조용히 전부 사라집니다(실측 버그).
+    out = pd.DataFrame(index=df.index)
+    if "종목코드" in df.columns:
+        out["종목코드"] = (df["종목코드"].astype(str)
+                        .str.extract(r"(\d{1,6})", expand=False)
+                        .fillna("").str.zfill(6).where(lambda x: x != "000000", ""))
+    else:
+        out["종목코드"] = ""
+    out["종목명"] = (df["종목명"].astype(str).str.strip()
+                  if "종목명" in df.columns else "")
+    out["종목명"] = out["종목명"].fillna("").replace("nan", "")
+    if "구분" in df.columns:
+        g = df["구분"].astype(str)
+        out["구분"] = np.where(g.str.contains("매도|sell|SELL"), "매도",
+                            np.where(g.str.contains("매수|buy|BUY"), "매수", ""))
+    else:
+        out["구분"] = ""
+    out["체결수량"] = df["체결수량"].map(_to_number)
+    out["체결가"] = df["체결가"].map(_to_number)
+    out = out[(out["체결수량"] > 0) & (out["체결가"] > 0)]
+    if out.empty:
+        raise ValueError("읽어낸 체결 건이 없습니다 (수량·단가가 모두 0).")
+    # 같은 종목이 여러 번 체결됐으면 수량가중 평균단가로 합칩니다
+    out["_금액"] = out["체결수량"] * out["체결가"]
+    key = ["종목코드", "종목명", "구분"]
+    g = out.groupby(key, as_index=False).agg(체결수량=("체결수량", "sum"),
+                                             _금액=("_금액", "sum"))
+    g["체결가"] = g["_금액"] / g["체결수량"]
+    return g.drop(columns=["_금액"]).reset_index(drop=True)
+
+
+def record_fills(src, *, account: str, today: date | None = None,
+                 asof: date | None = None, table: str = TRADES) -> dict:
+    """체결내역을 원장의 그 주 주문에 채워 넣습니다.
+
+    asof를 주지 않으면 그 계좌의 **가장 최근 주문 날짜**에 채웁니다(보통
+    이번 주 주문서). 원장에 없던 종목이 체결돼 있으면 '원장밖' 주문으로
+    새로 적습니다 — 직접 사신 종목도 성과에 들어가야 하니까요.
+    """
+    today = today or date.today()
+    fills = parse_fills(src)
+    log = store.read(table)
+    if log.empty:
+        raise ValueError("주문 원장이 비어 있습니다 — 주문서를 먼저 만드세요.")
+    log["기준일"] = pd.to_datetime(log["기준일"])
+    mine = log[log["계좌"].astype(str) == str(account)]
+    if mine.empty:
+        raise ValueError(f"{account} 계좌의 주문 기록이 없습니다.")
+    asof_ts = (pd.Timestamp(asof) if asof is not None
+               else mine["기준일"].max())
+    week = mine[mine["기준일"] == asof_ts].copy()
+    if week.empty:
+        raise ValueError(f"{asof_ts:%Y-%m-%d} 날짜의 주문이 없습니다.")
+
+    by_code = {str(c).zfill(6): i for i, c in week["종목코드"].items()}
+    by_name = {}
+    for i, nm in week["종목명"].items():
+        if isinstance(nm, str) and nm.strip():
+            by_name.setdefault(nm.strip(), i)
+
+    matched, extra, used = [], [], set()
+    for _, f in fills.iterrows():
+        i = by_code.get(f["종목코드"]) if f["종목코드"] else None
+        if i is None:
+            i = by_name.get(str(f["종목명"]).strip())
+        if i is None or i in used:
+            extra.append(f)
+            continue
+        used.add(i)
+        matched.append((i, f))
+
+    upd = log.copy()
+    for i, f in matched:
+        upd.loc[i, "체결가"] = float(f["체결가"])
+        upd.loc[i, "체결수량"] = float(f["체결수량"])
+        upd.loc[i, "체결일"] = pd.Timestamp(today)
+    rows = []
+    for f in extra:
+        rows.append({"기준일": asof_ts, "계좌": account,
+                     "구분": f["구분"] or "매수",
+                     "종목코드": f["종목코드"] or "", "종목명": f["종목명"],
+                     "섹터": "", "주가": np.nan, "수량": np.nan,
+                     "예상금액": np.nan, "등분": pd.NA,
+                     "메모": "원장밖 체결 (주문서에 없던 종목)",
+                     "체결가": float(f["체결가"]),
+                     "체결수량": float(f["체결수량"]),
+                     "체결일": pd.Timestamp(today)})
+    if rows:
+        upd = pd.concat([upd, pd.DataFrame(rows)], ignore_index=True)
+    store.write(table, upd)
+
+    # 안 채워진 주문 — 못 산 종목입니다. 다음 차례로 넘어갑니다.
+    left = week.index.difference(pd.Index(used))
+    return {"체결반영": len(matched), "원장밖": len(rows),
+            "미체결": int(len(left)), "기준일": f"{asof_ts:%Y-%m-%d}",
+            "미체결종목": [str(c).zfill(6) for c in week.loc[left, "종목코드"]]}
+
+
+def trade_log(table: str = TRADES, account: str | None = None) -> pd.DataFrame:
+    """쌓인 주문 원장. account를 주면 그 계좌만."""
+    df = store.read(table)
+    if df.empty:
+        return df
+    df["기준일"] = pd.to_datetime(df["기준일"])
+    if account:
+        df = df[df["계좌"].astype(str) == str(account)]
+    return df.sort_values(["기준일", "계좌", "구분", "종목코드"])
+
 
 
 def load_capital(table: str = CAPITAL) -> dict:
@@ -765,7 +989,7 @@ def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
     if total <= 0:
         raise ValueError("운용금액은 0보다 커야 합니다.")
     cash = min(max(0.0, float(cash)), total)
-    store.write(table, pd.DataFrame([{
+    store.upsert(table, pd.DataFrame([{
         "기준일": pd.Timestamp(today), "평가액": total - cash,
         "현금": cash, "총자본": total}]))
     log.info("운용금액 설정 — 총자본 %.0f (평가액 %.0f + 현금 %.0f)",
@@ -828,9 +1052,18 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     평가액 = float(got["평가금액"].sum())
     현금 = max(0.0, float(cash))
     총자본 = 평가액 + 현금
-    store.write(capital_table, pd.DataFrame([{
+    # upsert입니다(write 아님). write면 한 줄로 덮어써서 지난 총자본이
+    # 사라집니다 — 그러면 '얼마나 불었는지'를 계산할 자료가 남지 않습니다.
+    store.upsert(capital_table, pd.DataFrame([{
         "기준일": pd.Timestamp(today), "평가액": 평가액,
         "현금": 현금, "총자본": 총자본}]))
+
+    # 종목별 평가금액도 기록합니다 — 실제 계좌와 맞춰 본 지점입니다.
+    store.upsert(HOLDINGS_LOG, pd.DataFrame([
+        {"기준일": pd.Timestamp(today),
+         "계좌": "alt" if capital_table.endswith("_alt") else "main",
+         "종목코드": c, "종목명": names.get(c, ""), "평가금액": float(v)}
+        for c, v in have.items()]))
 
     by = st.groupby("등분")["기준금액"].sum()
     log.info("재동기화 — 보유 %d종목 평가액 %.0f · 현금 %.0f · 총자본 %.0f",

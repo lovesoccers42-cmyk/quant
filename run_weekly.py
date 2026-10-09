@@ -7,6 +7,7 @@
     python run_weekly.py resync 보유종목.csv 350000   # 월 1회 — 평가액·현금 갱신
     python run_weekly.py capital 10000000 -p alt    # 현금으로 시작할 때 한 번
     python run_weekly.py reset -p alt               # 체결 전 상태 되돌리기
+    python run_weekly.py fills 체결내역.csv           # 거래 후 — 실제 체결가 기록
 
 처음 시작할 때 (이미 한국 주식을 들고 있는 경우)
 ------------------------------------------------
@@ -110,6 +111,11 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
                             slot_offset=prof["slot_offset"],
                             weighting=prof["weighting"],
                             max_weight=config.MAX_WEIGHT)
+
+    # 주문을 원장에 쌓습니다 — 이게 없으면 그 주 거래 기록이 영구히
+    # 사라집니다(상태 테이블은 보유만 담고, 주문서 파일은 매주 덮어써짐).
+    n_logged = portfolio.log_trades(r["orders"], account=prof["key"])
+    log.info("주문 원장 기록 %d건 (%s)", n_logged, prof["key"])
 
     today = f"{date.today():%Y%m%d}"
     # 파일명에 weekly-main / weekly-alt 토큰을 넣습니다 — GitHub 릴리스가
@@ -288,6 +294,30 @@ def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
     return 0
 
 
+def fills_main(src: str, asof: str | None = None,
+               prof: dict | None = None) -> int:
+    """증권사 체결내역을 원장에 채웁니다 (거래 체결 후 아무 때나)."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    prof = prof or config.profile()
+    _asof = None
+    if asof and str(asof).strip() and str(asof).strip() != "-":
+        _asof = pd.Timestamp(str(asof).strip()).date()
+    r = portfolio.record_fills(src, account=prof["key"], asof=_asof)
+    print("\n" + "=" * 60)
+    print(f"  체결내역 반영 — {prof['라벨']} 계좌 · {r['기준일']} 주문")
+    print("=" * 60)
+    print(f"  체결 반영 {r['체결반영']}건")
+    if r["원장밖"]:
+        print(f"  주문서에 없던 체결 {r['원장밖']}건 — '원장밖 체결'로 적었습니다")
+    if r["미체결"]:
+        print(f"  아직 체결 안 된 주문 {r['미체결']}건: "
+              f"{', '.join(r['미체결종목'][:10])}"
+              f"{' …' if len(r['미체결종목']) > 10 else ''}")
+        print("  (못 산 종목은 다음 등분 차례에 다시 후보로 올라옵니다)")
+    print("\n  이제 대시보드의 수익률이 계획가가 아니라 실제 체결가로 계산됩니다.")
+    return 0
+
+
 def reset_main(prof: dict | None = None) -> int:
     """아직 체결하지 않은 계좌의 보유 상태를 비웁니다."""
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
@@ -348,6 +378,16 @@ if __name__ == "__main__":
         _cash = float(rest[0]) if rest else 0.0
         _tr = int(rest[1]) if len(rest) > 1 else 4
         sys.exit(resync_main(src, _cash, _tr, _prof))
+    if len(sys.argv) > 1 and sys.argv[1] == "fills":
+        if len(sys.argv) > 2 and sys.argv[2] != "-":
+            src, rest = sys.argv[2], sys.argv[3:]
+        else:
+            src, rest = sys.stdin.read(), sys.argv[3:]
+            if not src.strip():
+                print("사용법: python run_weekly.py fills 체결내역.csv [기준일] "
+                      "[-p alt]")
+                sys.exit(2)
+        sys.exit(fills_main(src, rest[0] if rest else None, _prof))
     if len(sys.argv) > 1 and sys.argv[1] == "reset":
         sys.exit(reset_main(_prof))
     if len(sys.argv) > 1 and sys.argv[1] == "capital":

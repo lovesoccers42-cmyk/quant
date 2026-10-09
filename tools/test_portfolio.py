@@ -754,6 +754,126 @@ check(r_s["배정완료종목수"] <= 92,
       f"명단이 100종목뿐이면 {r_s['배정완료종목수']}종목밖에 못 채움 "
       f"(빈 자리를 메울 101위 이하가 없음) — 그래서 모델 파일을 200종목으로 씁니다")
 
+# ── 거래 원장 · 자본 추이 (성과 계산의 전제) ──────────────────
+print("\n[기록]")
+LOG_ORDERS = pd.DataFrame([
+    {"구분": "매도", "종목코드": "005930", "종목명": "삼성전자", "섹터": "IT",
+     "주가": None, "수량": "전량", "예상금액": None},
+    {"구분": "매수", "종목코드": "000660", "종목명": "하이닉스", "섹터": "IT",
+     "주가": 200_000, "수량": 1, "예상금액": 200_000},
+])
+store.write("kor_trades", pd.DataFrame(columns=list(store.SCHEMAS["kor_trades"])))
+portfolio.log_trades(LOG_ORDERS, account="main", today=date(2026, 10, 8))
+portfolio.log_trades(LOG_ORDERS, account="main", today=date(2026, 10, 8))
+portfolio.log_trades(LOG_ORDERS.head(1), account="alt", today=date(2026, 10, 8))
+portfolio.log_trades(LOG_ORDERS.tail(1), account="main", today=date(2026, 10, 15))
+tl = portfolio.trade_log()
+check(len(tl) == 4, f"같은 날 같은 주문을 두 번 돌려도 중복이 안 쌓임 ({len(tl)}행)")
+check(set(tl["계좌"]) == {"main", "alt"}, "계좌별로 따로 쌓임")
+check(len(portfolio.trade_log(account="main")) == 3,
+      "계좌로 걸러 읽힘 (main 3행)")
+check(tl["기준일"].nunique() == 2, "주차가 쌓임 (10/08, 10/15)")
+sell = tl[tl["구분"] == "매도"].iloc[0]
+check(pd.isna(sell["수량"]) and "수량미정" in str(sell["메모"]),
+      "전량매도는 수량을 비우고 메모로 남김")
+check(pd.isna(tl["체결가"]).all(),
+      "체결가는 비어 있음 — 계획값으로 추정한다는 표시")
+
+# 자본 기록은 덮어쓰지 않고 쌓여야 합니다 (= 실제 성과 곡선)
+CT = "kor_capital_alt"
+store.write(CT, pd.DataFrame(columns=list(store.SCHEMAS[CT])))
+portfolio.set_capital(10_000_000, table=CT, today=date(2026, 10, 8))
+portfolio.set_capital(10_500_000, table=CT, today=date(2026, 11, 8))
+cap = store.read(CT)
+check(len(cap) == 2, f"총자본 기록이 쌓임 ({len(cap)}행) — 덮어쓰면 성과를 못 냅니다")
+check(portfolio.load_capital(CT)["총자본"] == 10_500_000,
+      "가장 최근 값을 읽음")
+
+# 재동기화는 종목별 평가금액까지 남겨야 합니다 (수량 복원·종목별 손익의 기준점)
+store.write("kor_holdings_log",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_holdings_log"])))
+store.write("kor_portfolio_alt",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_portfolio_alt"])))
+portfolio.seed([{"종목코드": "005930", "평가금액": 500_000, "종목명": "삼성전자"},
+                {"종목코드": "000660", "평가금액": 300_000, "종목명": "하이닉스"}],
+               tranches=TR, today=date(2026, 10, 8), table="kor_portfolio_alt")
+portfolio.resync([{"종목코드": "005930", "평가금액": 520_000, "종목명": "삼성전자"},
+                  {"종목코드": "000660", "평가금액": 310_000, "종목명": "하이닉스"}],
+                 cash=50_000, tranches=TR, today=date(2026, 11, 8),
+                 table="kor_portfolio_alt", capital_table=CT)
+hl = store.read("kor_holdings_log")
+check(len(hl) == 2 and set(hl["계좌"]) == {"alt"},
+      f"재동기화가 종목별 평가금액을 남김 ({len(hl)}행)")
+check(abs(portfolio.load_capital(CT)["총자본"] - 880_000) < 1,
+      f"재동기화 총자본 = 평가액+현금 ({portfolio.load_capital(CT)['총자본']:,.0f})")
+# 같은 날짜 기록은 덮어쓰고(중복 방지), 다른 날짜는 쌓습니다
+check(len(store.read(CT)) == 2,
+      f"같은 날 다시 맞추면 그 날 기록만 갱신 ({len(store.read(CT))}행: 10/08, 11/08)")
+portfolio.resync([{"종목코드": "005930", "평가금액": 530_000, "종목명": "삼성전자"}],
+                 cash=0, tranches=TR, today=date(2026, 12, 8),
+                 table="kor_portfolio_alt", capital_table=CT)
+check(len(store.read(CT)) == 3,
+      f"다른 날 재동기화는 기록이 쌓임 ({len(store.read(CT))}행)")
+hist = store.read(CT).sort_values("기준일")["총자본"].tolist()
+check(hist == sorted(set(hist), key=hist.index) and len(hist) == 3,
+      f"총자본 추이를 뽑을 수 있음 {[f'{v:,.0f}' for v in hist]}")
+
+# ── 체결내역 반영 (실제 수익률의 근거) ────────────────────────
+print("\n[체결내역]")
+store.write("kor_trades", pd.DataFrame(columns=list(store.SCHEMAS["kor_trades"])))
+FILL_ORDERS = pd.DataFrame([
+    {"구분": "매수", "종목코드": "003010", "종목명": "혜인", "섹터": "산업재",
+     "주가": 8860, "수량": 36, "예상금액": 318_960},
+    {"구분": "매수", "종목코드": "264450", "종목명": "유비쿼스", "섹터": "IT",
+     "주가": 11720, "수량": 27, "예상금액": 316_440},
+    {"구분": "매도", "종목코드": "009970", "종목명": "영원무역홀딩스", "섹터": "소비재",
+     "주가": None, "수량": "전량", "예상금액": None},
+])
+portfolio.log_trades(FILL_ORDERS, account="main", today=date(2026, 10, 8))
+
+# 증권사마다 모양이 달라도 읽혀야 합니다
+FORMS = {
+    "탭+헤더(코드)": "종목코드\t매매구분\t체결수량\t체결단가\n"
+                 "003010\t매수\t36\t8,900\n009970\t매도\t12\t62,300",
+    "쉼표+헤더(이름만)": "종목명,구분,수량,단가\n혜인,매수,36,8900원",
+    "헤더 없음": "003010\t매수\t36\t8900",
+    "구분 칸 없음": "종목명\t수량\t단가\n혜인\t36\t8900",
+}
+for label, txt in FORMS.items():
+    got = portfolio.parse_fills(txt)
+    ok = len(got) >= 1 and (got["체결가"] > 0).all() and (got["체결수량"] > 0).all()
+    check(ok, f"{label} 형식을 읽음 ({len(got)}건)")
+
+r_f = portfolio.record_fills(FORMS["탭+헤더(코드)"], account="main",
+                             today=date(2026, 10, 9))
+check(r_f["체결반영"] == 2, f"체결 2건 반영 ({r_f['체결반영']})")
+check(r_f["미체결"] == 1 and r_f["미체결종목"] == ["264450"],
+      f"못 산 종목은 미체결로 남음 ({r_f['미체결종목']})")
+tl = portfolio.trade_log(account="main")
+filled = tl[tl["체결가"].notna()]
+check(len(filled) == 2, f"원장에 체결가가 들어감 ({len(filled)}건)")
+buy = filled[filled["종목코드"] == "003010"].iloc[0]
+check(buy["체결가"] == 8900 and buy["주가"] == 8860,
+      f"계획가({buy['주가']:,.0f})와 체결가({buy['체결가']:,.0f})를 모두 보관")
+sell = filled[filled["구분"] == "매도"].iloc[0]
+check(sell["체결수량"] == 12,
+      f"전량매도도 실제 수량이 들어감 ({sell['체결수량']:.0f}주)")
+
+# 주문서에 없던 종목을 직접 샀어도 성과에 들어가야 합니다
+r_x = portfolio.record_fills("종목코드\t구분\t체결수량\t체결가\n005930\t매수\t3\t80000",
+                             account="main", today=date(2026, 10, 9))
+check(r_x["원장밖"] == 1, f"원장에 없던 체결을 새로 적음 ({r_x['원장밖']}건)")
+ext = portfolio.trade_log(account="main")
+ext = ext[ext["종목코드"] == "005930"]
+check(len(ext) == 1 and "원장밖" in str(ext.iloc[0]["메모"]),
+      "원장밖 체결에 표시가 남음")
+
+# 같은 종목을 여러 번 체결하면 수량가중 평균단가로 합쳐야 합니다
+avg = portfolio.parse_fills("종목코드\t구분\t체결수량\t체결가\n"
+                            "003010\t매수\t20\t9000\n003010\t매수\t20\t8800")
+check(len(avg) == 1 and abs(float(avg.iloc[0]["체결가"]) - 8900) < 1,
+      f"분할 체결을 평균단가로 합침 ({float(avg.iloc[0]['체결가']):,.0f}원)")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:
