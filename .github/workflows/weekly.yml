@@ -1,9 +1,22 @@
-name: 주간 분할 리밸런싱 (한국)
+name: 주간 주문서 (한국)
+
+# 주문서만 만듭니다. 내 데이터(체결·보유·자금)를 바꾸는 입력은 없습니다 —
+# 그건 '데이터 관리' 워크플로(manage.yml)가 합니다.
+#
+# 운용 순서
+#   목요일 저녁  이 워크플로가 주문서를 만듭니다 (목요일 종가 기준)
+#   금요일 낮    주문서대로 체결
+#   금요일 저녁  manage.yml에 체결내역·보유목록·현금을 넣어 데이터 갱신
+#
+# 왜 목요일인가: GitHub가 예약 실행을 6~9시간씩 미뤄서(실측) 지정 시각에
+# 돌지 않습니다. 목요일 장 마감 뒤로 걸어 두면 늦어도 금요일 새벽에는 끝나
+# 금요일 낮에 거래할 수 있습니다. 백테스트는 주 1회(W-FRI) 리밸런싱이고,
+# 목요일 종가로 뽑아 금요일에 체결하는 것이 그 간격을 가장 가깝게 지킵니다.
 
 on:
   schedule:
-    # 07:30 UTC = 16:30 KST, 금요일 (주간 리밸런싱)
-    - cron: "30 7 * * 5"
+    # 06:40 UTC = 15:40 KST, 목요일 (장 마감 15:30 직후)
+    - cron: "40 6 * * 4"
   workflow_dispatch:
     inputs:
       ticker_limit:
@@ -14,54 +27,18 @@ on:
         description: "주가 수집 동시 요청 수 (차단되면 낮추세요)"
         required: false
         default: "6"
-      seed_csv:
-        description: "처음 한 번만 — 보유 종목 CSV를 그대로 붙여넣으세요 (종목코드,평가금액,종목명)"
-        required: false
-        default: ""
-      resync_csv:
-        description: "월 1회 — 지금 보유 목록을 붙여넣으면 평가액·기준금액·총자본을 다시 맞춥니다"
-        required: false
-        default: ""
-      cash:
-        description: "투입 대기 현금(원). 수익 재투자분·추가 입금. 4주에 나눠 들어갑니다"
-        required: false
-        default: "0"
-      backfill_log:
-        description: "원장 백필 (1=실행). 원장이 생기기 전 주문을 주문서 json에서 되살립니다. 한 번만"
-        required: false
-        default: "0"
-        type: choice
-        options: ["0", "1"]
-      fills_csv:
-        description: "체결내역 붙여넣기 — 거래 후. 종목코드/종목명 · 매매구분 · 체결수량 · 체결단가"
-        required: false
-        default: ""
-      fills_asof:
-        description: "체결내역을 적용할 주문 날짜 (YYYY-MM-DD). 비우면 가장 최근 주문서"
-        required: false
-        default: ""
-      reset_state:
-        description: "보유 상태 초기화 (1=초기화). 주문서를 뽑았지만 아직 체결하지 않은 계좌만!"
-        required: false
-        default: "0"
-        type: choice
-        options: ["0", "1"]
-      capital_krw:
-        description: "현금으로 처음 시작할 때만 — 운용금액(원). 예: 10000000. 비우면 건너뜁니다"
-        required: false
-        default: ""
       tranches:
         description: "등분 수 (주간 4등분이면 4)"
         required: false
         default: "4"
       profile:
-        description: "계좌 — main(상수) / alt(배우자). seed·resync는 이 계좌에만 적용됩니다"
+        description: "계좌 — main(상수) / alt(배우자). run_both=0일 때만 의미 있습니다"
         required: false
         default: "main"
         type: choice
         options: ["main", "alt"]
       run_both:
-        description: "자동 실행 때 두 계좌 주문서를 모두 만들지 (1=둘 다, 0=profile만)"
+        description: "두 계좌 주문서를 모두 만들지 (1=둘 다, 0=profile만)"
         required: false
         default: "1"
         type: choice
@@ -92,9 +69,9 @@ jobs:
       QUANT_TG_CHAT_ID: ${{ secrets.QUANT_TG_CHAT_ID }}
       QUANT_TICKER_LIMIT: ${{ github.event.inputs.ticker_limit || '0' }}
       QUANT_PRICE_WORKERS: ${{ github.event.inputs.price_workers || '6' }}
-      # 총 운용금액 — 주문서에 '몇 주 살지'를 적는 데 씁니다.
+      # 총 운용금액 — 주문서에 '몇 주 살지'를 적는 데 씁니다. resync 기록이
+      # 있으면 그 값을 쓰고, 없을 때의 폴백입니다.
       # 설정 > Secrets and variables > Actions > Variables 에 숫자만 넣으세요.
-      # 비워 두면 수량 칸이 빈 주문서가 나옵니다.
       QUANT_CAPITAL_KRW: ${{ vars.QUANT_CAPITAL_KRW || '0' }}
       TZ: Asia/Seoul
 
@@ -119,64 +96,18 @@ jobs:
       - name: 오프라인 점검 (커밋 누락 잡기)
         run: python tools/test_portfolio.py
 
-      - name: 보유 종목 등분 배분 (seed — 처음 한 번만)
-        if: ${{ github.event.inputs.seed_csv != '' }}
-        env:
-          # 입력을 셸에 직접 끼워 넣지 않습니다 — 따옴표나 특수문자가
-          # 들어오면 명령이 깨지고, 그보다 더 나쁜 일도 생길 수 있습니다.
-          SEED_CSV: ${{ github.event.inputs.seed_csv }}
+      - name: 보유 상태 확인 (빈 상태로 주문서를 내지 않도록)
         run: |
-          printf '%s\n' "$SEED_CSV" > holdings.csv
-          echo "--- 붙여넣은 보유 종목 ---"
-          cat holdings.csv
-          python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
-            seed holdings.csv "${{ github.event.inputs.tranches || '4' }}"
-
-      - name: 보유·자금 재동기화 (월 1회)
-        if: ${{ github.event.inputs.resync_csv != '' }}
-        env:
-          RESYNC_CSV: ${{ github.event.inputs.resync_csv }}
-          CASH: ${{ github.event.inputs.cash || '0' }}
-        run: |
-          printf '%s\n' "$RESYNC_CSV" > resync.csv
-          echo "--- 붙여넣은 보유 목록 ---"
-          cat resync.csv
-          python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
-            resync resync.csv "$CASH" "${{ github.event.inputs.tranches || '4' }}"
-
-      - name: 원장 백필 (한 번만 · 체결내역보다 먼저)
-        if: ${{ github.event.inputs.backfill_log == '1' }}
-        run: |
-          P="${{ github.event.inputs.profile || 'main' }}"
-          if [ "$P" = "alt" ]; then J=weekly_kr_alt_latest.json; else J=weekly_kr_latest.json; fi
-          gh release download data-store -p "$J" --clobber
-          python run_weekly.py -p "$P" log "$J"
-
-      - name: 체결내역 반영 (거래 후 · 새 주문서보다 먼저)
-        if: ${{ github.event.inputs.fills_csv != '' }}
-        env:
-          FILLS_CSV: ${{ github.event.inputs.fills_csv }}
-          FILLS_ASOF: ${{ github.event.inputs.fills_asof }}
-        run: |
-          printf '%s\n' "$FILLS_CSV" > fills.csv
-          echo "--- 붙여넣은 체결내역 ---"
-          cat fills.csv
-          python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
-            fills fills.csv "${FILLS_ASOF:--}"
-
-      - name: 보유 상태 초기화 (체결 전에만)
-        if: ${{ github.event.inputs.reset_state == '1' }}
-        run: |
-          python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
-            reset
-
-      - name: 운용금액 설정 (현금으로 시작할 때 한 번)
-        if: ${{ github.event.inputs.capital_krw != '' }}
-        env:
-          CAP: ${{ github.event.inputs.capital_krw }}
-        run: |
-          python run_weekly.py -p "${{ github.event.inputs.profile || 'main' }}" \
-            capital "$CAP"
+          # 상태 파일을 못 받으면 '첫 실행'으로 오인해 이미 보유한 종목을
+          # 처음부터 다시 100종목 사라는 주문서가 나옵니다. 운용을 시작한
+          # 뒤에는 그게 사고이므로, 받아온 파일을 세어 보고 알려 둡니다.
+          for f in kor_portfolio.parquet kor_portfolio_alt.parquet; do
+            if [ -f "data/$f" ]; then
+              echo "  $f 있음 ($(stat -c%s "data/$f") bytes)"
+            else
+              echo "::warning::data/$f 가 없습니다 — 그 계좌 주문서는 '첫 실행'으로 나옵니다. 이미 체결한 계좌라면 그대로 거래하지 마시고 먼저 확인하세요."
+            fi
+          done
 
       - name: 최신 주가 받기 (일간 실행과의 순서에 의존하지 않도록)
         continue-on-error: true
@@ -220,7 +151,6 @@ jobs:
 
           # data/ 는 한국·미국이 공유하므로 자기 시장 파일만.
           # output/ 는 이 실행이 만든 결과만 들어 있으므로 통째로 올린다.
-          # (파일명 패턴에 의존하면 이름을 바꿀 때마다 조용히 누락된다)
           files=(data/kor_*.parquet output/*)
 
           echo "--- 올릴 파일 ${#files[@]}개 ---"
