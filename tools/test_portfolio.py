@@ -922,6 +922,45 @@ plan = pd.to_numeric(rg["orders"]["예상금액"], errors="coerce").sum()
 check(plan < 3_000_000,
       f"이번 주 주문 총액이 한 등분 몫 ({plan:,.0f}원)")
 
+# ── 매주 resync — 분할 진입 계획을 지우지 않아야 합니다 ────────
+print("\n[매주 재동기화]")
+ST6 = "kor_portfolio_weekly_resync"
+CT6 = "kor_capital_alt"
+store.write(CT6, pd.DataFrame(columns=list(store.SCHEMAS[CT6])))
+staged = pd.DataFrame([{"종목코드": f"{i:06d}", "등분": i % TR,
+                        "편입일": pd.Timestamp("2026-10-07"),
+                        "기준금액": (90_000.0 if i % TR == 3 else 0.0),
+                        "종목명": f"n{i}", "섹터": "S1"}
+                       for i in range(1, N + 1)])
+store.write(ST6, staged)
+held = [{"종목코드": f"{i:06d}", "평가금액": 95_000, "종목명": f"n{i}"}
+        for i in range(1, N + 1) if i % TR == 3]
+rr6 = portfolio.resync(held, cash=7_730_000, tranches=TR,
+                       today=date(2026, 10, 16), table=ST6, capital_table=CT6)
+st6 = portfolio.load_state(ST6)
+check(len(st6) == N, f"상태 100행 그대로 ({len(st6)}행)")
+check(rr6["미매수유지"] == 75,
+      f"미매수 75종목을 '팔린 것'으로 지우지 않음 ({rr6['미매수유지']})")
+check(rr6["보유종목수"] == 25, f"실제 보유만 25종목으로 셈 ({rr6['보유종목수']})")
+check(not rr6["사라진종목"], f"사라진 종목 없음 ({len(rr6['사라진종목'])})")
+check(abs(rr6["총자본"] - 10_105_000) < 1,
+      f"총자본 = 실제 평가액 + 현금 ({rr6['총자본']:,.0f})")
+check(abs(rr6["종목당배정액"] - 101_050) < 1,
+      f"수익만큼 배정액이 따라 커짐 ({rr6['종목당배정액']:,.0f}원)")
+# 매주 맞춰도 현금 이중지출 가드가 살아 있어야 합니다
+rg6 = portfolio.rebalance(wide, n=N, tranches=TR, today=date(2026, 10, 16),
+                          capital=rr6["총자본"], cash=rr6["현금"], table=ST6,
+                          slot_offset=2, weighting="score")
+check(rg6["미매수예약금액"] > 7_000_000,
+      f"resync 뒤에도 미매수 몫을 예약 ({rg6['미매수예약금액']:,}원)")
+spend6 = pd.to_numeric(rg6["orders"]["예상금액"], errors="coerce").sum()
+check(spend6 < 3_000_000,
+      f"주문 총액이 한 등분 몫으로 유지 ({spend6:,.0f}원)")
+# 매주 맞추면 성과 곡선이 주간 해상도가 됩니다
+portfolio.resync(held, cash=7_730_000, tranches=TR, today=date(2026, 10, 23),
+                 table=ST6, capital_table=CT6)
+check(len(store.read(CT6)) == 2, f"주마다 총자본이 한 점씩 쌓임 ({len(store.read(CT6))}점)")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

@@ -1042,12 +1042,18 @@ def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
 def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
            today: date | None = None, table: str = STATE,
            capital_table: str = CAPITAL) -> dict:
-    """월 1회 — 실제 보유 평가액으로 기준금액과 운용자금을 다시 맞춥니다.
+    """실제 보유 평가액으로 기준금액과 운용자금을 다시 맞춥니다 — 매주.
 
     왜 필요한가: 기준금액은 '마지막으로 손봤을 때 맞춰 둔 값'입니다. 주가가
     오르내리고 수익이 쌓이면 실제와 벌어지고, 그 벌어진 값으로 비중 조절
     수량을 계산하면 틀린 수량이 나옵니다. 총자본도 같습니다 — 자산이 늘면
     종목당 배정액도 커져야 하는데 고정값이면 안 따라갑니다.
+
+    왜 매주인가: 백테스트는 손보는 등분을 **그 시점의 실제 가치**로 목표
+    비중에 맞춥니다(±20% 밴드). 실전에서 기준금액이 3주 묵으면 30% 오른
+    종목이 '목표에 맞다'고 판정돼 덜어내지 않습니다 — 검증한 것과 다른
+    전략이 됩니다. 매주 맞추는 쪽이 백테스트에 더 가깝습니다. 부수 효과로
+    총자본이 주 단위로 쌓여 성과 곡선도 주간 해상도가 됩니다.
 
     등분 배정은 그대로 둡니다. 섞으면 그 주에 포트폴리오 전체가 움직입니다.
     """
@@ -1064,7 +1070,15 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     names = dict(zip(got["종목코드"], got["종목명"]))
 
     st = state.copy()
+    # 미매수(기준금액 0 — 분할 진입에서 '배정만 했고 아직 안 산' 종목)는
+    # 보유 목록에 없는 게 당연합니다. 팔린 것으로 보고 지우면 분할 진입
+    # 계획이 사라지고, 남은 현금을 또 쓰려는 것을 막는 가드도 같이 풀립니다.
+    was_pending = set(
+        state.loc[pd.to_numeric(state["기준금액"], errors="coerce") == 0,
+                  "종목코드"])
     st["기준금액"] = st["종목코드"].map(have).astype(float)
+    keep_pending = st["종목코드"].isin(was_pending) & st["기준금액"].isna()
+    st.loc[keep_pending, "기준금액"] = 0.0
 
     # 목록에 없는 보유 = 이미 팔린 종목. 상태에서 뺍니다.
     gone = st[st["기준금액"].isna()]["종목코드"].tolist()
@@ -1109,7 +1123,9 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     by = st.groupby("등분")["기준금액"].sum()
     log.info("재동기화 — 보유 %d종목 평가액 %.0f · 현금 %.0f · 총자본 %.0f",
              len(st), 평가액, 현금, 총자본)
-    return {"보유종목수": len(st), "평가액": 평가액, "현금": 현금,
+    _pend = int((pd.to_numeric(st["기준금액"], errors="coerce") == 0).sum())
+    return {"보유종목수": int(len(st) - _pend), "미매수유지": _pend,
+            "평가액": 평가액, "현금": 현금,
             "총자본": 총자본, "종목당배정액": 총자본 / 100,
             "사라진종목": gone, "새로들어온종목": extra,
             "등분별금액": {int(k): round(v) for k, v in by.items()}}

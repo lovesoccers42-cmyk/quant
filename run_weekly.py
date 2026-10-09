@@ -4,7 +4,7 @@
     python run_weekly.py                    # 이번 주 주문서
     python run_weekly.py 4                  # 등분 수를 직접 지정
     python run_weekly.py seed 보유종목.csv   # 처음 한 번 — 보유 종목을 등분에 배분
-    python run_weekly.py resync 보유종목.csv 350000   # 월 1회 — 평가액·현금 갱신
+    python run_weekly.py resync 보유종목.csv 350000   # 매주 — 평가액·현금 갱신
     python run_weekly.py capital 10000000 -p alt    # 현금으로 시작할 때 한 번
     python run_weekly.py reset -p alt               # 체결 전 상태 되돌리기
     python run_weekly.py fills 체결내역.csv           # 거래 후 — 실제 체결가 기록
@@ -267,7 +267,7 @@ def seed_main(src: str, tranches: int = 4, prof: dict | None = None) -> int:
 
 def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
                 prof: dict | None = None) -> int:
-    """월 1회 — 실제 보유 평가액으로 기준금액과 총자본을 다시 맞춥니다."""
+    """매주 — 실제 보유 평가액으로 기준금액과 총자본을 다시 맞춥니다."""
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     prof = prof or config.profile()
     r = portfolio.resync(src, cash=cash, tranches=tranches,
@@ -289,6 +289,9 @@ def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
         print(f"  상태에 없던 보유 {len(r['새로들어온종목'])}개를 등분에 넣었습니다: "
               f"{', '.join(r['새로들어온종목'][:10])}"
               f"{' …' if len(r['새로들어온종목']) > 10 else ''}")
+    if r.get("미매수유지"):
+        print(f"  분할 진입 중 미매수 {r['미매수유지']}종목은 그대로 둡니다 "
+              f"(팔린 것이 아니니까요)")
     print(f"\n  등분별 금액: {r['등분별금액']}")
     print("\n  이제 평소대로 `python run_weekly.py`를 돌리세요.")
     return 0
