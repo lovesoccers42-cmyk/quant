@@ -874,6 +874,54 @@ avg = portfolio.parse_fills("종목코드\t구분\t체결수량\t체결가\n"
 check(len(avg) == 1 and abs(float(avg.iloc[0]["체결가"]) - 8900) < 1,
       f"분할 체결을 평균단가로 합침 ({float(avg.iloc[0]['체결가']):,.0f}원)")
 
+# ── 원장 백필 · 현금 이중지출 방지 ────────────────────────────
+print("\n[백필 · 현금]")
+store.write("kor_trades", pd.DataFrame(columns=list(store.SCHEMAS["kor_trades"])))
+BF = {"프로필": "alt", "기준일": "2026-10-07", "orders": [
+    {"구분": "매수", "종목코드": "008060", "종목명": "대덕", "섹터": "IT",
+     "주가": 16400, "수량": 6, "예상금액": 98_400},
+    {"구분": "매수", "종목코드": "001060", "종목명": "JW중외제약",
+     "섹터": "건강관리", "주가": 27300, "수량": 3, "예상금액": 81_900}]}
+rb = portfolio.log_trades_from_json(BF, account="alt")
+check(rb["기록"] == 2 and rb["기준일"] == "2026-10-07",
+      f"주문서 json에서 원장을 되살림 ({rb['기록']}건, {rb['기준일']})")
+rf = portfolio.record_fills(
+    "종목코드\t구분\t체결수량\t체결가\n008060\t매수\t6\t16500",
+    account="alt", today=date(2026, 10, 8), asof=date(2026, 10, 7))
+check(rf["체결반영"] == 1, "백필한 주문에 체결가가 붙음")
+# 원장이 없던 날짜도 체결내역만으로 기록할 수 있어야 합니다
+ro = portfolio.record_fills(
+    "종목코드\t구분\t체결수량\t체결가\n005930\t매수\t2\t81000",
+    account="alt", today=date(2026, 10, 9), asof=date(2026, 9, 30))
+check(ro["원장밖"] == 1,
+      "원장이 없던 날짜도 체결내역만으로 기록됨 (계획가 없이)")
+
+# 분할 진입 중 남은 현금을 등록해도 같은 돈을 두 번 쓰지 않아야 합니다
+ST5 = "kor_portfolio_cashguard_test"
+half = pd.DataFrame([{"종목코드": f"{i:06d}", "등분": i % TR,
+                      "편입일": pd.Timestamp("2026-10-07"),
+                      "기준금액": (100_000.0 if i % TR == 3 else 0.0),
+                      "종목명": "", "섹터": ""} for i in range(1, N + 1)])
+store.write(ST5, half)
+wide = pd.DataFrame({"종목코드": [f"{i:06d}" for i in range(1, 201)],
+                     "종목명": [f"n{i}" for i in range(1, 201)],
+                     "SEC_NM_KOR": ["S1"] * 200,
+                     "qvm": [-2 + i * 0.01 for i in range(200)],
+                     "종가": [20_000.0] * 200,
+                     "전체순위": list(range(1, 201)),
+                     "전체종목수": [600] * 200})
+rg = portfolio.rebalance(wide, n=N, tranches=TR, today=date(2026, 10, 12),
+                         capital=10_000_000, cash=7_730_000, table=ST5,
+                         slot_offset=2, weighting="score")
+check(rg["미매수예약금액"] == 7_500_000,
+      f"미매수 75종목 몫을 현금에서 예약 ({rg['미매수예약금액']:,}원)")
+check(rg["이번주현금예산"] < 100_000,
+      f"남은 현금을 또 쓰려 하지 않음 (예산 {rg['이번주현금예산']:,}원)")
+check(rg["매수"] == 25, f"이번 등분 25종목만 매수 ({rg['매수']})")
+plan = pd.to_numeric(rg["orders"]["예상금액"], errors="coerce").sum()
+check(plan < 3_000_000,
+      f"이번 주 주문 총액이 한 등분 몫 ({plan:,.0f}원)")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

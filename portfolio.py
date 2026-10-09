@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import re
 from datetime import date
@@ -446,6 +447,13 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         return amounts.get(c, avg_unit)
 
     ranked, too_pricey = _affordable(ranked_all, price_map, amount_of)
+    # '가격 때문에 빠진 종목'은 **상위 n위 안에서** 세야 의미가 있습니다.
+    # 모델 파일을 200종목으로 늘린 뒤로는 101~200위의 꼬리 종목까지 세어
+    # 33종목처럼 부풀려 나왔습니다 — 꼬리 종목의 목표액은 꼴찌 배정액이라
+    # 조금만 비싸도 걸립니다. 실제로 포트폴리오에 영향을 주는 건 상위 n위
+    # 안에서 빠진 것뿐입니다(그 자리를 다음 순위로 메우니까요).
+    _over = set(too_pricey)
+    too_pricey_top = [c for c in ranked_all[:n] if c in _over]
     target = ranked[:max(n * 2, n + sum(sizes))]
     unit = avg_unit          # 요약 표시용 평균 배정액
 
@@ -547,7 +555,15 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         # 아무것도 안 사고 현금만 늘어납니다. 그래서 현금이 있을 때는 밴드를
         # 건너뛰고, 목표에 가장 모자란 종목부터 채웁니다.
         cash_orders: list[dict] = []
-        budget = max(0.0, float(cash)) / max(1, tranches)
+        # 분할 진입 중이면 미매수 종목이 '그 현금으로 살 계획'입니다. 그 돈을
+        # 현금 예산으로 또 잡으면 같은 돈을 두 번 쓰려고 합니다(예: 남은 현금
+        # 773만을 등록하면 이번 주에 미매수 25종목 250만 + 현금투입 193만 =
+        # 443만 주문이 나갑니다). 그래서 계획분을 먼저 빼둡니다.
+        pending_all = int((pd.to_numeric(state["기준금액"], errors="coerce")
+                           == 0).sum())
+        reserved = pending_all * unit if unit > 0 else 0.0
+        free_cash = max(0.0, float(cash) - reserved)
+        budget = free_cash / max(1, tranches)
         if budget > 0 and unit > 0 and price_map:
             gaps = []
             for c in keeps:
@@ -702,13 +718,15 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         "비중조절": len(trims),
         "현금투입": len(cash_orders),
         "현금투입금액": round(sum(t["수량"] * t["주가"] for t in cash_orders)),
-        "이번주현금예산": round(max(0.0, float(cash)) / max(1, tranches)),
+        "이번주현금예산": round(locals().get("budget", 0.0)),
+        "미매수예약금액": round(locals().get("reserved", 0.0)),
         "비중방식": weighting,
         "평균배정액": round(unit) if unit > 0 else None,
         "종목당배정액": round(unit) if unit > 0 else None,   # 하위호환
         "배정액범위": ((round(min(amounts.values())), round(max(amounts.values())))
                   if amounts else None),
-        "가격초과제외": len(too_pricey),
+        "가격초과제외": len(too_pricey_top),
+        "가격초과제외_명단전체": len(too_pricey),
         # 전량매도 종목의 금액은 보유 수량을 몰라 셀 수 없습니다.
         # 그래서 '비중축소로 확보되는 금액'만 셉니다 — 하한입니다.
         "확보금액_하한": round(매도대금),
@@ -885,8 +903,10 @@ def record_fills(src, *, account: str, today: date | None = None,
     asof_ts = (pd.Timestamp(asof) if asof is not None
                else mine["기준일"].max())
     week = mine[mine["기준일"] == asof_ts].copy()
-    if week.empty:
+    if week.empty and asof is None:
         raise ValueError(f"{asof_ts:%Y-%m-%d} 날짜의 주문이 없습니다.")
+    # asof를 명시했는데 그 날 주문이 없으면(원장이 생기기 전 거래) 체결내역
+    # 자체를 기록으로 남깁니다. 계획가는 없지만 실제 체결은 성과에 들어갑니다.
 
     by_code = {str(c).zfill(6): i for i, c in week["종목코드"].items()}
     by_name = {}
@@ -930,6 +950,27 @@ def record_fills(src, *, account: str, today: date | None = None,
     return {"체결반영": len(matched), "원장밖": len(rows),
             "미체결": int(len(left)), "기준일": f"{asof_ts:%Y-%m-%d}",
             "미체결종목": [str(c).zfill(6) for c in week.loc[left, "종목코드"]]}
+
+
+def log_trades_from_json(src, *, account: str, table: str = TRADES) -> dict:
+    """주문서 json(weekly_kr*_latest.json)에서 원장을 되살립니다.
+
+    원장은 나중에 만들어졌으므로, 그 전에 낸 주문은 원장에 없습니다. 주문서
+    json에는 기준일과 주문 목록이 그대로 남아 있어 되살릴 수 있습니다.
+    """
+    if isinstance(src, dict):
+        d = src
+    else:
+        text = str(src)
+        pp = Path(text)
+        d = json.loads(pp.read_text(encoding="utf-8") if pp.exists() else text)
+    orders = pd.DataFrame(d.get("orders") or [])
+    if orders.empty:
+        return {"기록": 0, "기준일": d.get("기준일"), "계좌": account}
+    asof = pd.Timestamp(d.get("기준일")).date()
+    n = log_trades(orders, account=account, today=asof, table=table)
+    return {"기록": n, "기준일": f"{asof:%Y-%m-%d}", "계좌": account,
+            "프로필확인": d.get("프로필")}
 
 
 def trade_log(table: str = TRADES, account: str | None = None) -> pd.DataFrame:

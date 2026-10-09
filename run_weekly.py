@@ -294,6 +294,21 @@ def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
     return 0
 
 
+def log_main(src: str, prof: dict | None = None) -> int:
+    """주문서 json에서 원장을 되살립니다 (원장이 생기기 전 주문 백필)."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    prof = prof or config.profile()
+    r = portfolio.log_trades_from_json(src, account=prof["key"])
+    print("\n" + "=" * 60)
+    print(f"  원장 백필 — {prof['라벨']} 계좌")
+    print("=" * 60)
+    print(f"  {r['기준일']} 주문 {r['기록']}건을 원장에 넣었습니다.")
+    if r.get("프로필확인") and r["프로필확인"] != prof["key"]:
+        print(f"  [확인] json의 프로필은 '{r['프로필확인']}'인데 "
+              f"'{prof['key']}' 계좌로 넣었습니다 — 계좌를 확인하세요.")
+    return 0
+
+
 def fills_main(src: str, asof: str | None = None,
                prof: dict | None = None) -> int:
     """증권사 체결내역을 원장에 채웁니다 (거래 체결 후 아무 때나)."""
@@ -378,6 +393,12 @@ if __name__ == "__main__":
         _cash = float(rest[0]) if rest else 0.0
         _tr = int(rest[1]) if len(rest) > 1 else 4
         sys.exit(resync_main(src, _cash, _tr, _prof))
+    if len(sys.argv) > 1 and sys.argv[1] == "log":
+        if len(sys.argv) < 3:
+            print("사용법: python run_weekly.py log weekly_kr_alt_latest.json "
+                  "[-p alt]")
+            sys.exit(2)
+        sys.exit(log_main(sys.argv[2], _prof))
     if len(sys.argv) > 1 and sys.argv[1] == "fills":
         if len(sys.argv) > 2 and sys.argv[2] != "-":
             src, rest = sys.argv[2], sys.argv[3:]
