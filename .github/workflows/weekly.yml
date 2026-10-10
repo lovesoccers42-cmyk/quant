@@ -154,7 +154,9 @@ jobs:
           PY
 
       - name: 오프라인 점검 (커밋 누락 잡기)
-        run: python tools/test_portfolio.py
+        run: |
+          python tools/test_portfolio.py
+          python tools/test_perf.py
 
       - name: 최신 주가 받기 (일간 실행과의 순서에 의존하지 않도록)
         continue-on-error: true

@@ -89,6 +89,11 @@ GH_TOKEN = cfg("GH_TOKEN")
 GH_REPO = cfg("GH_REPO")
 APP_PASSWORD = cfg("APP_PASSWORD")
 
+# 금액이 있는 파일(보유 상태·원장·자금)은 비공개 레포에 있습니다. 성과 탭만
+# 이걸 씁니다 — 설정이 없으면 성과 탭에서 안내하고 나머지는 그대로 돕니다.
+STATE_REPO = cfg("STATE_REPO")
+STATE_TOKEN = cfg("STATE_TOKEN") or GH_TOKEN
+
 
 def headers() -> dict:
     h = {"Accept": "application/vnd.github+json",
@@ -253,6 +258,42 @@ def badge(status: str) -> str:
     return f'<span class="pill {cls}">{status}</span>'
 
 
+# ── 비공개 레포의 상태·원장 (성과 탭에서만) ──────────────────
+@st.cache_data(ttl=120, show_spinner=False)
+def state_parquet(name: str) -> pd.DataFrame:
+    """비공개 레포 state/<name> 를 읽습니다. 없으면 빈 표.
+
+    왜 릴리스가 아니라 레포인가: 평가액·체결가가 들어 있어 공개 릴리스에
+    올리지 않기로 했습니다. 읽기에는 contents API가 필요하고, 토큰에
+    그 레포 읽기 권한이 있어야 합니다.
+    """
+    if not (STATE_REPO and STATE_TOKEN):
+        return pd.DataFrame()
+    url = f"{API}/repos/{STATE_REPO}/contents/state/{name}"
+    try:
+        r = rq.get(url, timeout=120, headers={
+            "Accept": "application/vnd.github.raw",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Authorization": f"Bearer {STATE_TOKEN}"})
+        if r.status_code != 200:
+            return pd.DataFrame()
+        return pd.read_parquet(io.BytesIO(r.content))
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner="주가를 받고 있습니다…")
+def big_parquet(asset: str) -> pd.DataFrame:
+    """주가처럼 큰 공개 자산 — 캐시를 길게 둡니다(매번 받으면 느립니다)."""
+    blob = download_asset(asset)
+    if not blob:
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(io.BytesIO(blob))
+    except Exception:
+        return pd.DataFrame()
+
+
 # ── 헤더 + 시장 선택 ─────────────────────────────────────────
 st.title("📈 퀀트 에이전트")
 
@@ -280,8 +321,8 @@ else:
             "아래 **실행** 탭에서 월간 실행을 먼저 한 번 돌려주세요.")
 
 top_label = "🔔 매수 신호" if M["has_signals"] else "🔔 상위 종목"
-tab_top, tab_run, tab_model, tab_bt, tab_log = st.tabs(
-    [top_label, "▶️ 실행", "📊 모델", "🧪 백테스트", "📜 기록"])
+tab_top, tab_perf, tab_run, tab_model, tab_bt, tab_log = st.tabs(
+    [top_label, "💰 성과", "▶️ 실행", "📊 모델", "🧪 백테스트", "📜 기록"])
 
 SYM, NAME, SEC = M["symbol"], M["name"], M["sector"]
 
@@ -480,7 +521,7 @@ with tab_model:
                 st.altair_chart(chart, use_container_width=True)
 
 
-# ── 백테스트 ─────────────────────────────────────────────────
+# ── 공용 — 두 탭(성과·백테스트)이 같은 색을 씁니다 ──────────
 def series_colors() -> tuple[str, str]:
     """포트폴리오 / 벤치마크 색. 두 테마 모두 대비·색각 검사를 통과한 값."""
     try:
@@ -490,6 +531,266 @@ def series_colors() -> tuple[str, str]:
     return ("#3987e5", "#d95926") if dark else ("#2a78d6", "#eb6834")
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def bench_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
+    """시총상위200 시총가중 지수 (백테스트와 같은 정의).
+
+    주가 전 종목 피벗이 무거워서 따로 캐시합니다 — 인자를 날짜 문자열로만
+    받는 이유도 그것입니다(DataFrame을 넘기면 캐시가 안 걸립니다).
+    """
+    import perf
+    price = big_parquet("kor_price.parquet")
+    ticker = big_parquet("kor_ticker.parquet")
+    if price.empty or ticker.empty:
+        return pd.DataFrame()
+    start = pd.Timestamp(start_iso)
+    window = price[pd.to_datetime(price["날짜"]) >= start - pd.Timedelta(days=10)]
+    return perf.index_benchmark(perf.price_pivot(window),
+                                perf.shares_outstanding(ticker),
+                                start=start, end=pd.Timestamp(end_iso))
+
+
+# ── 성과 (실제 계좌) ─────────────────────────────────────────
+ACCOUNTS = {"상수 (main)": "main", "배우자 (alt)": "alt"}
+
+
+def _suffix(acct: str) -> str:
+    return "" if acct == "main" else f"_{acct}"
+
+
+with tab_perf:
+    if M["key"] != "kr":
+        st.info("성과 탭은 한국 계좌만 운용 중입니다.")
+    elif not (STATE_REPO and STATE_TOKEN):
+        st.warning("비공개 상태 레포 설정이 없습니다. Streamlit → Settings → "
+                   "Secrets 에 아래 두 줄을 넣어주세요.")
+        st.code('STATE_REPO = "아이디/quant-state"\n'
+                'STATE_TOKEN = "github_pat_..."   # 그 레포 Contents 읽기 권한',
+                language="toml")
+        st.caption("평가액·체결가가 들어 있는 파일이라 공개 릴리스에 올리지 "
+                   "않습니다. 그래서 이 탭만 비공개 레포를 직접 읽습니다.")
+    else:
+        import perf
+
+        acct_label = st.radio("계좌", list(ACCOUNTS.keys()), horizontal=True)
+        acct = ACCOUNTS[acct_label]
+        sfx = _suffix(acct)
+
+        trades = state_parquet("kor_trades.parquet")
+        hlog = state_parquet("kor_holdings_log.parquet")
+        pstate = state_parquet(f"kor_portfolio{sfx}.parquet")
+        cap = state_parquet(f"kor_capital{sfx}.parquet")
+
+        if hlog.empty and trades.empty:
+            st.info("아직 측정할 기록이 없습니다. 금요일 저녁에 체결내역과 "
+                    "보유목록 CSV를 올려 **데이터 관리**를 한 번 돌리면 "
+                    "여기에 쌓입니다.")
+        else:
+            codes = set()
+            if not hlog.empty:
+                codes |= set(hlog["종목코드"].astype(str).str.zfill(6))
+            if not trades.empty:
+                codes |= set(trades["종목코드"].astype(str).str.zfill(6))
+
+            price = big_parquet("kor_price.parquet")
+            if price.empty:
+                # 탭 안에서 st.stop()을 쓰면 앱 전체가 멈춰 다른 탭까지
+                # 빈 화면이 됩니다. 경고만 띄우고 아래는 빈 표로 흘립니다
+                # (perf의 모든 함수가 빈 입력을 처리합니다).
+                st.error("주가 데이터를 받지 못했습니다 — 공개 릴리스의 "
+                         "kor_price.parquet을 확인하세요.")
+            px_my = perf.price_pivot(price, codes)
+            pos = perf.positions_timeline(hlog, acct, px_my)
+            value = perf.daily_value(pos, px_my)
+            flows = perf.net_flows(trades, acct)
+            tw = perf.twr(value, flows)
+
+            # ── 요약 ──────────────────────────────────────────
+            if pos.empty:
+                st.info(f"{acct_label} 계좌의 보유 기록이 아직 없습니다. "
+                        "금요일 저녁에 보유목록 CSV를 올려 **데이터 관리**를 "
+                        "돌리면 그 날짜부터 측정이 시작됩니다.")
+            elif tw.empty or len(tw) < 2:
+                st.info(f"보유 기록이 {len(pos)}점뿐이라 수익률을 계산할 수 "
+                        "없습니다 — 수익률은 두 시점 사이의 변화이니 재동기화가 "
+                        "두 번은 있어야 합니다. 다음 주 갱신부터 곡선이 "
+                        "그려집니다.")
+            else:
+                live = float(tw["누적"].iloc[-1] - 1)
+                days = (tw.index[-1] - tw.index[0]).days
+
+                bench = bench_curve(f"{tw.index[0]:%Y-%m-%d}",
+                                    f"{tw.index[-1]:%Y-%m-%d}")
+                bret = (float(bench["누적"].iloc[-1] - 1)
+                        if not bench.empty else None)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("누적 수익률", f"{live * 100:+.2f}%",
+                          delta=(f"{(live - bret) * 100:+.2f}%p vs 지수"
+                                 if bret is not None else None))
+                c2.metric("지수 (시총상위200)",
+                          f"{bret * 100:+.2f}%" if bret is not None else "-")
+                c3.metric("측정 기간", f"{days}일",
+                          delta=f"{tw.index[0]:%m/%d} 시작", delta_color="off")
+                st.caption(
+                    "입금을 걷어낸 시간가중수익률입니다 — 분할 진입으로 돈을 "
+                    "더 넣어도 그게 수익으로 잡히지 않습니다. 측정은 첫 "
+                    "재동기화 날부터 시작합니다.")
+
+                if days < 30:
+                    st.warning(f"측정 {days}일차입니다. 이 기간의 수익률은 "
+                               "거의 전부 운입니다 — 전략 판단은 아래 "
+                               "**규칙 준수**를 보세요.")
+
+                # ── 곡선 ──────────────────────────────────────
+                if len(tw) >= 2:
+                    import altair as alt
+                    port_c, bench_c = series_colors()
+                    parts = [pd.DataFrame({
+                        "날짜": tw.index, "구분": "내 계좌",
+                        "수익률": (tw["누적"] - 1) * 100})]
+                    if not bench.empty:
+                        parts.append(pd.DataFrame({
+                            "날짜": bench.index, "구분": "지수",
+                            "수익률": (bench["누적"] - 1) * 100}))
+                    long = pd.concat(parts)
+                    ch = (alt.Chart(long)
+                          .mark_line(strokeWidth=2)
+                          .encode(x=alt.X("날짜:T", title=None,
+                                          axis=alt.Axis(grid=False,
+                                                        tickCount=5)),
+                                  y=alt.Y("수익률:Q", title="누적 수익률 (%)"),
+                                  color=alt.Color(
+                                      "구분:N", title=None,
+                                      scale=alt.Scale(
+                                          domain=["내 계좌", "지수"],
+                                          range=[port_c, bench_c])),
+                                  tooltip=["날짜:T", "구분:N",
+                                           alt.Tooltip("수익률:Q", format=".2f")])
+                          .properties(height=240))
+                    st.altair_chart(ch, use_container_width=True)
+
+                # ── 백테스트 대비 괴리 ────────────────────────
+                st.subheader("백테스트 대비")
+                btj = load_run("backtest_kr_latest.json")
+                curve = (btj or {}).get("curve") or {}
+                bt_cum = pd.Series(curve.get("portfolio") or [], dtype="float64")
+                if len(bt_cum) > 5:
+                    gap = perf.backtest_percentile(
+                        live, bt_cum.pct_change().dropna(),
+                        max(1, min(len(bt_cum) - 2,
+                                   len(tw) - 1 if len(tw) > 1 else 1)))
+                else:
+                    gap = {}
+                if not gap:
+                    st.caption("백테스트 수익률 곡선이 아직 없거나 측정 기간이 "
+                               "짧아 비교할 수 없습니다. 백테스트 탭에서 한 번 "
+                               "돌려두면 다음 주부터 비교합니다.")
+                else:
+                    g1, g2, g3 = st.columns(3)
+                    g1.metric("실제", f"{gap['실제수익률'] * 100:+.2f}%")
+                    g2.metric("백테스트 중앙값",
+                              f"{gap['백테스트_중앙값'] * 100:+.2f}%")
+                    g3.metric("분위", f"{gap['분위'] * 100:.0f}%")
+                    st.markdown(
+                        f"판정 {badge('정상' if '정상' in gap['판정'] else '주의')} "
+                        f"{gap['판정']}", unsafe_allow_html=True)
+                    st.caption(
+                        f"백테스트에서 같은 길이({gap['구간일수']}일) 구간 "
+                        f"수익률 {gap['표본수']:,}개와 비교했습니다. "
+                        f"5~95분위 안이면 정상 범위입니다 "
+                        f"({gap['백테스트_5분위'] * 100:+.1f}% ~ "
+                        f"{gap['백테스트_95분위'] * 100:+.1f}%). "
+                        "과거와 현재는 같은 기간이 없으니 분포 안의 위치로 "
+                        "봅니다.")
+
+            # ── 종목별 손익 ───────────────────────────────────
+            st.subheader("종목별 손익")
+            pnl = perf.position_pnl(trades, hlog, px_my, acct)
+            if pnl.empty:
+                st.caption("보유 기록이 없습니다.")
+            else:
+                unknown = int((pnl["원가출처"] == "원가미상").sum())
+                known = pnl[pnl["손익"].notna()]
+                if len(known):
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("원가 아는 종목", f"{len(known)} / {len(pnl)}")
+                    k2.metric("합계 손익", f"{known['손익'].sum():,.0f}원")
+                    win = int((known["손익"] > 0).sum())
+                    k3.metric("이긴 종목", f"{win} / {len(known)}")
+                if unknown:
+                    st.warning(
+                        f"{unknown}종목은 **원가미상**입니다 — 원장이 생기기 "
+                        "전부터 들고 계신 종목이라 매입단가를 모릅니다. "
+                        "손익을 추정해서 채우지 않고 비워 둡니다. "
+                        f"`holdings_{acct}.csv`에 **매입단가** 칸을 하나 "
+                        "추가해 올리시면 전부 계산됩니다.")
+                show = pnl.copy()
+                for c in ("평단", "현재가", "평가금액", "손익"):
+                    show[c] = show[c].map(
+                        lambda v: f"{v:,.0f}" if pd.notna(v) else "–")
+                show["수익률"] = show["수익률"].map(
+                    lambda v: f"{v * 100:+.1f}%" if pd.notna(v) else "–")
+                st.dataframe(show, use_container_width=True, hide_index=True)
+                st.download_button("종목별 손익 CSV", to_csv(pnl),
+                                   file_name=f"pnl_{acct}_{tag}.csv",
+                                   mime="text/csv")
+
+            # ── 규칙 준수 ─────────────────────────────────────
+            st.subheader("규칙 준수")
+            st.caption("수익률보다 이게 먼저입니다. 종목 수가 줄거나 한 섹터로 "
+                       "쏠리면, 수익률이 좋아도 백테스트가 보장한 성질이 "
+                       "사라진 상태입니다.")
+            sector = load_model("kor_sector.parquet")
+            smap = {}
+            if not sector.empty:
+                s = sector
+                if "기준일" in s.columns:
+                    s = s[s["기준일"] == s["기준일"].max()]
+                smap = dict(zip(s["CMP_CD"].astype(str).str.zfill(6),
+                                s["SEC_NM_KOR"].astype(str)))
+            rc = perf.rule_check(pstate, trades, acct, sector_map=smap)
+
+            r1, r2, r3 = st.columns(3)
+            dev = rc.get("종목수편차", 0)
+            r1.metric("보유 종목", f"{rc.get('보유종목수', 0)}",
+                      delta=(f"미매수 {rc['미매수']}" if rc.get("미매수")
+                             else None), delta_color="off")
+            r2.metric("목표 대비", f"{dev:+d}종목",
+                      delta="정상" if abs(dev) <= 3 else "확인",
+                      delta_color="off")
+            top_sec = rc.get("최대섹터비중")
+            r3.metric("최대 섹터 비중",
+                      f"{top_sec * 100:.1f}%" if top_sec else "-",
+                      delta=("정상" if (top_sec or 0) <= 0.30 else "쏠림"),
+                      delta_color="off")
+
+            if rc.get("등분별종목수"):
+                st.caption(f"등분별 종목 수 {rc['등분별종목수']} · "
+                           f"최대 편차 {rc.get('등분최대편차', 0) * 100:.0f}% "
+                           "(한 등분이 비면 그 주에 거래가 거의 없습니다)")
+            if rc.get("섹터비중"):
+                sw = (pd.Series(rc["섹터비중"]).mul(100).round(1)
+                      .rename("비중(%)").to_frame())
+                st.dataframe(sw, use_container_width=True)
+            if not value.empty:
+                to = perf.turnover(trades, value, acct)
+                if len(to):
+                    st.caption("주별 회전율 " + " · ".join(
+                        f"{d:%m/%d} {v * 100:.0f}%" for d, v in to.items()))
+            if rc.get("미체결건수"):
+                st.caption(f"원장 미체결 {rc['미체결건수']}건 — 주문서에 "
+                           "있었지만 체결되지 않은 건입니다(수익률 계산에서 "
+                           "제외됩니다).")
+
+            if not cap.empty:
+                last = cap.sort_values("기준일").iloc[-1]
+                st.caption(
+                    f"마지막 재동기화 {pd.to_datetime(last['기준일']):%Y-%m-%d} · "
+                    f"자본 기록 {len(cap)}점")
+
+
+# ── 백테스트 ─────────────────────────────────────────────────
 with tab_bt:
     bt = load_run(f"backtest_{M['key']}_latest.json")
 
