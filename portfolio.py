@@ -1067,13 +1067,27 @@ def trade_log(table: str = TRADES, account: str | None = None) -> pd.DataFrame:
 
 
 def load_capital(table: str = CAPITAL) -> dict:
-    """마지막으로 재동기화한 운용자금. 없으면 빈 dict."""
+    """마지막 자금 기록. 없으면 빈 dict.
+
+    운용기준 = max(약정액, 평가액 + 예수금)
+
+    왜 max인가: 약정액은 '이 전략에 쓰기로 한 돈'이고, 아직 계좌에 안 넣은
+    돈도 포함합니다(살 때 입금하는 방식이면 예수금은 대부분 0입니다). 그래서
+    분할 진입 중에는 약정액이 기준이 되고, 나중에 수익이 쌓여 평가액이 약정액
+    을 넘으면 그때부터 평가액이 기준이 됩니다(복리로 배정액이 따라 커집니다).
+    """
     df = store.read(table)
     if df.empty:
         return {}
     r = df.sort_values("기준일").iloc[-1]
-    return {"기준일": r["기준일"], "평가액": float(r["평가액"]),
-            "현금": float(r.get("현금", 0) or 0), "총자본": float(r["총자본"])}
+    평가액 = float(r["평가액"])
+    현금 = float(r.get("현금", 0) or 0)
+    총자본 = float(r["총자본"])
+    약정 = r.get("약정액")
+    약정 = float(약정) if 약정 is not None and pd.notna(약정) else 0.0
+    return {"기준일": r["기준일"], "평가액": 평가액, "현금": 현금,
+            "총자본": 총자본, "약정액": 약정,
+            "운용기준": max(약정, 총자본)}
 
 
 def reset_state(table: str = STATE) -> int:
@@ -1096,28 +1110,43 @@ def reset_state(table: str = STATE) -> int:
 
 def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
                 table: str = CAPITAL) -> dict:
-    """현금만 들고 시작하는 계좌의 운용금액을 한 번에 적어 둡니다.
+    """이 전략에 쓸 **약정 운용금액**을 적어 둡니다 (계좌 잔고가 아닙니다).
 
-    왜 resync로 안 되는가: resync는 '보유 종목 평가액'에서 총자본을 역산합니다.
-    보유가 0이면 쓸 수 없습니다. 그래서 처음 현금으로 시작할 때만 이걸 씁니다.
+    약정액만 정하는 명령입니다. 이미 재동기화 기록이 있으면 측정값
+    (평가액·예수금·총자본)은 그대로 둡니다 — 여기서 덮어쓰면 수익률이
+    약정액 기준으로 계산돼 성과가 거짓이 됩니다. 측정값을 고치는 건
+    resync(실제 보유 목록)뿐입니다.
 
-    cash 기본값이 0인 이유: 첫 주문서는 총자본 전액을 100종목에 배분하므로
-    '투입 대기 현금'이 따로 없습니다. 여기에 현금을 남겨두면 다음 주 주문서가
-    이미 투자한 돈을 또 넣으려고 합니다(현금투입 주문). 첫 매수를 체결한 뒤에는
-    평소대로 resync를 돌려 실제 평가액·잔여현금으로 맞추세요.
+    보유가 없는 새 계좌라면 측정값이 없으니 평가액 = 약정액 - 예수금으로
+    채워 둡니다(첫 주문서가 배정할 금액이 필요하니까요).
+
+    cash 기본값이 0인 이유: 상수님은 살 때 그때그때 입금하므로 예수금이
+    평소 0입니다. 배정액은 예수금이 아니라 약정액에서 나오므로 0이어도
+    주문서는 정상적으로 나옵니다.
     """
     today = today or date.today()
     total = float(total)
     if total <= 0:
         raise ValueError("운용금액은 0보다 커야 합니다.")
-    cash = min(max(0.0, float(cash)), total)
+    cash = max(0.0, float(cash))
+    prev = load_capital(table)
+    if prev and float(prev.get("총자본") or 0) > 0:
+        평가액 = float(prev["평가액"])
+        현금 = float(prev["현금"]) if cash <= 0 else cash
+        총자본 = 평가액 + 현금
+        기준일 = prev["기준일"]
+    else:
+        cash = min(cash, total)
+        평가액, 현금, 총자본 = total - cash, cash, total
+        기준일 = pd.Timestamp(today)
     store.upsert(table, pd.DataFrame([{
-        "기준일": pd.Timestamp(today), "평가액": total - cash,
-        "현금": cash, "총자본": total}]))
-    log.info("운용금액 설정 — 총자본 %.0f (평가액 %.0f + 현금 %.0f)",
-             total, total - cash, cash)
-    return {"총자본": total, "평가액": total - cash, "현금": cash,
-            "종목당배정액": total / 100}
+        "기준일": pd.Timestamp(기준일), "평가액": 평가액,
+        "현금": 현금, "총자본": 총자본, "약정액": total}]))
+    기준 = max(total, 총자본)
+    log.info("약정 운용금액 %.0f원 (계좌 실측 평가액 %.0f + 예수금 %.0f = %.0f) "
+             "→ 배정 기준 %.0f원", total, 평가액, 현금, 총자본, 기준)
+    return {"약정액": total, "총자본": 총자본, "평가액": 평가액, "현금": 현금,
+            "운용기준": 기준, "종목당배정액": 기준 / 100}
 
 
 def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
@@ -1196,9 +1225,13 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     총자본 = 평가액 + 현금
     # upsert입니다(write 아님). write면 한 줄로 덮어써서 지난 총자본이
     # 사라집니다 — 그러면 '얼마나 불었는지'를 계산할 자료가 남지 않습니다.
+    # 약정액은 재동기화가 건드리지 않습니다 — 계좌 잔고에서 역산하면
+    # 아직 입금 안 한 돈이 사라져 배정액이 쪼그라듭니다.
+    prev = load_capital(capital_table)
+    약정 = float(prev.get("약정액") or 0.0)
     store.upsert(capital_table, pd.DataFrame([{
         "기준일": pd.Timestamp(today), "평가액": 평가액,
-        "현금": 현금, "총자본": 총자본}]))
+        "현금": 현금, "총자본": 총자본, "약정액": 약정}]))
 
     # 종목별 평가금액도 기록합니다 — 실제 계좌와 맞춰 본 지점입니다.
     store.upsert(HOLDINGS_LOG, pd.DataFrame([
@@ -1214,8 +1247,11 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     _pend = int((pd.to_numeric(st["기준금액"], errors="coerce") == 0).sum())
     _qty = int(pd.to_numeric(st["수량"], errors="coerce").notna().sum())
     return {"보유종목수": int(len(st) - _pend), "미매수유지": _pend,
-            "수량있는종목": _qty,
+            "수량있는종목": _qty, "약정액": 약정,
+            "운용기준": max(약정, 총자본),
             "평가액": 평가액, "현금": 현금,
-            "총자본": 총자본, "종목당배정액": 총자본 / 100,
+            # 배정액은 운용기준(= max(약정액, 실측))에서 나옵니다. 총자본으로
+            # 계산하면 예수금을 미리 안 넣는 계좌에서 배정액이 쪼그라듭니다.
+            "총자본": 총자본, "종목당배정액": max(약정, 총자본) / 100,
             "사라진종목": gone, "새로들어온종목": extra,
             "등분별금액": {int(k): round(v) for k, v in by.items()}}

@@ -57,6 +57,19 @@ def _price_asof() -> str:
         return "확인 실패"
 
 
+def _resync_age(cap_info: dict) -> str:
+    """마지막 재동기화가 며칠 전인지. 오래됐으면 경고 문구까지."""
+    if not cap_info or not cap_info.get("기준일"):
+        return ("없음 — 상태가 실제 보유와 다를 수 있습니다. "
+                "매도 주문을 믿지 마시고 먼저 재동기화하세요")
+    d = pd.Timestamp(cap_info["기준일"]).date()
+    days = (date.today() - d).days
+    txt = f"{d:%Y-%m-%d} ({days}일 전)"
+    if days >= 10:
+        txt += " — 오래됐습니다. 보유 목록으로 재동기화하기 전에는 매도 주문을 믿지 마세요"
+    return txt
+
+
 def _setting_text(prof: dict) -> str:
     cap = ("없음" if prof["max_sector_pct"] >= 1
            else f"{prof['max_sector_pct']:.0%}")
@@ -92,17 +105,32 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
         log.warning("%s이 없어 순위 버퍼 없이 돌립니다 " % prof["hold_file"] +
                     "— 백테스트와 규칙이 달라집니다")
 
-    # 총자본 — 월 1회 재동기화 값이 있으면 그걸 씁니다 (환경변수는 폴백).
+    # 배정액의 기준은 **운용기준** = max(약정액, 평가액 + 예수금)입니다.
+    #
+    # 왜 평가액+예수금이 아닌가 (실측): 배우자 계좌는 1,000만원을 쓰기로 했지만
+    # 살 때 그때그때 입금하므로 예수금이 0이고, 분할 진입 2주차 평가액은
+    # 210만원이었습니다. 평가액+예수금으로 계산하면 종목당 배정액이
+    # 10만원에서 2.1만원으로 쪼그라들어 분할 진입이 스스로 멈춥니다.
+    # 약정액을 기준으로 두면 분할 진입이 계획대로 끝나고, 나중에 평가액이
+    # 약정액을 넘어서면 그때부터 평가액이 기준이 됩니다(복리 반영).
     cap_info = portfolio.load_capital(prof["capital_table"])
-    capital = float(cap_info.get("총자본") or config.CAPITAL_KRW)
+    measured = float(cap_info.get("총자본") or 0.0)
+    pledged = float(cap_info.get("약정액") or 0.0)
+    capital = float(cap_info.get("운용기준") or 0.0) or config.CAPITAL_KRW
     cash = float(cap_info.get("현금") or 0.0)
     if cap_info:
-        log.info("재동기화 기준 총자본 %.0f원 (평가액 %.0f + 현금 %.0f) · %s",
-                 capital, cap_info.get("평가액", 0), cash,
+        log.info("운용기준 %.0f원 (약정액 %.0f / 평가액 %.0f + 예수금 %.0f = %.0f) · %s",
+                 capital, pledged, cap_info.get("평가액", 0), cash, measured,
                  pd.Timestamp(cap_info["기준일"]).date())
+        if pledged <= 0:
+            log.warning("약정액이 없습니다 — 평가액+예수금(%.0f)으로 배정액을 "
+                        "계산합니다. 예수금을 미리 넣지 않는 방식이면 배정액이 "
+                        "줄어듭니다. `run_weekly.py -p %s capital <금액>`을 "
+                        "한 번 돌리세요.", measured, prof["key"])
     else:
-        log.warning("재동기화 기록이 없습니다 — QUANT_CAPITAL_KRW(%.0f)를 씁니다. "
-                    "`run_weekly.py resync`를 한 번 돌리세요.", config.CAPITAL_KRW)
+        log.warning("자금 기록이 없습니다 — QUANT_CAPITAL_KRW(%.0f)를 씁니다. "
+                    "`run_weekly.py capital <금액>`을 한 번 돌리세요.",
+                    config.CAPITAL_KRW)
 
     r = portfolio.rebalance(picks, n=config.N_PORTFOLIO, tranches=tranches,
                             capital=capital, cash=cash,
@@ -133,6 +161,22 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
             # 날짜의 주가에서 나옵니다. 기준일보다 이틀 이상 뒤처져 있으면
             # 주가 수집이 실패한 것이니 거래 전에 확인하세요.
             {"항목": "주가 기준일", "값": _price_asof()},
+            # 상태는 '주문서를 뽑을 때 샀다고 가정한' 값입니다. 실제 체결과
+            # 벌어지면 가지고 있지도 않은 종목을 팔라는 주문이 나옵니다
+            # (실측: 연습으로 돌린 주문서의 매수 종목이 보유로 남아 그 다음
+            # 주 매도 주문에 등장). 재동기화가 그걸 바로잡는 유일한 수단이라
+            # 얼마나 오래됐는지 여기 적습니다.
+            {"항목": "마지막 재동기화", "값": _resync_age(cap_info)},
+            # 배정액이 어느 금액에서 나왔는지 — 이걸 적지 않으면 예수금을
+            # 안 넣은 주에 배정액이 왜 작아졌는지 알 수 없습니다.
+            {"항목": "약정 운용금액",
+             "값": (f"{pledged:,.0f}원" if pledged > 0
+                   else "미설정 — capital 명령으로 한 번 설정하세요")},
+            {"항목": "계좌 실측 (평가액+예수금)", "값": f"{measured:,.0f}원"},
+            {"항목": "배정 기준",
+             "값": (f"{capital:,.0f}원 "
+                   + ("(약정액)" if pledged >= measured and pledged > 0
+                      else "(계좌 실측 — 약정액을 넘었습니다)"))},
             {"항목": "종목별 배정액 범위",
              "값": (f"{r['배정액범위'][0]:,}원 ~ {r['배정액범위'][1]:,}원"
                    if r.get("배정액범위") else "-")},
@@ -199,6 +243,8 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
         "보유종목수": r["보유종목수"], "첫실행": r["첫실행"],
         "미매수": r.get("미매수", 0), "배정완료종목수": r.get("배정완료종목수"),
         "주가기준일": _price_asof(),
+        "재동기화": _resync_age(cap_info),
+        "약정액": pledged, "계좌실측": measured, "배정기준": capital,
         "종목당배정액": r.get("종목당배정액"), "가격초과제외": r.get("가격초과제외"),
         "orders": r["orders"].to_dict(orient="records"),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -279,8 +325,10 @@ def resync_main(src: str, cash: float = 0.0, tranches: int = 4,
     print(f"  보유 {r['보유종목수']}종목")
     print(f"  평가액 {r['평가액']:>14,.0f}원")
     print(f"  현금   {r['현금']:>14,.0f}원")
-    print(f"  총자본 {r['총자본']:>14,.0f}원  → 종목당 배정액 "
-          f"{r['종목당배정액']:,.0f}원")
+    print(f"  총자본 {r['총자본']:>14,.0f}원  (계좌 실측)")
+    print(f"  약정액 {float(r.get('약정액') or 0):>14,.0f}원")
+    print(f"  배정기준 {float(r.get('운용기준') or r['총자본']):>12,.0f}원"
+          f"  → 종목당 {r['종목당배정액']:,.0f}원")
     if r["사라진종목"]:
         print(f"\n  목록에 없어 상태에서 뺀 종목 {len(r['사라진종목'])}개: "
               f"{', '.join(r['사라진종목'][:10])}"
@@ -351,18 +399,20 @@ def reset_main(prof: dict | None = None) -> int:
 
 def capital_main(total: float, cash: float = 0.0,
                  prof: dict | None = None) -> int:
-    """현금으로 처음 시작하는 계좌 — 운용금액을 적어 둡니다 (처음 한 번만)."""
+    """이 계좌에 쓰기로 한 **약정 운용금액**을 적어 둡니다 (한 번만)."""
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     prof = prof or config.profile()
     r = portfolio.set_capital(total, cash=cash, table=prof["capital_table"])
     print("\n" + "=" * 60)
-    print(f"  운용금액 설정 — {prof['라벨']} 계좌")
+    print(f"  약정 운용금액 설정 — {prof['라벨']} 계좌")
     print("=" * 60)
-    print(f"  총자본 {r['총자본']:>14,.0f}원  → 종목당 배정액 "
+    print(f"  약정액   {r['약정액']:>14,.0f}원  ← 쓰기로 한 돈")
+    print(f"  계좌실측 {r['총자본']:>14,.0f}원  "
+          f"(평가액 {r['평가액']:,.0f} + 예수금 {r['현금']:,.0f})")
+    print(f"  배정기준 {r['운용기준']:>14,.0f}원  → 종목당 "
           f"{r['종목당배정액']:,.0f}원")
-    print(f"  (평가액 {r['평가액']:,.0f} + 현금 {r['현금']:,.0f})")
-    print("\n  첫 매수를 체결한 뒤에는 `resync`로 실제 평가액·잔여현금을 "
-          "맞추세요.")
+    print("\n  예수금을 미리 넣지 않아도 됩니다 — 배정액은 약정액에서 나옵니다.")
+    print("  평가액이 약정액을 넘어서면 그때부터 평가액이 기준이 됩니다.")
     return 0
 
 

@@ -779,15 +779,47 @@ check(pd.isna(sell["수량"]) and "수량미정" in str(sell["메모"]),
 check(pd.isna(tl["체결가"]).all(),
       "체결가는 비어 있음 — 계획값으로 추정한다는 표시")
 
-# 자본 기록은 덮어쓰지 않고 쌓여야 합니다 (= 실제 성과 곡선)
+# ── 약정액 vs 계좌 실측 ────────────────────────────────────────────────
+# 왜 나누는가 (실측): 배우자 계좌는 1,000만원 운용 약정인데 살 때 그때그때
+# 입금하므로 예수금이 0이고, 분할 진입 2주차 평가액이 210만원이었습니다.
+# 평가액+예수금으로 배정액을 계산하면 종목당 10만원 → 2.1만원으로 줄어
+# 분할 진입이 스스로 멈춥니다.
 CT = "kor_capital_alt"
 store.write(CT, pd.DataFrame(columns=list(store.SCHEMAS[CT])))
+r = portfolio.set_capital(10_000_000, table=CT, today=date(2026, 10, 8))
+check(r["약정액"] == 10_000_000 and r["운용기준"] == 10_000_000,
+      "새 계좌 — 약정액이 곧 배정 기준")
+check(portfolio.load_capital(CT)["운용기준"] == 10_000_000,
+      "load_capital이 운용기준을 돌려줌")
+
+# 예수금 0 · 평가액이 약정액보다 작아도 배정액은 약정액에서 나옵니다
+store.upsert(CT, pd.DataFrame([{"기준일": pd.Timestamp("2026-10-16"),
+                                "평가액": 2_103_345.0, "현금": 0.0,
+                                "총자본": 2_103_345.0, "약정액": 10_000_000.0}]))
+ci = portfolio.load_capital(CT)
+check(ci["운용기준"] == 10_000_000 and ci["총자본"] == 2_103_345,
+      f"예수금 0 · 평가액 210만 → 배정 기준 {ci['운용기준']:,.0f}원 (약정액)")
+check(abs(ci["운용기준"] / 100 - 100_000) < 1,
+      "종목당 배정액 10만원 — 2.1만원으로 줄지 않음")
+
+# 평가액이 약정액을 넘으면 그때부터 평가액이 기준 (복리 반영)
+store.upsert(CT, pd.DataFrame([{"기준일": pd.Timestamp("2027-10-16"),
+                                "평가액": 12_000_000.0, "현금": 500_000.0,
+                                "총자본": 12_500_000.0, "약정액": 10_000_000.0}]))
+check(portfolio.load_capital(CT)["운용기준"] == 12_500_000,
+      "평가액+예수금이 약정액을 넘으면 그쪽이 기준")
+
+# 약정액을 다시 적어도 측정값(평가액·예수금)은 건드리지 않습니다 —
+# 여기서 덮어쓰면 수익률이 약정액 기준으로 계산돼 성과가 거짓이 됩니다.
+r = portfolio.set_capital(20_000_000, table=CT, today=date(2027, 11, 8))
+check(r["평가액"] == 12_000_000 and r["현금"] == 500_000,
+      f"약정액 변경이 평가액을 덮어쓰지 않음 (평가액 {r['평가액']:,.0f})")
+check(r["운용기준"] == 20_000_000, "새 약정액이 배정 기준")
+check(len(store.read(CT)) == 3,
+      f"약정액 변경은 가짜 측정 시점을 만들지 않음 ({len(store.read(CT))}행)")
+
+store.write(CT, pd.DataFrame(columns=list(store.SCHEMAS[CT])))
 portfolio.set_capital(10_000_000, table=CT, today=date(2026, 10, 8))
-portfolio.set_capital(10_500_000, table=CT, today=date(2026, 11, 8))
-cap = store.read(CT)
-check(len(cap) == 2, f"총자본 기록이 쌓임 ({len(cap)}행) — 덮어쓰면 성과를 못 냅니다")
-check(portfolio.load_capital(CT)["총자본"] == 10_500_000,
-      "가장 최근 값을 읽음")
 
 # 재동기화는 종목별 평가금액까지 남겨야 합니다 (수량 복원·종목별 손익의 기준점)
 store.write("kor_holdings_log",
@@ -806,6 +838,12 @@ check(len(hl) == 2 and set(hl["계좌"]) == {"alt"},
       f"재동기화가 종목별 평가금액을 남김 ({len(hl)}행)")
 check(abs(portfolio.load_capital(CT)["총자본"] - 880_000) < 1,
       f"재동기화 총자본 = 평가액+현금 ({portfolio.load_capital(CT)['총자본']:,.0f})")
+# 재동기화가 약정액을 지우면 다음 주문서의 배정액이 쪼그라듭니다 —
+# 분할 진입 중이면 그걸로 계획이 끝납니다.
+check(portfolio.load_capital(CT)["약정액"] == 10_000_000,
+      "재동기화가 약정액을 그대로 이어받음")
+check(portfolio.load_capital(CT)["운용기준"] == 10_000_000,
+      "재동기화 뒤에도 배정 기준은 약정액")
 # 같은 날짜 기록은 덮어쓰고(중복 방지), 다른 날짜는 쌓습니다
 check(len(store.read(CT)) == 2,
       f"같은 날 다시 맞추면 그 날 기록만 갱신 ({len(store.read(CT))}행: 10/08, 11/08)")
