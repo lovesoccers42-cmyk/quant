@@ -1022,12 +1022,20 @@ def record_fills(src, *, account: str, today: date | None = None,
                      "체결가": float(f["체결가"]),
                      "체결수량": float(f["체결수량"]),
                      "체결일": pd.Timestamp(today)})
+    # 안 채워진 주문 — 체결내역에 없으니 **일어나지 않은 거래**입니다.
+    # 여기에 표시를 남기지 않으면 체결가가 비어 있는 행을 '계획값으로 추정'
+    # 으로 읽어, 실제로는 못 판 종목을 계획가에 팔았다고 계산합니다
+    # (실측: 10/7 주문서의 매도 4종목은 계좌에 없어서 못 팔았습니다).
+    left = week.index.difference(pd.Index(used))
+    for i in left:
+        memo = str(upd.loc[i, "메모"] or "")
+        if "미체결" not in memo:
+            upd.loc[i, "메모"] = (memo + " · " if memo else "") + \
+                "미체결 (체결내역에 없음)"
     if rows:
         upd = pd.concat([upd, pd.DataFrame(rows)], ignore_index=True)
     store.write(table, upd)
 
-    # 안 채워진 주문 — 못 산 종목입니다. 다음 차례로 넘어갑니다.
-    left = week.index.difference(pd.Index(used))
     return {"체결반영": len(matched), "원장밖": len(rows),
             "미체결": int(len(left)), "기준일": f"{asof_ts:%Y-%m-%d}",
             "미체결종목": [str(c).zfill(6) for c in week.loc[left, "종목코드"]]}

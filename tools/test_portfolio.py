@@ -887,6 +887,16 @@ r_f = portfolio.record_fills(FORMS["탭+헤더(코드)"], account="main",
 check(r_f["체결반영"] == 2, f"체결 2건 반영 ({r_f['체결반영']})")
 check(r_f["미체결"] == 1 and r_f["미체결종목"] == ["264450"],
       f"못 산 종목은 미체결로 남음 ({r_f['미체결종목']})")
+# 체결가가 비어 있는 행은 '계획값으로 추정'이라는 뜻이므로, 체결내역을
+# 넣은 주의 미체결 행은 원장에 그렇다고 적어야 합니다. 안 적으면 실제로는
+# 못 판 종목을 계획가에 팔았다고 계산합니다 (실측: 10/7 매도 4종목).
+_tl = portfolio.trade_log(account="main")
+_miss = _tl[_tl["종목코드"] == "264450"].iloc[0]
+check("미체결" in str(_miss["메모"]) and pd.isna(_miss["체결가"]),
+      f"미체결 행에 표시가 남음 (메모 '{_miss['메모']}')")
+_done = _tl[_tl["종목코드"] == "003010"].iloc[0]
+check("미체결" not in str(_done["메모"] or ""),
+      "체결된 행에는 미체결 표시가 없음")
 tl = portfolio.trade_log(account="main")
 filled = tl[tl["체결가"].notna()]
 check(len(filled) == 2, f"원장에 체결가가 들어감 ({len(filled)}건)")
