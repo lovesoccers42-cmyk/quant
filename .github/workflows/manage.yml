@@ -2,44 +2,34 @@ name: 데이터 관리 (한국 · 체결·보유 갱신)
 
 # 주문서를 만들지 않습니다. 내 데이터만 갱신합니다.
 #
+# 쓰는 법 (금요일 저녁)
+#   1. 비공개 레포의 inbox/ 폴더에 CSV를 드래그앤드롭으로 올립니다
+#        fills_main_2026-10-16.csv    상수님 체결내역
+#        fills_alt_2026-10-16.csv     배우자 체결내역
+#        holdings_main.csv            상수님 보유목록 (예수금 줄 포함 가능)
+#        holdings_alt.csv             배우자 보유목록
+#   2. 이 워크플로를 Run workflow (입력 없이 그냥)
+#   3. 처리한 파일은 archive/날짜/로 옮겨지고 inbox는 비워집니다
+#
 # 왜 주문서 워크플로와 분리했나: 운용 순서가 '목요일 주문서 → 금요일 낮 체결
 # → 금요일 저녁 갱신'입니다. 한 워크플로에 섞어 두면 체결내역을 넣는 순간
-# 새 주문서가 같이 나와(또는 그 반대로) 어느 쪽이 최신인지 헷갈리고, 입력을
-# 잘못 넣으면 주문서가 틀립니다. 갱신은 갱신만, 주문서는 주문서만 합니다.
-#
-# 예약 실행이 없습니다 — 체결내역·보유목록을 사람이 붙여넣어야 하니까요.
+# 새 주문서가 같이 나와(또는 그 반대로) 어느 쪽이 최신인지 헷갈립니다.
 
 on:
   workflow_dispatch:
     inputs:
-      profile:
-        description: "계좌 — main(상수) / alt(배우자). 아래 입력은 이 계좌에만 적용됩니다"
-        required: true
-        default: "main"
-        type: choice
-        options: ["main", "alt"]
-      fills_csv:
-        description: "체결내역 — 종목코드(또는 종목명) · 매매구분 · 체결수량 · 체결단가"
-        required: false
-        default: ""
-      fills_asof:
-        description: "체결내역을 적용할 주문 날짜 (YYYY-MM-DD). 비우면 가장 최근 주문서"
-        required: false
-        default: ""
-      resync_csv:
-        description: "현재 보유 목록 — 종목코드,평가금액,종목명 (매주)"
-        required: false
-        default: ""
-      cash:
-        description: "계좌에 남은 현금(원). 미매수 계획분은 자동으로 빼고 계산합니다"
-        required: false
-        default: "0"
       tranches:
         description: "등분 수 (주간 4등분이면 4)"
         required: false
         default: "4"
+      profile:
+        description: "아래 '한 번만' 입력들이 적용될 계좌 (inbox CSV는 파일 이름으로 계좌를 구분하므로 이 값과 무관)"
+        required: false
+        default: "main"
+        type: choice
+        options: ["main", "alt"]
       seed_csv:
-        description: "처음 한 번만 — 이어받을 보유 종목을 등분에 배분합니다"
+        description: "처음 한 번만 — 이어받을 보유 종목을 등분에 배분 (종목코드,평가금액,종목명)"
         required: false
         default: ""
       capital_krw:
@@ -54,6 +44,12 @@ on:
         options: ["0", "1"]
       backfill_log:
         description: "원장 백필 (1). 원장이 생기기 전 주문을 주문서 json에서 되살립니다"
+        required: false
+        default: "0"
+        type: choice
+        options: ["0", "1"]
+      migrate:
+        description: "이사 (1) — 공개 릴리스의 상태·원장·주문서를 비공개 레포로 옮기고 공개 쪽에서 삭제. 한 번만"
         required: false
         default: "0"
         type: choice
@@ -73,14 +69,26 @@ jobs:
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      QUANT_SMTP_USER: ${{ secrets.QUANT_SMTP_USER }}
-      QUANT_SMTP_PASS: ${{ secrets.QUANT_SMTP_PASS }}
-      QUANT_REPORT_EMAIL: ${{ secrets.QUANT_REPORT_EMAIL }}
       QUANT_CAPITAL_KRW: ${{ vars.QUANT_CAPITAL_KRW || '0' }}
       TZ: Asia/Seoul
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: 비공개 상태 레포 설정 확인
+        run: |
+          if [ -z "${{ vars.STATE_REPO }}" ]; then
+            echo "::error::STATE_REPO 변수가 없습니다. Settings > Secrets and variables > Actions > Variables 에 'owner/quant-state' 형태로 넣으세요."
+            exit 1
+          fi
+          echo "상태 레포: ${{ vars.STATE_REPO }}"
+
+      - name: 비공개 상태 레포 가져오기
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.STATE_REPO }}
+          token: ${{ secrets.STATE_TOKEN }}
+          path: state-repo
 
       - uses: actions/setup-python@v5
         with:
@@ -90,17 +98,65 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
-      - name: 데이터 저장소 내려받기
+      - name: 폴더 준비 · 상태 가져오기
         run: |
-          mkdir -p data output
-          gh release download data-store -D data -p 'kor_*.parquet' --clobber \
-            || echo "저장소가 아직 없습니다 — 월간 실행을 먼저 돌려주세요."
+          mkdir -p data output state-repo/state state-repo/orders \
+                   state-repo/inbox state-repo/archive
+          shopt -s nullglob
+          for f in state-repo/state/*.parquet; do cp -v "$f" data/; done
           ls -lh data || true
+
+      - name: 이사 — 공개 릴리스의 민감 파일을 비공개 레포로 (migrate=1)
+        if: ${{ github.event.inputs.migrate == '1' }}
+        run: |
+          # 금액이 들어 있는 파일을 공개 릴리스에서 내려 비공개 레포에 넣고,
+          # 공개 쪽에서 지웁니다. 지우기 전에 비공개 레포 커밋이 끝나는지
+          # 확인하므로, 중간에 끊겨도 자료가 사라지지는 않습니다.
+          set -e
+          mkdir -p migrate
+          PATTERNS=(
+            'kor_portfolio.parquet' 'kor_portfolio_alt.parquet'
+            'kor_capital.parquet' 'kor_capital_alt.parquet'
+            'kor_trades.parquet' 'kor_holdings_log.parquet'
+            'weekly_kr_latest.json' 'weekly_kr_alt_latest.json'
+            'weekly-main-*.xlsx' 'weekly-alt-*.xlsx'
+          )
+          args=()
+          for p in "${PATTERNS[@]}"; do args+=(-p "$p"); done
+          gh release download data-store -D migrate "${args[@]}" --clobber || true
+          # 이름이 뭉개진 옛 엑셀(한글이 떨어져 MMDD_100.xlsx 하나로 합쳐진
+          # 것들)도 안에 무엇이 있는지 알 수 없으니 함께 내립니다.
+          gh release download data-store -D migrate -p '[0-9][0-9][0-9][0-9]_*.xlsx' --clobber || true
+          echo "--- 내려받은 파일 ---"; ls -la migrate || true
+
+          shopt -s nullglob
+          moved=0
+          for f in migrate/*.parquet; do cp -v "$f" state-repo/state/; moved=1; done
+          for f in migrate/*.json migrate/*.xlsx; do cp -v "$f" state-repo/orders/; moved=1; done
+          if [ "$moved" = "0" ]; then
+            echo "::warning::공개 릴리스에서 옮길 파일이 없습니다 (이미 이사했거나 처음입니다)."
+          else
+            cd state-repo
+            git config user.name "quant-bot"
+            git config user.email "quant-bot@users.noreply.github.com"
+            git add -A
+            git commit -m "이사 — 공개 릴리스의 상태·원장·주문서" || echo "변경 없음"
+            git pull --rebase --autostash && git push
+            cd ..
+            # 커밋·푸시가 끝난 뒤에만 공개 쪽에서 지웁니다.
+            for f in migrate/*; do
+              n=$(basename "$f")
+              echo "공개 릴리스에서 삭제: $n"
+              gh release delete-asset data-store "$n" -y || echo "::warning::삭제 실패 $n"
+            done
+          fi
+          # 다음 단계가 상태를 쓰도록 data/에도 둡니다.
+          for f in state-repo/state/*.parquet; do cp -v "$f" data/; done
 
       - name: 오프라인 점검 (커밋 누락 잡기)
         run: python tools/test_portfolio.py
 
-      # ── 순서: 구조를 먼저, 원장 다음, 실제 보유로 마무리 ──────────
+      # ── 순서: 구조를 먼저, 원장 다음, inbox(체결→보유)로 마무리 ────────
       - name: 보유 상태 초기화 (체결 전에만)
         if: ${{ github.event.inputs.reset_state == '1' }}
         run: python run_weekly.py -p "${{ github.event.inputs.profile }}" reset
@@ -113,8 +169,6 @@ jobs:
           SEED_CSV: ${{ github.event.inputs.seed_csv }}
         run: |
           printf '%s\n' "$SEED_CSV" > holdings.csv
-          echo "--- 붙여넣은 보유 종목 ---"
-          cat holdings.csv
           python run_weekly.py -p "${{ github.event.inputs.profile }}" \
             seed holdings.csv "${{ github.event.inputs.tranches || '4' }}"
 
@@ -124,68 +178,59 @@ jobs:
           CAP: ${{ github.event.inputs.capital_krw }}
         run: python run_weekly.py -p "${{ github.event.inputs.profile }}" capital "$CAP"
 
-      - name: 원장 백필 (한 번만 · 체결내역보다 먼저)
+      - name: 원장 백필 (한 번만 · inbox보다 먼저)
         if: ${{ github.event.inputs.backfill_log == '1' }}
         run: |
-          P="${{ github.event.inputs.profile }}"
-          if [ "$P" = "alt" ]; then J=weekly_kr_alt_latest.json; else J=weekly_kr_latest.json; fi
-          gh release download data-store -p "$J" --clobber
-          python run_weekly.py -p "$P" log "$J"
+          shopt -s nullglob
+          for P in main alt; do
+            if [ "$P" = "alt" ]; then J=weekly_kr_alt_latest.json; else J=weekly_kr_latest.json; fi
+            if [ -f "state-repo/orders/$J" ]; then
+              python run_weekly.py -p "$P" log "state-repo/orders/$J"
+            else
+              echo "::warning::state-repo/orders/$J 가 없어 $P 백필을 건너뜁니다."
+            fi
+          done
 
-      - name: 체결내역 반영
-        if: ${{ github.event.inputs.fills_csv != '' }}
-        env:
-          FILLS_CSV: ${{ github.event.inputs.fills_csv }}
-          FILLS_ASOF: ${{ github.event.inputs.fills_asof }}
+      - name: inbox CSV 적용 (체결 → 보유)
         run: |
-          printf '%s\n' "$FILLS_CSV" > fills.csv
-          echo "--- 붙여넣은 체결내역 ---"
-          cat fills.csv
-          python run_weekly.py -p "${{ github.event.inputs.profile }}" \
-            fills fills.csv "${FILLS_ASOF:--}"
-
-      - name: 보유·자금 재동기화 (매주 · 맨 마지막)
-        if: ${{ github.event.inputs.resync_csv != '' }}
-        env:
-          RESYNC_CSV: ${{ github.event.inputs.resync_csv }}
-          CASH: ${{ github.event.inputs.cash || '0' }}
-        run: |
-          printf '%s\n' "$RESYNC_CSV" > resync.csv
-          echo "--- 붙여넣은 보유 목록 ---"
-          cat resync.csv
-          python run_weekly.py -p "${{ github.event.inputs.profile }}" \
-            resync resync.csv "$CASH" "${{ github.event.inputs.tranches || '4' }}"
+          python tools/inbox_apply.py state-repo/inbox state-repo/archive \
+            "${{ github.event.inputs.tranches || '4' }}"
 
       - name: 결과 요약 (금액 없이)
         if: always()
         run: python tools/manage_status.py
 
-      - name: 저장소·결과 올리기
+      - name: 비공개 레포에 저장
         if: always()
         run: |
           shopt -s nullglob
+          for f in data/kor_portfolio*.parquet data/kor_capital*.parquet \
+                   data/kor_trades.parquet data/kor_holdings_log.parquet; do
+            [ -f "$f" ] && cp -v "$f" state-repo/state/
+          done
+          cd state-repo
+          git config user.name "quant-bot"
+          git config user.email "quant-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "데이터 갱신 $(date +%F) (manage run #${{ github.run_number }})" \
+            || echo "변경 없음"
+          for try in 1 2 3; do
+            git pull --rebase --autostash && git push && break
+            echo "::warning::push 재시도 $try"
+            sleep $((try * 5))
+          done
+
+      - name: 공개 릴리스에 요약만 올리기
+        if: always()
+        run: |
+          [ -f output/manage_latest.json ] || exit 0
           gh release view data-store >/dev/null 2>&1 ||
             gh release create data-store --title "데이터 저장소" --notes "파이프라인이 관리하는 데이터입니다. 직접 수정하지 마세요."
-
-          files=(data/kor_*.parquet output/manage_latest.json)
-          echo "--- 올릴 파일 ${#files[@]}개 ---"
-          for f in "${files[@]}"; do echo "  $f"; done
-
-          fail=0
-          for f in "${files[@]}"; do
-            [ -f "$f" ] || continue
-            ok=0
-            for try in 1 2 3; do
-              if gh release upload data-store "$f" --clobber; then ok=1; break; fi
-              echo "::warning::업로드 재시도 $try - $f"
-              sleep $((try * 5))
-            done
-            if [ $ok -ne 1 ]; then
-              echo "::error::업로드 실패 - $f"
-              fail=1
-            fi
+          for try in 1 2 3; do
+            gh release upload data-store output/manage_latest.json --clobber && break
+            echo "::warning::업로드 재시도 $try"
+            sleep $((try * 5))
           done
-          exit $fail
 
       - name: 실행 기록 보관
         if: always()
@@ -193,7 +238,7 @@ jobs:
         with:
           name: manage-${{ github.run_number }}
           path: |
-            output/
             logs/
+            output/manage_latest.json
           retention-days: 90
           if-no-files-found: warn
