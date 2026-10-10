@@ -58,7 +58,8 @@ def _sizes(n: int, tranches: int) -> list[int]:
 # 이걸 전부 사람에게 고치라고 하는 대신 코드가 받아들입니다.
 
 _HEADER_WORDS = ("종목코드", "코드", "티커", "종목", "평가금액", "금액", "평가",
-                 "종목명", "이름", "name", "code", "ticker")
+                 "종목명", "이름", "name", "code", "ticker",
+                 "수량", "주식수", "잔고", "qty")
 
 # 줄바꿈이 사라진 한 줄에서 레코드 경계를 찾습니다. 이름 뒤의 공백 다음에
 # '숫자 + 구분자'가 오면 거기가 다음 종목의 시작입니다.
@@ -198,6 +199,10 @@ def parse_holdings(src) -> pd.DataFrame:
                     idx.setdefault("평가금액", i)
                 elif any(w in lc for w in ("종목명", "이름", "name")):
                     idx.setdefault("종목명", i)
+                elif any(w in lc for w in ("수량", "주식수", "잔고", "qty")):
+                    # 수량은 주문 계산에 쓰지 않습니다(금액으로 돕니다).
+                    # 일별 평가액·정확한 주식수 복원을 위해 받아 둡니다.
+                    idx.setdefault("수량", i)
             if "종목코드" in idx and "평가금액" in idx:
                 rows = [{k: (r[i] if i < len(r) else "") for k, i in idx.items()}
                         for r in body]
@@ -224,9 +229,17 @@ def parse_holdings(src) -> pd.DataFrame:
         df["종목명"] = ""
     df["종목명"] = df["종목명"].fillna("").astype(str).str.strip()
 
+    # 수량은 있으면 받고 없으면 비웁니다 — 주문 계산은 금액으로만 합니다.
+    if "수량" in df.columns:
+        df["수량"] = pd.to_numeric(
+            df["수량"].astype(str).str.replace(r"[^\d.\-]", "", regex=True),
+            errors="coerce")
+    else:
+        df["수량"] = np.nan
+
     df = df[(df["종목코드"].str.len() == 6) & (df["종목코드"] != "000000")]
     df = df[df["평가금액"] > 0].drop_duplicates("종목코드")
-    return df[["종목코드", "평가금액", "종목명"]].reset_index(drop=True)
+    return df[["종목코드", "평가금액", "종목명", "수량"]].reset_index(drop=True)
 
 
 def seed(holdings, *, tranches: int = 4, today: date | None = None,
@@ -1136,6 +1149,11 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
 
     have = dict(zip(got["종목코드"], got["평가금액"]))
     names = dict(zip(got["종목코드"], got["종목명"]))
+    # 수량 — 주문 계산에는 쓰지 않습니다. 평가금액÷종가로 주식수를 되살리는
+    # 건 종가 기준일이 하루만 어긋나도 틀어지므로, 보유 화면에 이미 있는
+    # 숫자를 그대로 받아 둡니다. 일별 평가액과 교차검증에 씁니다.
+    qty = {c: (float(q) if pd.notna(q) else np.nan)
+           for c, q in zip(got["종목코드"], got.get("수량", pd.Series(dtype=float)))}
 
     st = state.copy()
     # 미매수(기준금액 0 — 분할 진입에서 '배정만 했고 아직 안 산' 종목)는
@@ -1169,6 +1187,7 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
 
     st["종목명"] = st.apply(
         lambda r: names.get(r["종목코드"]) or r.get("종목명") or "", axis=1)
+    st["수량"] = st["종목코드"].map(qty)
     st["편입일"] = pd.to_datetime(st["편입일"])
     store.write(table, st)
 
@@ -1185,14 +1204,17 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     store.upsert(HOLDINGS_LOG, pd.DataFrame([
         {"기준일": pd.Timestamp(today),
          "계좌": "alt" if capital_table.endswith("_alt") else "main",
-         "종목코드": c, "종목명": names.get(c, ""), "평가금액": float(v)}
+         "종목코드": c, "종목명": names.get(c, ""), "평가금액": float(v),
+         "수량": qty.get(c, np.nan)}
         for c, v in have.items()]))
 
     by = st.groupby("등분")["기준금액"].sum()
     log.info("재동기화 — 보유 %d종목 평가액 %.0f · 현금 %.0f · 총자본 %.0f",
              len(st), 평가액, 현금, 총자본)
     _pend = int((pd.to_numeric(st["기준금액"], errors="coerce") == 0).sum())
+    _qty = int(pd.to_numeric(st["수량"], errors="coerce").notna().sum())
     return {"보유종목수": int(len(st) - _pend), "미매수유지": _pend,
+            "수량있는종목": _qty,
             "평가액": 평가액, "현금": 현금,
             "총자본": 총자본, "종목당배정액": 총자본 / 100,
             "사라진종목": gone, "새로들어온종목": extra,

@@ -1004,6 +1004,54 @@ for name, want in NAME_CASES.items():
     got = _ia._parse_name(name)
     check(got == want, f"파일 이름 해석 {name} → {got}")
 
+# ── 보유 수량 받기 (주문 계산은 그대로 금액 기준) ──────────────
+print("\n[보유 수량]")
+QTY_CASES = {
+    "수량 칸": ("종목코드,평가금액,종목명,수량\n005930,520000,삼성전자,8\n", 8),
+    "순서 뒤바뀜": ("종목명,수량,종목코드,평가금액\n삼성전자,8,005930,520000\n", 8),
+    "보유수량 이름": ("종목코드\t보유수량\t평가금액\t종목명\n"
+                 "005930\t8\t520000\t삼성전자\n", 8),
+    "'8주' 표기": ("종목코드,평가금액,수량\n005930,520000,8주\n", 8),
+    "수량 칸 없음": ("종목코드,평가금액,종목명\n005930,520000,삼성전자\n", None),
+}
+for label, (txt, want) in QTY_CASES.items():
+    got = portfolio.parse_holdings(txt)
+    q = got.iloc[0]["수량"]
+    ok = (pd.isna(q) if want is None else abs(float(q) - want) < 1e-9)
+    check(ok, f"{label} — 수량 {('없음' if pd.isna(q) else q)} (기대 {want})")
+
+ST7 = "kor_portfolio_qty_test"
+CT7 = "kor_capital_alt"
+store.write(CT7, pd.DataFrame(columns=list(store.SCHEMAS[CT7])))
+store.write("kor_holdings_log",
+            pd.DataFrame(columns=list(store.SCHEMAS["kor_holdings_log"])))
+store.write(ST7, pd.DataFrame([
+    {"종목코드": "005930", "등분": 0, "편입일": pd.Timestamp("2026-10-07"),
+     "기준금액": 500_000.0, "수량": np.nan, "종목명": "삼성전자", "섹터": "IT"},
+    {"종목코드": "000660", "등분": 1, "편입일": pd.Timestamp("2026-10-07"),
+     "기준금액": 300_000.0, "수량": np.nan, "종목명": "하이닉스", "섹터": "IT"}]))
+_txt = ("종목코드,평가금액,종목명,수량\n005930,520000,삼성전자,8\n"
+        "000660,310000,하이닉스,2\n예수금,412000,,\n")
+_rest, _cash = portfolio.extract_cash(_txt)
+r7 = portfolio.resync(_rest, cash=_cash, tranches=TR, today=date(2026, 10, 16),
+                      table=ST7, capital_table=CT7)
+check(r7["수량있는종목"] == 2, f"재동기화가 수량을 저장 ({r7['수량있는종목']}종목)")
+st7 = portfolio.load_state(ST7)
+check(float(st7.set_index("종목코드").at["005930", "수량"]) == 8,
+      "종목별 수량이 상태에 들어감")
+check(abs(r7["총자본"] - 1_242_000) < 1,
+      f"총자본은 금액 기준 그대로 ({r7['총자본']:,.0f})")
+hl7 = store.read("kor_holdings_log")
+check(len(hl7) == 2 and float(pd.to_numeric(hl7["수량"]).sum()) == 10,
+      f"보유 기록에도 수량이 남음 (합 {pd.to_numeric(hl7['수량']).sum():.0f}주)")
+# 수량이 없어도 예전처럼 동작해야 합니다
+r7b = portfolio.resync("종목코드,평가금액,종목명\n005930,520000,삼성전자\n"
+                       "000660,310000,하이닉스\n",
+                       cash=0, tranches=TR, today=date(2026, 10, 23),
+                       table=ST7, capital_table=CT7)
+check(r7b["수량있는종목"] == 0 and r7b["보유종목수"] == 2,
+      "수량 칸이 없어도 금액만으로 정상 동작")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:

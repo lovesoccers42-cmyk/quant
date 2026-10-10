@@ -92,9 +92,11 @@ SCHEMAS: dict[str, dict[str, str]] = {
     # 되살리는 기준점이 되고, 계획과 실제가 얼마나 벌어졌는지도 여기서 봅니다.
     "kor_holdings_log": {"기준일": "TIMESTAMP", "계좌": "VARCHAR",
                          "종목코드": "VARCHAR", "종목명": "VARCHAR",
-                         "평가금액": "DOUBLE"},
+                         "평가금액": "DOUBLE", "수량": "DOUBLE"},
+    # 수량은 주문 계산에 쓰지 않습니다(금액으로 돕니다). 일별 평가액과
+    # 주식수 교차검증용으로 재동기화 때 받아 둡니다 — 없으면 비어 있습니다.
     "kor_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
-                      "기준금액": "DOUBLE",
+                      "기준금액": "DOUBLE", "수량": "DOUBLE",
                       "종목명": "VARCHAR", "섹터": "VARCHAR"},
     "global_ticker": {"Name": "VARCHAR", "Symbol": "VARCHAR", "Exchange": "VARCHAR",
                       "Sector": "VARCHAR", "Market Cap": "DOUBLE",
