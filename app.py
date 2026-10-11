@@ -282,16 +282,48 @@ def state_parquet(name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=1800, show_spinner="주가를 받고 있습니다…")
-def big_parquet(asset: str) -> pd.DataFrame:
-    """주가처럼 큰 공개 자산 — 캐시를 길게 둡니다(매번 받으면 느립니다)."""
-    blob = download_asset(asset)
-    if not blob:
+@st.cache_data(ttl=1800, show_spinner=False)
+def asset_bytes(asset: str) -> bytes:
+    """큰 공개 자산의 원본 바이트 — 캐시를 길게 둡니다(35MB를 매번 받으면 느립니다)."""
+    return download_asset(asset) or b""
+
+
+@st.cache_data(ttl=1800, show_spinner="데이터를 읽고 있습니다…")
+def parquet_slice(asset: str, columns: tuple | None = None,
+                  filters: tuple | None = None) -> pd.DataFrame:
+    """필요한 칸·줄만 읽습니다. **전체를 읽으면 앱이 메모리로 죽습니다.**
+
+    실측 (Streamlit Community Cloud는 1GB 남짓):
+        kor_price  전체 327MB → 날짜 3칸·최근 구간만 몇 MB
+        kor_ticker 전체 581MB → 4칸·마지막 기준일만 0.2MB
+        kor_sector 전체 438MB → 3칸·마지막 기준일만 0.4MB
+    pandas.read_parquet로 통째로 읽으면 주가+종목표만 900MB가 되어 컨테이너가
+    죽습니다('Oh no. Error running app.'). 그래서 pyarrow로 걸러 읽습니다.
+    """
+    raw = asset_bytes(asset)
+    if not raw:
         return pd.DataFrame()
     try:
-        return pd.read_parquet(io.BytesIO(blob))
+        import pyarrow.parquet as pq
+        tb = pq.read_table(
+            io.BytesIO(raw),
+            columns=list(columns) if columns else None,
+            filters=[list(f) for f in filters] if filters else None)
+        return tb.to_pandas()
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def latest_rows(asset: str, columns: tuple,
+                asof_col: str = "기준일") -> pd.DataFrame:
+    """기준일이 가장 최근인 줄만. 날짜 칸만 먼저 읽어 최댓값을 찾습니다 —
+    칸을 다 읽고 거르면 그 순간의 메모리가 이미 수백 MB입니다."""
+    only_date = parquet_slice(asset, (asof_col,))
+    if only_date.empty:
+        return pd.DataFrame()
+    mx = pd.to_datetime(only_date[asof_col]).max()
+    return parquet_slice(asset, columns, ((asof_col, "=", mx),))
 
 
 # ── 헤더 + 시장 선택 ─────────────────────────────────────────
@@ -539,12 +571,14 @@ def bench_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
     받는 이유도 그것입니다(DataFrame을 넘기면 캐시가 안 걸립니다).
     """
     import perf
-    price = big_parquet("kor_price.parquet")
-    ticker = big_parquet("kor_ticker.parquet")
-    if price.empty or ticker.empty:
-        return pd.DataFrame()
     start = pd.Timestamp(start_iso)
-    window = price[pd.to_datetime(price["날짜"]) >= start - pd.Timedelta(days=10)]
+    window = parquet_slice(
+        "kor_price.parquet", ("날짜", "종목코드", "종가"),
+        (("날짜", ">=", start - pd.Timedelta(days=10)),))
+    ticker = latest_rows("kor_ticker.parquet",
+                         ("종목코드", "시가총액", "종가", "기준일"))
+    if window.empty or ticker.empty:
+        return pd.DataFrame()
     return perf.index_benchmark(perf.price_pivot(window),
                                 perf.shares_outstanding(ticker),
                                 start=start, end=pd.Timestamp(end_iso))
@@ -592,7 +626,16 @@ with tab_perf:
             if not trades.empty:
                 codes |= set(trades["종목코드"].astype(str).str.zfill(6))
 
-            price = big_parquet("kor_price.parquet")
+            # 측정 시작보다 10일 앞에서부터만 읽습니다 — 전체를 읽으면
+            # 327MB가 올라와 앱이 죽습니다.
+            first = pd.Timestamp("2000-01-01")
+            if not hlog.empty:
+                first = pd.to_datetime(hlog["기준일"]).min()
+            elif not trades.empty:
+                first = pd.to_datetime(trades["기준일"]).min()
+            price = parquet_slice(
+                "kor_price.parquet", ("날짜", "종목코드", "종가"),
+                (("날짜", ">=", first - pd.Timedelta(days=10)),))
             if price.empty:
                 # 탭 안에서 st.stop()을 쓰면 앱 전체가 멈춰 다른 탭까지
                 # 빈 화면이 됩니다. 경고만 띄우고 아래는 빈 표로 흘립니다
@@ -741,14 +784,11 @@ with tab_perf:
             st.caption("수익률보다 이게 먼저입니다. 종목 수가 줄거나 한 섹터로 "
                        "쏠리면, 수익률이 좋아도 백테스트가 보장한 성질이 "
                        "사라진 상태입니다.")
-            sector = load_model("kor_sector.parquet")
-            smap = {}
-            if not sector.empty:
-                s = sector
-                if "기준일" in s.columns:
-                    s = s[s["기준일"] == s["기준일"].max()]
-                smap = dict(zip(s["CMP_CD"].astype(str).str.zfill(6),
-                                s["SEC_NM_KOR"].astype(str)))
+            sector = latest_rows("kor_sector.parquet",
+                                 ("CMP_CD", "SEC_NM_KOR", "기준일"))
+            smap = ({} if sector.empty else
+                    dict(zip(sector["CMP_CD"].astype(str).str.zfill(6),
+                             sector["SEC_NM_KOR"].astype(str))))
             rc = perf.rule_check(pstate, trades, acct, sector_map=smap)
 
             r1, r2, r3 = st.columns(3)

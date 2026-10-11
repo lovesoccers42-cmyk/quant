@@ -1,6 +1,7 @@
 # 대시보드 (Streamlit Community Cloud) — 수집 라이브러리 불필요
 streamlit>=1.35
 pandas>=2.0
+numpy>=1.26
 pyarrow>=14
 requests
 altair>=5
