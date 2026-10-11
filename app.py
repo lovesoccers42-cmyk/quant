@@ -696,11 +696,35 @@ def series_colors() -> tuple[str, str]:
     return ("#3987e5", "#d95926") if dark else ("#2a78d6", "#eb6834")
 
 
-# ── 성과 (실제 계좌) ─────────────────────────────────────────
+# ── 성과 (실제 계좌 — 두 계좌를 한 화면에) ───────────────────
+# 계좌를 라디오로 전환하면 두 계좌를 나란히 못 봅니다. 비교가 목적이니
+# 한 화면에 같이 올리고, 금액이 큰 표만 계좌 열로 묶습니다.
+#
+# 선 색 — 검증된 3색(이 레포의 series_colors와 같은 팔레트의 1·2·3번 슬롯):
+#   상수 파랑 / 배우자 청록 / 지수 주황.
+# validate_palette.js 로 밝은·어두운 테마 모두 전 조합 통과(최악 CVD ΔE 9.2
+# 밝은 / 9.4 어두운, 일반시야 24.0 / 20.9). 밝은 테마에서 청록의 명암비가
+# 2.74:1로 3:1 아래라 **범례와 숫자 표를 반드시 함께** 둡니다(색만으로
+# 구분되지 않게) — 아래 요약 표가 그 역할을 합니다.
+def series_trio() -> dict:
+    try:
+        dark = st.get_option("theme.base") == "dark"
+    except Exception:
+        dark = False
+    return ({"상수": "#3987e5", "배우자": "#199e70", "지수": "#d95926"} if dark
+            else {"상수": "#2a78d6", "배우자": "#1baf7a", "지수": "#eb6834"})
+
+
+def _won(v) -> str:
+    return f"{v:,.0f}원" if v is not None and pd.notna(v) else "–"
+
+
+def _pct(v, p: int = 2) -> str:
+    return f"{v * 100:+.{p}f}%" if v is not None and pd.notna(v) else "–"
+
+
 with tab_perf:
-    if M["key"] != "kr":
-        st.info("성과 탭은 한국 계좌만 운용 중입니다.")
-    elif not (STATE_REPO and STATE_TOKEN):
+    if not (STATE_REPO and STATE_TOKEN):
         st.warning("비공개 상태 레포 설정이 없습니다. Streamlit → Settings → "
                    "Secrets 에 아래 두 줄을 넣어주세요.")
         st.code('STATE_REPO = "아이디/quant-state"\n'
@@ -711,206 +735,244 @@ with tab_perf:
     else:
         import perf
 
-        acct_label = st.radio("계좌", list(ACCOUNTS.keys()), horizontal=True)
-        acct = ACCOUNTS[acct_label]
+        LBL = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
+        RS = {a: account_perf(a) for a in ACCOUNTS.values()}
 
-        # 맨 위 요약과 같은 함수를 씁니다 — 따로 계산하면 한 화면에 서로
-        # 다른 수익률이 뜹니다.
-        R = account_perf(acct)
-        trades, hlog = R.get("trades", pd.DataFrame()), R.get("hlog", pd.DataFrame())
-        pstate, cap = R.get("pstate", pd.DataFrame()), R.get("cap", pd.DataFrame())
-        px_my = R.get("px", pd.DataFrame())
-        pos, value, tw = (R.get("pos", pd.DataFrame()),
-                          R.get("value", pd.Series(dtype=float)),
-                          R.get("tw", pd.DataFrame()))
-
-        if R["이유"] == "기록없음":
+        if all(r["이유"] == "기록없음" for r in RS.values()):
             st.info("아직 측정할 기록이 없습니다. 금요일 저녁에 체결내역과 "
                     "보유목록 CSV를 올려 **데이터 관리**를 한 번 돌리면 "
                     "여기에 쌓입니다.")
         else:
-            if R["이유"] == "주가없음":
-                # 탭 안에서 st.stop()을 쓰면 앱 전체가 멈춰 다른 탭까지
-                # 빈 화면이 됩니다. 경고만 띄우고 아래는 빈 표로 흘립니다
-                # (perf의 모든 함수가 빈 입력을 처리합니다).
-                st.error("주가 데이터를 받지 못했습니다 — 공개 릴리스의 "
-                         "kor_price.parquet을 확인하세요.")
+            for a, r in RS.items():
+                if r["이유"] == "주가없음":
+                    st.error(f"{LBL[a]} — 주가 데이터를 받지 못했습니다. "
+                             "공개 릴리스의 kor_price.parquet을 확인하세요.")
 
-            # ── 요약 ──────────────────────────────────────────
-            if pos.empty:
-                st.info(f"{acct_label} 계좌의 보유 기록이 아직 없습니다. "
-                        "금요일 저녁에 보유목록 CSV를 올려 **데이터 관리**를 "
-                        "돌리면 그 날짜부터 측정이 시작됩니다.")
-            elif tw.empty or len(tw) < 2:
-                st.info(f"보유 기록이 {len(pos)}점뿐이라 수익률을 계산할 수 "
-                        "없습니다 — 수익률은 두 시점 사이의 변화이니 재동기화가 "
-                        "두 번은 있어야 합니다. 다음 주 갱신부터 곡선이 "
-                        "그려집니다.")
+            # 종목별 손익·규칙 준수를 미리 계산해 요약 표에 같이 올립니다
+            PNL, RC = {}, {}
+            sector = latest_rows("kor_sector.parquet",
+                                 ("CMP_CD", "SEC_NM_KOR", "기준일"))
+            smap = ({} if sector.empty else
+                    dict(zip(sector["CMP_CD"].astype(str).str.zfill(6),
+                             sector["SEC_NM_KOR"].astype(str))))
+            for a, r in RS.items():
+                PNL[a] = perf.position_pnl(r.get("trades", pd.DataFrame()),
+                                           r.get("hlog", pd.DataFrame()),
+                                           r.get("px", pd.DataFrame()), a)
+                RC[a] = perf.rule_check(r.get("pstate", pd.DataFrame()),
+                                        r.get("trades", pd.DataFrame()), a,
+                                        sector_map=smap)
+
+            # ── 1. 요약 — 한 표에 두 계좌 ─────────────────────
+            st.subheader("한눈에")
+            items: list[tuple] = []
+
+            def row(name, fn):
+                items.append((name, *[fn(a) for a in RS]))
+
+            def _state(a):
+                r = RS[a]
+                return ("측정 중" if r["가능"] else
+                        {"한점": f"재동기화 1회 — 다음 주부터",
+                         "계좌기록없음": "보유 기록 없음",
+                         "기록없음": "기록 없음",
+                         "주가없음": "주가 없음"}.get(r["이유"], "측정 전"))
+
+            row("상태", _state)
+            row("수익률", lambda a: _pct(RS[a].get("수익률")))
+            row("지수 대비", lambda a: (
+                f"{(RS[a]['수익률'] - RS[a]['지수']) * 100:+.2f}%p"
+                if RS[a]["가능"] and RS[a].get("지수") is not None else "–"))
+            row("지수 (시총상위200)", lambda a: _pct(RS[a].get("지수")))
+            row("측정 기간", lambda a: (f"{RS[a]['일수']}일 "
+                                   f"({RS[a]['시작']:%m/%d}~)"
+                                   if RS[a]["가능"] else "–"))
+            row("보유 종목", lambda a: f"{RC[a].get('보유종목수', 0)}종목")
+            row("아직 안 산 종목", lambda a: (f"{RC[a]['미매수']}종목"
+                                       if RC[a].get("미매수") else "없음"))
+            row("목표(100) 대비", lambda a: f"{RC[a].get('종목수편차', 0):+d}종목")
+            row("최대 섹터 비중", lambda a: (
+                f"{RC[a]['최대섹터비중'] * 100:.1f}%"
+                if RC[a].get("최대섹터비중") else "–"))
+            row("합계 손익", lambda a: _won(
+                PNL[a]["손익"].sum() if (len(PNL[a])
+                                       and PNL[a]["손익"].notna().any())
+                else None))
+            row("이긴 종목", lambda a: (
+                f"{int((PNL[a]['손익'] > 0).sum())} / "
+                f"{int(PNL[a]['손익'].notna().sum())}"
+                if len(PNL[a]) and PNL[a]["손익"].notna().any() else "–"))
+            row("원가미상", lambda a: (
+                f"{int((PNL[a]['원가출처'] == '원가미상').sum())}종목"
+                if len(PNL[a]) else "–"))
+            row("원장 미체결", lambda a: (f"{RC[a]['미체결건수']}건"
+                                    if RC[a].get("미체결건수") else "없음"))
+            row("마지막 재동기화", lambda a: (
+                f"{pd.to_datetime(RS[a]['cap'].sort_values('기준일').iloc[-1]['기준일']):%m/%d}"
+                if len(RS[a].get("cap", pd.DataFrame())) else "–"))
+
+            summary = pd.DataFrame(
+                items, columns=["항목"] + [LBL[a] for a in RS]
+            ).set_index("항목")
+            st.dataframe(summary, use_container_width=True)
+
+            asof = next((r["주가기준일"] for r in RS.values()
+                         if r.get("주가기준일") is not None), None)
+            st.caption(
+                (f"주가 {asof:%Y-%m-%d} 종가 기준 · " if asof is not None else "")
+                + "수익률은 입금을 걷어낸 시간가중수익률입니다 — 분할 진입으로 "
+                  "돈을 더 넣어도 그게 수익으로 잡히지 않습니다.")
+
+            thin = [LBL[a] for a, r in RS.items()
+                    if r["가능"] and r["일수"] < 30]
+            if thin:
+                st.warning(f"{', '.join(thin)} 계좌는 측정 기간이 한 달 미만입니다. "
+                           "이 기간의 수익률은 거의 전부 운입니다 — 전략 판단은 "
+                           "아래 **규칙 준수**를 보세요.")
+
+            # ── 2. 곡선 — 두 계좌 + 지수를 한 그래프에 ────────
+            parts = []
+            for a, r in RS.items():
+                if r["가능"]:
+                    tw = r["tw"]
+                    parts.append(pd.DataFrame({
+                        "날짜": tw.index, "구분": LBL[a],
+                        "수익률": (tw["누적"] - 1) * 100}))
+            bench = next((r["bench"] for r in RS.values()
+                          if r["가능"] and not r.get("bench",
+                                                    pd.DataFrame()).empty), None)
+            if bench is not None:
+                parts.append(pd.DataFrame({
+                    "날짜": bench.index, "구분": "지수",
+                    "수익률": (bench["누적"] - 1) * 100}))
+
+            if parts and max(len(p) for p in parts) >= 2:
+                import altair as alt
+                trio = series_trio()
+                long = pd.concat(parts)
+                order = [c for c in ("상수", "배우자", "지수")
+                         if c in set(long["구분"])]
+                ch = (alt.Chart(long)
+                      .mark_line(strokeWidth=2)
+                      .encode(x=alt.X("날짜:T", title=None,
+                                      axis=alt.Axis(grid=False, tickCount=5)),
+                              y=alt.Y("수익률:Q", title="누적 수익률 (%)"),
+                              color=alt.Color("구분:N", title=None,
+                                              sort=order,
+                                              scale=alt.Scale(
+                                                  domain=order,
+                                                  range=[trio[c] for c in order])),
+                              tooltip=["날짜:T", "구분:N",
+                                       alt.Tooltip("수익률:Q", format=".2f")])
+                      .properties(height=260))
+                st.altair_chart(ch, use_container_width=True)
+                st.download_button(
+                    "곡선 데이터 CSV", to_csv(long, excel_safe=False),
+                    file_name=f"curve_{tag}.csv", mime="text/csv")
             else:
-                live, days = R["수익률"], R["일수"]
-                bench, bret = R.get("bench", pd.DataFrame()), R.get("지수")
+                st.info("수익률은 두 시점 사이의 변화이니 재동기화가 두 번은 "
+                        "있어야 곡선이 그려집니다. 다음 주 갱신부터 나옵니다.")
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("누적 수익률", f"{live * 100:+.2f}%",
-                          delta=(f"{(live - bret) * 100:+.2f}%p vs 지수"
-                                 if bret is not None else None))
-                c2.metric("지수 (시총상위200)",
-                          f"{bret * 100:+.2f}%" if bret is not None else "-")
-                c3.metric("측정 기간", f"{days}일",
-                          delta=f"{tw.index[0]:%m/%d} 시작", delta_color="off")
-                st.caption(
-                    "입금을 걷어낸 시간가중수익률입니다 — 분할 진입으로 돈을 "
-                    "더 넣어도 그게 수익으로 잡히지 않습니다. 측정은 첫 "
-                    "재동기화 날부터 시작합니다.")
+            # ── 3. 백테스트 대비 ──────────────────────────────
+            st.subheader("백테스트 대비")
+            btj = load_run("backtest_kr_latest.json")
+            bt_cum = pd.Series((btj or {}).get("curve", {}).get("portfolio")
+                               or [], dtype="float64")
+            gaps = {}
+            for a, r in RS.items():
+                if r["가능"] and len(bt_cum) > 5:
+                    gaps[a] = perf.backtest_percentile(
+                        r["수익률"], bt_cum.pct_change().dropna(),
+                        max(1, min(len(bt_cum) - 2, len(r["tw"]) - 1)))
+            if not any(gaps.values()):
+                st.caption("백테스트 수익률 곡선이 아직 없거나 측정 기간이 짧아 "
+                           "비교할 수 없습니다. 백테스트 탭에서 한 번 돌려두면 "
+                           "다음 주부터 비교합니다.")
+            else:
+                g = pd.DataFrame([
+                    {"항목": "실제 수익률",
+                     **{LBL[a]: _pct(gaps.get(a, {}).get("실제수익률"))
+                        for a in RS}},
+                    {"항목": "백테스트 중앙값",
+                     **{LBL[a]: _pct(gaps.get(a, {}).get("백테스트_중앙값"))
+                        for a in RS}},
+                    {"항목": "정상 범위 (5~95분위)",
+                     **{LBL[a]: (f"{gaps[a]['백테스트_5분위'] * 100:+.1f}% ~ "
+                                 f"{gaps[a]['백테스트_95분위'] * 100:+.1f}%"
+                                 if gaps.get(a) else "–") for a in RS}},
+                    {"항목": "분위",
+                     **{LBL[a]: (f"{gaps[a]['분위'] * 100:.0f}%"
+                                 if gaps.get(a) else "–") for a in RS}},
+                    {"항목": "판정",
+                     **{LBL[a]: (gaps[a]["판정"] if gaps.get(a) else "–")
+                        for a in RS}},
+                ]).set_index("항목")
+                st.dataframe(g, use_container_width=True)
+                n = next((v["표본수"] for v in gaps.values() if v), 0)
+                d = next((v["구간일수"] for v in gaps.values() if v), 0)
+                st.caption(f"백테스트에서 같은 길이({d}일) 구간 수익률 {n:,}개와 "
+                           "비교했습니다. 과거와 현재는 겹치는 기간이 없으니 "
+                           "분포 안의 위치로 봅니다. 5~95분위 안이면 정상입니다.")
 
-                if days < 30:
-                    st.warning(f"측정 {days}일차입니다. 이 기간의 수익률은 "
-                               "거의 전부 운입니다 — 전략 판단은 아래 "
-                               "**규칙 준수**를 보세요.")
-
-                # ── 곡선 ──────────────────────────────────────
-                if len(tw) >= 2:
-                    import altair as alt
-                    port_c, bench_c = series_colors()
-                    parts = [pd.DataFrame({
-                        "날짜": tw.index, "구분": "내 계좌",
-                        "수익률": (tw["누적"] - 1) * 100})]
-                    if not bench.empty:
-                        parts.append(pd.DataFrame({
-                            "날짜": bench.index, "구분": "지수",
-                            "수익률": (bench["누적"] - 1) * 100}))
-                    long = pd.concat(parts)
-                    ch = (alt.Chart(long)
-                          .mark_line(strokeWidth=2)
-                          .encode(x=alt.X("날짜:T", title=None,
-                                          axis=alt.Axis(grid=False,
-                                                        tickCount=5)),
-                                  y=alt.Y("수익률:Q", title="누적 수익률 (%)"),
-                                  color=alt.Color(
-                                      "구분:N", title=None,
-                                      scale=alt.Scale(
-                                          domain=["내 계좌", "지수"],
-                                          range=[port_c, bench_c])),
-                                  tooltip=["날짜:T", "구분:N",
-                                           alt.Tooltip("수익률:Q", format=".2f")])
-                          .properties(height=240))
-                    st.altair_chart(ch, use_container_width=True)
-
-                # ── 백테스트 대비 괴리 ────────────────────────
-                st.subheader("백테스트 대비")
-                btj = load_run("backtest_kr_latest.json")
-                curve = (btj or {}).get("curve") or {}
-                bt_cum = pd.Series(curve.get("portfolio") or [], dtype="float64")
-                if len(bt_cum) > 5:
-                    gap = perf.backtest_percentile(
-                        live, bt_cum.pct_change().dropna(),
-                        max(1, min(len(bt_cum) - 2,
-                                   len(tw) - 1 if len(tw) > 1 else 1)))
-                else:
-                    gap = {}
-                if not gap:
-                    st.caption("백테스트 수익률 곡선이 아직 없거나 측정 기간이 "
-                               "짧아 비교할 수 없습니다. 백테스트 탭에서 한 번 "
-                               "돌려두면 다음 주부터 비교합니다.")
-                else:
-                    g1, g2, g3 = st.columns(3)
-                    g1.metric("실제", f"{gap['실제수익률'] * 100:+.2f}%")
-                    g2.metric("백테스트 중앙값",
-                              f"{gap['백테스트_중앙값'] * 100:+.2f}%")
-                    g3.metric("분위", f"{gap['분위'] * 100:.0f}%")
-                    st.markdown(
-                        f"판정 {badge('정상' if '정상' in gap['판정'] else '주의')} "
-                        f"{gap['판정']}", unsafe_allow_html=True)
-                    st.caption(
-                        f"백테스트에서 같은 길이({gap['구간일수']}일) 구간 "
-                        f"수익률 {gap['표본수']:,}개와 비교했습니다. "
-                        f"5~95분위 안이면 정상 범위입니다 "
-                        f"({gap['백테스트_5분위'] * 100:+.1f}% ~ "
-                        f"{gap['백테스트_95분위'] * 100:+.1f}%). "
-                        "과거와 현재는 같은 기간이 없으니 분포 안의 위치로 "
-                        "봅니다.")
-
-            # ── 종목별 손익 ───────────────────────────────────
+            # ── 4. 종목별 손익 — 두 계좌를 한 표에 ────────────
             st.subheader("종목별 손익")
-            pnl = perf.position_pnl(trades, hlog, px_my, acct)
-            if pnl.empty:
+            frames = []
+            for a in RS:
+                if len(PNL[a]):
+                    f = PNL[a].copy()
+                    f.insert(0, "계좌", LBL[a])
+                    frames.append(f)
+            if not frames:
                 st.caption("보유 기록이 없습니다.")
             else:
-                unknown = int((pnl["원가출처"] == "원가미상").sum())
-                known = pnl[pnl["손익"].notna()]
-                if len(known):
-                    k1, k2, k3 = st.columns(3)
-                    k1.metric("원가 아는 종목", f"{len(known)} / {len(pnl)}")
-                    k2.metric("합계 손익", f"{known['손익'].sum():,.0f}원")
-                    win = int((known["손익"] > 0).sum())
-                    k3.metric("이긴 종목", f"{win} / {len(known)}")
+                allp = pd.concat(frames, ignore_index=True)
+                unknown = int((allp["원가출처"] == "원가미상").sum())
                 if unknown:
                     st.warning(
                         f"{unknown}종목은 **원가미상**입니다 — 원장이 생기기 "
                         "전부터 들고 계신 종목이라 매입단가를 모릅니다. "
-                        "손익을 추정해서 채우지 않고 비워 둡니다. "
-                        f"`holdings_{acct}.csv`에 **매입단가** 칸을 하나 "
-                        "추가해 올리시면 전부 계산됩니다.")
-                show = pnl.copy()
+                        "손익을 추정해 채우지 않고 비워 둡니다. "
+                        "`holdings_main.csv`에 **매입단가** 칸을 하나 추가해 "
+                        "올리시면 전부 계산됩니다.")
+                only = st.checkbox("손익이 계산된 종목만", value=bool(unknown))
+                view = allp[allp["손익"].notna()] if only else allp
+                show = view.sort_values("손익", ascending=False,
+                                        na_position="last").copy()
                 for c in ("평단", "현재가", "평가금액", "손익"):
                     show[c] = show[c].map(
                         lambda v: f"{v:,.0f}" if pd.notna(v) else "–")
                 show["수익률"] = show["수익률"].map(
                     lambda v: f"{v * 100:+.1f}%" if pd.notna(v) else "–")
                 st.dataframe(show, use_container_width=True, hide_index=True)
-                st.download_button("종목별 손익 CSV", to_csv(pnl),
-                                   file_name=f"pnl_{acct}_{tag}.csv",
-                                   mime="text/csv")
+                st.download_button("종목별 손익 CSV", to_csv(allp),
+                                   file_name=f"pnl_{tag}.csv", mime="text/csv")
 
-            # ── 규칙 준수 ─────────────────────────────────────
+            # ── 5. 규칙 준수 ──────────────────────────────────
             st.subheader("규칙 준수")
             st.caption("수익률보다 이게 먼저입니다. 종목 수가 줄거나 한 섹터로 "
                        "쏠리면, 수익률이 좋아도 백테스트가 보장한 성질이 "
                        "사라진 상태입니다.")
-            sector = latest_rows("kor_sector.parquet",
-                                 ("CMP_CD", "SEC_NM_KOR", "기준일"))
-            smap = ({} if sector.empty else
-                    dict(zip(sector["CMP_CD"].astype(str).str.zfill(6),
-                             sector["SEC_NM_KOR"].astype(str))))
-            rc = perf.rule_check(pstate, trades, acct, sector_map=smap)
-
-            r1, r2, r3 = st.columns(3)
-            dev = rc.get("종목수편차", 0)
-            r1.metric("보유 종목", f"{rc.get('보유종목수', 0)}",
-                      delta=(f"미매수 {rc['미매수']}" if rc.get("미매수")
-                             else None), delta_color="off")
-            r2.metric("목표 대비", f"{dev:+d}종목",
-                      delta="정상" if abs(dev) <= 3 else "확인",
-                      delta_color="off")
-            top_sec = rc.get("최대섹터비중")
-            r3.metric("최대 섹터 비중",
-                      f"{top_sec * 100:.1f}%" if top_sec else "-",
-                      delta=("정상" if (top_sec or 0) <= 0.30 else "쏠림"),
-                      delta_color="off")
-
-            if rc.get("등분별종목수"):
-                st.caption(f"등분별 종목 수 {rc['등분별종목수']} · "
-                           f"최대 편차 {rc.get('등분최대편차', 0) * 100:.0f}% "
-                           "(한 등분이 비면 그 주에 거래가 거의 없습니다)")
-            if rc.get("섹터비중"):
-                sw = (pd.Series(rc["섹터비중"]).mul(100).round(1)
-                      .rename("비중(%)").to_frame())
-                st.dataframe(sw, use_container_width=True)
-            if not value.empty:
-                to = perf.turnover(trades, value, acct)
-                if len(to):
-                    st.caption("주별 회전율 " + " · ".join(
-                        f"{d:%m/%d} {v * 100:.0f}%" for d, v in to.items()))
-            if rc.get("미체결건수"):
-                st.caption(f"원장 미체결 {rc['미체결건수']}건 — 주문서에 "
-                           "있었지만 체결되지 않은 건입니다(수익률 계산에서 "
-                           "제외됩니다).")
-
-            if not cap.empty:
-                last = cap.sort_values("기준일").iloc[-1]
-                st.caption(
-                    f"마지막 재동기화 {pd.to_datetime(last['기준일']):%Y-%m-%d} · "
-                    f"자본 기록 {len(cap)}점")
+            cols = st.columns(len(RS))
+            for col, (a, r) in zip(cols, RS.items()):
+                with col:
+                    st.markdown(f"**{LBL[a]}**")
+                    rc = RC[a]
+                    if rc.get("등분별종목수"):
+                        st.caption(f"등분별 종목 수 {rc['등분별종목수']} · "
+                                   f"최대 편차 "
+                                   f"{rc.get('등분최대편차', 0) * 100:.0f}%")
+                    if not r.get("value", pd.Series(dtype=float)).empty:
+                        to = perf.turnover(r.get("trades", pd.DataFrame()),
+                                           r["value"], a)
+                        if len(to):
+                            st.caption("주별 회전율 " + " · ".join(
+                                f"{d:%m/%d} {v * 100:.0f}%"
+                                for d, v in to.items()))
+                    if rc.get("섹터비중"):
+                        st.dataframe(
+                            pd.Series(rc["섹터비중"]).mul(100).round(1)
+                            .rename("비중(%)").to_frame(),
+                            use_container_width=True, height=260)
 
 
 # ── 백테스트 ─────────────────────────────────────────────────
