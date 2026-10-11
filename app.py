@@ -327,7 +327,140 @@ def latest_rows(asset: str, columns: tuple,
 
 
 # ── 헤더 + 시장 선택 ─────────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def bench_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
+    """시총상위200 시총가중 지수 (백테스트와 같은 정의).
+
+    주가 전 종목 피벗이 무거워서 따로 캐시합니다 — 인자를 날짜 문자열로만
+    받는 이유도 그것입니다(DataFrame을 넘기면 캐시가 안 걸립니다).
+    """
+    import perf
+    start = pd.Timestamp(start_iso)
+    window = parquet_slice(
+        "kor_price.parquet", ("날짜", "종목코드", "종가"),
+        (("날짜", ">=", start - pd.Timedelta(days=10)),))
+    ticker = latest_rows("kor_ticker.parquet",
+                         ("종목코드", "시가총액", "종가", "기준일"))
+    if window.empty or ticker.empty:
+        return pd.DataFrame()
+    return perf.index_benchmark(perf.price_pivot(window),
+                                perf.shares_outstanding(ticker),
+                                start=start, end=pd.Timestamp(end_iso))
+
+
+ACCOUNTS = {"상수 (main)": "main", "배우자 (alt)": "alt"}
+
+
+def _suffix(acct: str) -> str:
+    return "" if acct == "main" else f"_{acct}"
+
+
+def account_perf(acct: str) -> dict:
+    """한 계좌의 성과 한 묶음.
+
+    맨 위 요약과 성과 탭이 **같은 함수**를 씁니다 — 두 곳에서 따로 계산하면
+    같은 화면에 다른 수익률이 뜨고, 어느 쪽이 맞는지 알 수 없게 됩니다.
+    무거운 읽기는 모두 캐시되어 있어 여러 번 불러도 비용은 계산뿐입니다.
+    """
+    import perf
+    out: dict = {"계좌": acct, "가능": False, "이유": "설정없음"}
+    if not (STATE_REPO and STATE_TOKEN):
+        return out
+
+    sfx = _suffix(acct)
+    trades = state_parquet("kor_trades.parquet")
+    hlog = state_parquet("kor_holdings_log.parquet")
+    out.update({"trades": trades, "hlog": hlog,
+                "pstate": state_parquet(f"kor_portfolio{sfx}.parquet"),
+                "cap": state_parquet(f"kor_capital{sfx}.parquet")})
+    if hlog.empty and trades.empty:
+        out["이유"] = "기록없음"
+        return out
+
+    codes = set()
+    if not hlog.empty:
+        codes |= set(hlog["종목코드"].astype(str).str.zfill(6))
+    if not trades.empty:
+        codes |= set(trades["종목코드"].astype(str).str.zfill(6))
+
+    # 측정 시작보다 10일 앞에서부터만 읽습니다 — 주가를 통째로 읽으면
+    # 327MB가 올라와 앱이 죽습니다(실측).
+    first = pd.Timestamp("2000-01-01")
+    if not hlog.empty:
+        first = pd.to_datetime(hlog["기준일"]).min()
+    elif not trades.empty:
+        first = pd.to_datetime(trades["기준일"]).min()
+    price = parquet_slice("kor_price.parquet", ("날짜", "종목코드", "종가"),
+                          (("날짜", ">=", first - pd.Timedelta(days=10)),))
+    if price.empty:
+        out["이유"] = "주가없음"
+        return out
+    out["주가기준일"] = pd.to_datetime(price["날짜"]).max()
+
+    px = perf.price_pivot(price, codes)
+    pos = perf.positions_timeline(hlog, acct, px)
+    value = perf.daily_value(pos, px)
+    tw = perf.twr(value, perf.net_flows(trades, acct))
+    out.update({"px": px, "pos": pos, "value": value, "tw": tw})
+
+    if pos.empty:
+        out["이유"] = "계좌기록없음"
+        return out
+    if len(tw) < 2:
+        out["이유"] = "한점"
+        out["스냅샷"] = len(pos)
+        return out
+
+    out["가능"], out["이유"] = True, ""
+    out["수익률"] = float(tw["누적"].iloc[-1] - 1)
+    out["시작"], out["끝"] = tw.index[0], tw.index[-1]
+    out["일수"] = int((tw.index[-1] - tw.index[0]).days)
+    b = bench_curve(f"{tw.index[0]:%Y-%m-%d}", f"{tw.index[-1]:%Y-%m-%d}")
+    out["bench"] = b
+    out["지수"] = float(b["누적"].iloc[-1] - 1) if not b.empty else None
+    return out
+
+
+_WHY = {"설정없음": "설정 전", "기록없음": "기록 전",
+        "계좌기록없음": "측정 전", "한점": "다음 주부터",
+        "주가없음": "주가 없음"}
+
+
+def perf_strip() -> None:
+    """화면 맨 위 — 두 계좌 수익률. 제일 먼저 보고 싶은 숫자입니다."""
+    if not (STATE_REPO and STATE_TOKEN):
+        return
+    rows = [(lab, account_perf(a)) for lab, a in ACCOUNTS.items()]
+    if all(r["이유"] == "기록없음" for _, r in rows):
+        return
+
+    cols = st.columns(len(rows))
+    asof = None
+    for col, (lab, r) in zip(cols, rows):
+        name = lab.split(" (")[0]
+        if r["가능"]:
+            delta = (f"{(r['수익률'] - r['지수']) * 100:+.2f}%p vs 지수"
+                     if r.get("지수") is not None else f"{r['일수']}일")
+            col.metric(name, f"{r['수익률'] * 100:+.2f}%", delta=delta)
+        else:
+            col.metric(name, "–", delta=_WHY.get(r["이유"], "측정 전"),
+                       delta_color="off")
+        asof = r.get("주가기준일") or asof
+
+    done = [r for _, r in rows if r["가능"]]
+    bits = []
+    if asof is not None:
+        bits.append(f"주가 {asof:%m/%d} 종가 기준")
+    if done:
+        bits.append(f"측정 {min(r['시작'] for r in done):%m/%d} 시작")
+        bits.append("입금을 걷어낸 시간가중수익률")
+    bits.append("자세한 내용은 아래 **성과** 탭")
+    st.caption(" · ".join(bits))
+
+
 st.title("📈 퀀트 에이전트")
+
+perf_strip()
 
 _, conn_err = release_assets()
 if conn_err:
@@ -353,8 +486,8 @@ else:
             "아래 **실행** 탭에서 월간 실행을 먼저 한 번 돌려주세요.")
 
 top_label = "🔔 매수 신호" if M["has_signals"] else "🔔 상위 종목"
-tab_top, tab_perf, tab_run, tab_model, tab_bt, tab_log = st.tabs(
-    [top_label, "💰 성과", "▶️ 실행", "📊 모델", "🧪 백테스트", "📜 기록"])
+tab_perf, tab_top, tab_run, tab_model, tab_bt, tab_log = st.tabs(
+    ["💰 성과", top_label, "▶️ 실행", "📊 모델", "🧪 백테스트", "📜 기록"])
 
 SYM, NAME, SEC = M["symbol"], M["name"], M["sector"]
 
@@ -563,35 +696,7 @@ def series_colors() -> tuple[str, str]:
     return ("#3987e5", "#d95926") if dark else ("#2a78d6", "#eb6834")
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def bench_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
-    """시총상위200 시총가중 지수 (백테스트와 같은 정의).
-
-    주가 전 종목 피벗이 무거워서 따로 캐시합니다 — 인자를 날짜 문자열로만
-    받는 이유도 그것입니다(DataFrame을 넘기면 캐시가 안 걸립니다).
-    """
-    import perf
-    start = pd.Timestamp(start_iso)
-    window = parquet_slice(
-        "kor_price.parquet", ("날짜", "종목코드", "종가"),
-        (("날짜", ">=", start - pd.Timedelta(days=10)),))
-    ticker = latest_rows("kor_ticker.parquet",
-                         ("종목코드", "시가총액", "종가", "기준일"))
-    if window.empty or ticker.empty:
-        return pd.DataFrame()
-    return perf.index_benchmark(perf.price_pivot(window),
-                                perf.shares_outstanding(ticker),
-                                start=start, end=pd.Timestamp(end_iso))
-
-
 # ── 성과 (실제 계좌) ─────────────────────────────────────────
-ACCOUNTS = {"상수 (main)": "main", "배우자 (alt)": "alt"}
-
-
-def _suffix(acct: str) -> str:
-    return "" if acct == "main" else f"_{acct}"
-
-
 with tab_perf:
     if M["key"] != "kr":
         st.info("성과 탭은 한국 계좌만 운용 중입니다.")
@@ -608,45 +713,28 @@ with tab_perf:
 
         acct_label = st.radio("계좌", list(ACCOUNTS.keys()), horizontal=True)
         acct = ACCOUNTS[acct_label]
-        sfx = _suffix(acct)
 
-        trades = state_parquet("kor_trades.parquet")
-        hlog = state_parquet("kor_holdings_log.parquet")
-        pstate = state_parquet(f"kor_portfolio{sfx}.parquet")
-        cap = state_parquet(f"kor_capital{sfx}.parquet")
+        # 맨 위 요약과 같은 함수를 씁니다 — 따로 계산하면 한 화면에 서로
+        # 다른 수익률이 뜹니다.
+        R = account_perf(acct)
+        trades, hlog = R.get("trades", pd.DataFrame()), R.get("hlog", pd.DataFrame())
+        pstate, cap = R.get("pstate", pd.DataFrame()), R.get("cap", pd.DataFrame())
+        px_my = R.get("px", pd.DataFrame())
+        pos, value, tw = (R.get("pos", pd.DataFrame()),
+                          R.get("value", pd.Series(dtype=float)),
+                          R.get("tw", pd.DataFrame()))
 
-        if hlog.empty and trades.empty:
+        if R["이유"] == "기록없음":
             st.info("아직 측정할 기록이 없습니다. 금요일 저녁에 체결내역과 "
                     "보유목록 CSV를 올려 **데이터 관리**를 한 번 돌리면 "
                     "여기에 쌓입니다.")
         else:
-            codes = set()
-            if not hlog.empty:
-                codes |= set(hlog["종목코드"].astype(str).str.zfill(6))
-            if not trades.empty:
-                codes |= set(trades["종목코드"].astype(str).str.zfill(6))
-
-            # 측정 시작보다 10일 앞에서부터만 읽습니다 — 전체를 읽으면
-            # 327MB가 올라와 앱이 죽습니다.
-            first = pd.Timestamp("2000-01-01")
-            if not hlog.empty:
-                first = pd.to_datetime(hlog["기준일"]).min()
-            elif not trades.empty:
-                first = pd.to_datetime(trades["기준일"]).min()
-            price = parquet_slice(
-                "kor_price.parquet", ("날짜", "종목코드", "종가"),
-                (("날짜", ">=", first - pd.Timedelta(days=10)),))
-            if price.empty:
+            if R["이유"] == "주가없음":
                 # 탭 안에서 st.stop()을 쓰면 앱 전체가 멈춰 다른 탭까지
                 # 빈 화면이 됩니다. 경고만 띄우고 아래는 빈 표로 흘립니다
                 # (perf의 모든 함수가 빈 입력을 처리합니다).
                 st.error("주가 데이터를 받지 못했습니다 — 공개 릴리스의 "
                          "kor_price.parquet을 확인하세요.")
-            px_my = perf.price_pivot(price, codes)
-            pos = perf.positions_timeline(hlog, acct, px_my)
-            value = perf.daily_value(pos, px_my)
-            flows = perf.net_flows(trades, acct)
-            tw = perf.twr(value, flows)
 
             # ── 요약 ──────────────────────────────────────────
             if pos.empty:
@@ -659,13 +747,8 @@ with tab_perf:
                         "두 번은 있어야 합니다. 다음 주 갱신부터 곡선이 "
                         "그려집니다.")
             else:
-                live = float(tw["누적"].iloc[-1] - 1)
-                days = (tw.index[-1] - tw.index[0]).days
-
-                bench = bench_curve(f"{tw.index[0]:%Y-%m-%d}",
-                                    f"{tw.index[-1]:%Y-%m-%d}")
-                bret = (float(bench["누적"].iloc[-1] - 1)
-                        if not bench.empty else None)
+                live, days = R["수익률"], R["일수"]
+                bench, bret = R.get("bench", pd.DataFrame()), R.get("지수")
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("누적 수익률", f"{live * 100:+.2f}%",

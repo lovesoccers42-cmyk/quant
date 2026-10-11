@@ -88,6 +88,19 @@ jobs:
           # (파일명 패턴에 의존하면 이름을 바꿀 때마다 조용히 누락된다)
           files=(data/kor_*.parquet output/*)
 
+          # 금액이 들어 있는 파일은 절대 공개 릴리스에 올리지 않습니다.
+          # 이 워크플로는 내려받지도 않으므로 보통은 data/에 없지만, 패턴으로
+          # 쓸어 담는 구조라 한 번 섞이면 조용히 공개됩니다. 이름으로 막습니다.
+          BLOCK='kor_portfolio|kor_capital|kor_trades|kor_holdings_log|weekly_kr|weekly-main|weekly-alt'
+          keep=()
+          for f in "${files[@]}"; do
+            if printf '%s' "$(basename "$f")" | grep -Eq "^($BLOCK)"; then
+              echo "::notice::비공개 파일이라 올리지 않습니다 - $f"
+            else
+              keep+=("$f")
+            fi
+          done
+          files=("${keep[@]}")
           echo "--- 올릴 파일 ${#files[@]}개 ---"
           for f in "${files[@]}"; do echo "  $f"; done
           if [ ${#files[@]} -eq 0 ]; then
