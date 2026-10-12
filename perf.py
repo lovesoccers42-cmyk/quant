@@ -289,6 +289,31 @@ def position_pnl(trades: pd.DataFrame, holdings_log: pd.DataFrame,
     return out.sort_values("손익", ascending=False, na_position="last")
 
 
+def cost_basis_return(pnl: pd.DataFrame) -> dict:
+    """평단 기준 수익률 = 합계 손익 ÷ 합계 투자원금.
+
+    왜 이것도 필요한가: 시간가중수익률(TWR)은 **거래일 두 개**가 있어야
+    나옵니다. 첫 주에는 재동기화가 한 번뿐이라 아무 숫자도 못 보여주는데,
+    평단과 현재가는 첫날부터 있으니 이건 바로 계산됩니다. 주가가 갱신될
+    때마다 매일 바뀝니다.
+
+    TWR과 다른 측정입니다 — 입금 시점을 고려하지 않고 '산 값 대비 지금'만
+    봅니다. 그래서 화면에서 둘을 섞지 않고 어느 쪽인지 밝혀 적습니다.
+    원가를 모르는 종목은 분모·분자 모두에서 빠집니다.
+    """
+    if pnl is None or pnl.empty or "손익" not in pnl.columns:
+        return {}
+    ok = pnl[pnl["손익"].notna()]
+    if ok.empty:
+        return {}
+    원금 = float((ok["평단"] * ok["수량"]).sum())
+    손익 = float(ok["손익"].sum())
+    if 원금 <= 0:
+        return {}
+    return {"원금": 원금, "손익": 손익, "수익률": 손익 / 원금,
+            "종목수": int(len(ok)), "이긴종목": int((ok["손익"] > 0).sum())}
+
+
 # ── 규칙 준수 ───────────────────────────────────────────────────────
 def rule_check(state: pd.DataFrame, trades: pd.DataFrame, account: str, *,
                sector_map: dict | None = None, n_target: int = 100,

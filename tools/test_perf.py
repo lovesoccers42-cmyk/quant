@@ -149,6 +149,22 @@ row = pnl2[pnl2["종목코드"] == "000200"].iloc[0]
 check(row["원가출처"] == "입력" and abs(row["손익"] - 1000 * 50) < 1,
       f"매입단가를 넣어주면 손익이 나옴 ({row['손익']:,.0f}원)")
 
+print("\n[평단 기준 수익률 — 첫 주에도 숫자가 나와야 한다]")
+cb = perf.cost_basis_return(pnl)
+# pnl: 000100 100주 평단 10,000 → 현재가 ramp[-1]; 000200은 원가미상
+exp_cost = 10000 * 100
+exp_pl = (ramp[-1] - 10000) * 100
+check(cb and abs(cb["원금"] - exp_cost) < 1 and abs(cb["손익"] - exp_pl) < 1,
+      f"원가 아는 종목만으로 계산 (원금 {cb.get('원금', 0):,.0f} · "
+      f"손익 {cb.get('손익', 0):,.0f})")
+check(abs(cb["수익률"] - exp_pl / exp_cost) < 1e-9,
+      f"평단 기준 수익률 {cb['수익률']:+.2%}")
+check(perf.cost_basis_return(pd.DataFrame()) == {},
+      "보유가 없으면 빈 결과")
+_nocost = pnl[pnl["원가출처"] == "원가미상"]
+check(perf.cost_basis_return(_nocost) == {},
+      "원가를 전부 모르면 빈 결과 — 0%로 속이지 않음")
+
 print("\n[지수 벤치마크]")
 # 시총 큰 종목이 +20%, 작은 종목이 -20%. 시총가중이면 결과는 +20%에 가깝고,
 # 동일가중으로 떨어졌다면 0%에 가깝습니다.

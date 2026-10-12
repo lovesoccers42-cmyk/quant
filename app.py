@@ -403,6 +403,12 @@ def account_perf(acct: str) -> dict:
     tw = perf.twr(value, perf.net_flows(trades, acct))
     out.update({"px": px, "pos": pos, "value": value, "tw": tw})
 
+    # 평단 기준 수익률 — TWR은 거래일이 둘 있어야 나오지만 이건 첫날부터
+    # 나오고 주가가 갱신될 때마다 바뀝니다. 첫 주에 화면이 '–'만 띄우면
+    # 갱신이 되는지 안 되는지 알 수가 없습니다.
+    out["pnl"] = perf.position_pnl(trades, hlog, px, acct)
+    out["평단"] = perf.cost_basis_return(out["pnl"])
+
     if pos.empty:
         out["이유"] = "계좌기록없음"
         return out
@@ -438,10 +444,16 @@ def perf_strip() -> None:
     asof = None
     for col, (lab, r) in zip(cols, rows):
         name = lab.split(" (")[0]
+        cb = r.get("평단") or {}
         if r["가능"]:
             delta = (f"{(r['수익률'] - r['지수']) * 100:+.2f}%p vs 지수"
                      if r.get("지수") is not None else f"{r['일수']}일")
             col.metric(name, f"{r['수익률'] * 100:+.2f}%", delta=delta)
+        elif cb:
+            # 시간가중수익률은 아직 못 내지만 평단 기준은 낼 수 있습니다.
+            # 어느 측정인지 반드시 밝혀 적습니다 — 섞으면 안 됩니다.
+            col.metric(name, f"{cb['수익률'] * 100:+.2f}%",
+                       delta="평단 기준", delta_color="off")
         else:
             col.metric(name, "–", delta=_WHY.get(r["이유"], "측정 전"),
                        delta_color="off")
@@ -450,12 +462,24 @@ def perf_strip() -> None:
     done = [r for _, r in rows if r["가능"]]
     bits = []
     if asof is not None:
-        bits.append(f"주가 {asof:%m/%d} 종가 기준")
+        bits.append(f"**주가 {asof:%m/%d} 종가** 기준")
     if done:
         bits.append(f"측정 {min(r['시작'] for r in done):%m/%d} 시작")
         bits.append("입금을 걷어낸 시간가중수익률")
+    elif any(r.get("평단") for _, r in rows):
+        bits.append("평단 기준 (시간가중수익률은 거래일 2개부터)")
     bits.append("자세한 내용은 아래 **성과** 탭")
     st.caption(" · ".join(bits))
+    # 왜 오늘 숫자가 안 바뀌었는지를 화면에서 바로 알 수 있게 — 일간 실행은
+    # GitHub가 예약을 6~9시간 미뤄서(실측) 밤 11시~자정에 끝납니다.
+    if asof is not None:
+        stale = (pd.Timestamp.now(tz="Asia/Seoul").normalize().tz_localize(None)
+                 - pd.Timestamp(asof).normalize()).days
+        if stale >= 1:
+            st.caption(
+                f"↑ 마지막 종가가 {stale}일 전입니다. 평일 종가는 **그날 밤 "
+                "11시~자정(KST)** 에 올라옵니다 — GitHub가 예약 실행을 "
+                "6~9시간 미루기 때문입니다. 주말·휴장일은 갱신이 없습니다.")
 
 
 st.title("📈 퀀트 에이전트")
@@ -756,9 +780,7 @@ with tab_perf:
                     dict(zip(sector["CMP_CD"].astype(str).str.zfill(6),
                              sector["SEC_NM_KOR"].astype(str))))
             for a, r in RS.items():
-                PNL[a] = perf.position_pnl(r.get("trades", pd.DataFrame()),
-                                           r.get("hlog", pd.DataFrame()),
-                                           r.get("px", pd.DataFrame()), a)
+                PNL[a] = r.get("pnl", pd.DataFrame())
                 RC[a] = perf.rule_check(r.get("pstate", pd.DataFrame()),
                                         r.get("trades", pd.DataFrame()), a,
                                         sector_map=smap)
@@ -779,7 +801,9 @@ with tab_perf:
                          "주가없음": "주가 없음"}.get(r["이유"], "측정 전"))
 
             row("상태", _state)
-            row("수익률", lambda a: _pct(RS[a].get("수익률")))
+            row("수익률 (시간가중)", lambda a: _pct(RS[a].get("수익률")))
+            row("수익률 (평단 기준)",
+                lambda a: _pct((RS[a].get("평단") or {}).get("수익률")))
             row("지수 대비", lambda a: (
                 f"{(RS[a]['수익률'] - RS[a]['지수']) * 100:+.2f}%p"
                 if RS[a]["가능"] and RS[a].get("지수") is not None else "–"))
