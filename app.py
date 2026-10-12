@@ -78,6 +78,34 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+
+def fresh_perf():
+    """perf 모듈을 **파일이 바뀌면 다시 읽어서** 돌려줍니다.
+
+    왜 필요한가 (실측): Streamlit Community Cloud는 push를 받으면 메인
+    스크립트(app.py)만 다시 실행하고, import된 모듈은 sys.modules에 남아 있는
+    **옛 버전을 그대로** 씁니다. 그래서 perf.py에 함수를 추가해 올리면
+    app.py는 새 코드인데 perf는 옛 코드라
+        AttributeError: module 'perf' has no attribute 'cost_basis_return'
+    가 납니다. Manage app > Reboot을 누르면 풀리지만, 고칠 때마다 그걸
+    기억해야 하는 건 함정입니다. 파일 수정 시각이 바뀌면 여기서 다시 읽습니다.
+    """
+    import importlib
+    import os
+    import perf as _p
+    try:
+        mt = os.path.getmtime(_p.__file__)
+    except Exception:
+        return _p
+    if st.session_state.get("_perf_mtime") != mt:
+        try:
+            _p = importlib.reload(_p)
+        except Exception:
+            pass
+        st.session_state["_perf_mtime"] = mt
+    return _p
+
+
 def cfg(key: str, default: str = "") -> str:
     try:
         return str(st.secrets[key])
@@ -334,7 +362,7 @@ def bench_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
     주가 전 종목 피벗이 무거워서 따로 캐시합니다 — 인자를 날짜 문자열로만
     받는 이유도 그것입니다(DataFrame을 넘기면 캐시가 안 걸립니다).
     """
-    import perf
+    perf = fresh_perf()
     start = pd.Timestamp(start_iso)
     window = parquet_slice(
         "kor_price.parquet", ("날짜", "종목코드", "종가"),
@@ -362,7 +390,7 @@ def account_perf(acct: str) -> dict:
     같은 화면에 다른 수익률이 뜨고, 어느 쪽이 맞는지 알 수 없게 됩니다.
     무거운 읽기는 모두 캐시되어 있어 여러 번 불러도 비용은 계산뿐입니다.
     """
-    import perf
+    perf = fresh_perf()
     out: dict = {"계좌": acct, "가능": False, "이유": "설정없음"}
     if not (STATE_REPO and STATE_TOKEN):
         return out
@@ -757,7 +785,7 @@ with tab_perf:
         st.caption("평가액·체결가가 들어 있는 파일이라 공개 릴리스에 올리지 "
                    "않습니다. 그래서 이 탭만 비공개 레포를 직접 읽습니다.")
     else:
-        import perf
+        perf = fresh_perf()
 
         LBL = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
         RS = {a: account_perf(a) for a in ACCOUNTS.values()}
