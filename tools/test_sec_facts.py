@@ -142,6 +142,35 @@ check(sf.extract(facts(NetIncomeLoss=[
     {"end": "2025-03-31", "val": None, "filed": "2025-04-20"}])) == {},
       "값이 null인 공시는 버림")
 
+print("\n[User-Agent 가드 — 403으로 날리기 전에 멈추는가]")
+# 2026-10-14 런이 이메일 없는 UA로 403을 맞고 죽었습니다. 요청을 보내기
+# 전에 멈춰야 Actions 분과 시간을 안 버립니다.
+import os as _os
+_saved = _os.environ.get("QUANT_SEC_UA")
+for val, label, should_pass in (
+        (None, "설정 안 함", False),
+        ("", "빈 값", False),
+        ("quant_cloud research script (github.com/x/y)", "이메일 없음", False),
+        ("SangsooKim quant research you@example.com", "이름+이메일", True)):
+    if val is None:
+        _os.environ.pop("QUANT_SEC_UA", None)
+    else:
+        _os.environ["QUANT_SEC_UA"] = val
+    try:
+        sf._ua()
+        ok = True
+    except RuntimeError:
+        ok = False
+    check(ok == should_pass,
+          f"{label} → {'통과' if ok else '차단'} (기대 {'통과' if should_pass else '차단'})")
+if _saved is None:
+    _os.environ.pop("QUANT_SEC_UA", None)
+else:
+    _os.environ["QUANT_SEC_UA"] = _saved
+# 안내문에 변수 이름과 이메일 요구가 들어 있어야 합니다
+check("QUANT_SEC_UA" in sf.UA_HELP and "이메일" in sf.UA_HELP,
+      "오류 메시지가 무엇을 어디에 넣어야 하는지 알려줌")
+
 print("\n[저장 행 모양]")
 rows = sf._rows("AAPL", {"NetIncome": [(pd.Timestamp("2025-03-31"), 100,
                                         pd.Timestamp("2025-04-20"))]})

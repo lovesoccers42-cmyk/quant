@@ -41,11 +41,37 @@ import store  # noqa: E402
 
 log = logging.getLogger("quant_agent.sec_facts")
 
-# SEC는 접속 주체를 밝히는 User-Agent를 요구합니다. 개인 메일을 코드에 박지
-# 않고 환경변수로 받습니다 — 안 주면 레포 주소로 식별합니다.
-UA = os.getenv("QUANT_SEC_UA",
-               "quant_cloud research script (github.com/lovesoccers42-cmyk/quant)")
-HEADERS = {"User-Agent": UA, "Accept-Encoding": "gzip, deflate"}
+# SEC는 접속 주체를 밝히는 User-Agent를 **반드시** 요구하고, 공식 예시가
+#     Sample Company Name AdminContact@<sample company domain>.com
+# 입니다. 즉 이름 + 연락 이메일입니다. 이메일 없이 보내면 "Undeclared
+# Automated Tool"로 막혀 403이 돌아옵니다 (실측: 2026-10-14 런이 그렇게
+# 실패했습니다 — 이름만 넣고 이메일을 안 넣었습니다).
+#
+# 개인 메일을 코드에 박지 않습니다. 레포 Variables의 QUANT_SEC_UA로 받습니다.
+# 접속 속도 상한은 초당 10회인데 이 스크립트는 전체에서 요청이 3번뿐입니다
+# (티커 목록 + 번들 zip).
+UA_ENV = "QUANT_SEC_UA"
+UA_HELP = (
+    f"SEC는 연락처가 담긴 User-Agent를 요구합니다. 레포 Settings > Secrets and "
+    f"variables > Actions > Variables 에 {UA_ENV} 를 넣으세요.\n"
+    f'  예:  {UA_ENV} = "SangsooKim quant research you@example.com"\n'
+    f"이름과 **이메일**이 둘 다 있어야 합니다 — 이메일이 없으면 403으로 막힙니다 "
+    f"(SEC 공식 예시: 'Sample Company Name AdminContact@domain.com')."
+)
+
+
+def _ua() -> str:
+    ua = (os.getenv(UA_ENV) or "").strip()
+    if not ua:
+        raise RuntimeError("User-Agent가 설정되지 않았습니다.\n" + UA_HELP)
+    if "@" not in ua or "." not in ua.split("@")[-1]:
+        raise RuntimeError(f"User-Agent에 이메일이 없습니다: {ua!r}\n" + UA_HELP)
+    return ua
+
+
+def _headers() -> dict:
+    return {"User-Agent": _ua(), "Accept-Encoding": "gzip, deflate",
+            "Accept": "application/json, */*"}
 
 TICKER_URLS = (
     "https://www.sec.gov/files/company_tickers.json",
@@ -84,7 +110,7 @@ ANNUAL_DAYS = (350, 380)       # 12개월 공시 (Q4를 역산할 때 씁니다)
 
 def _get(url: str, timeout: int = 120) -> bytes:
     import requests
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
+    r = requests.get(url, headers=_headers(), timeout=timeout)
     r.raise_for_status()
     return r.content
 
@@ -96,7 +122,8 @@ def _download(url: str, timeout: int = 1800) -> str:
     import requests
     fd, path_ = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
-    with requests.get(url, headers=HEADERS, timeout=timeout, stream=True) as r:
+    with requests.get(url, headers=_headers(), timeout=timeout,
+                      stream=True) as r:
         r.raise_for_status()
         done = 0
         with open(path_, "wb") as f:
@@ -118,6 +145,10 @@ def ticker_to_cik() -> dict:
             raw = json.loads(_get(url, 60).decode("utf-8"))
         except Exception as e:                      # 주소가 바뀌었을 수 있습니다
             last = e
+            if "403" in str(e):
+                raise RuntimeError(
+                    f"SEC가 403으로 막았습니다 ({url}). 거의 항상 "
+                    f"User-Agent 문제입니다.\n" + UA_HELP) from e
             log.warning("티커 목록 실패 %s: %s", url, e)
             continue
         out = {}
@@ -229,6 +260,7 @@ def _rows(symbol: str, got: dict) -> list:
 
 
 def run(mode: str = "probe", limit: int = 0) -> dict:
+    _ua()                     # 요청 전에 먼저 막습니다
     want = {str(s).upper() for s in store.us_symbols()}
     if not want:
         raise RuntimeError("global_ticker가 비어 있습니다. 미국 월간 수집을 먼저 "
