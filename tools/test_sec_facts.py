@@ -151,7 +151,13 @@ for val, label, should_pass in (
         (None, "설정 안 함", False),
         ("", "빈 값", False),
         ("quant_cloud research script (github.com/x/y)", "이메일 없음", False),
-        ("SangsooKim quant research you@example.com", "이름+이메일", True)):
+        ("SangsooKim quant research you@example.com", "이름+이메일", True),
+        # 2026-10-14 실제 사고: 설정 안내를 두 줄 통째로 붙여넣음.
+        # HTTP 헤더에 줄바꿈이 못 들어가서 requests가 거부했습니다.
+        ("Name:  QUANT_SEC_UA\nValue: SangsooKim quant research you@example.com",
+         "안내문 통째로 붙여넣기", True),
+        ("Name: QUANT_SEC_UA\r\nValue: Kim you@example.com", "CRLF 포함", True),
+        ("Name: QUANT_SEC_UA\nValue: 이메일없음", "안내문 + 이메일 없음", False)):
     if val is None:
         _os.environ.pop("QUANT_SEC_UA", None)
     else:
@@ -168,6 +174,15 @@ if _saved is None:
 else:
     _os.environ["QUANT_SEC_UA"] = _saved
 # 안내문에 변수 이름과 이메일 요구가 들어 있어야 합니다
+_pasted = "Name:  QUANT_SEC_UA\r\nValue: SangsooKim quant research you@example.com"
+_got = sf._clean_ua(_pasted)
+check(_got == "SangsooKim quant research you@example.com",
+      f"붙여넣기에서 값만 뽑아냄 → {_got!r}")
+check("\n" not in _got and "\r" not in _got,
+      "줄바꿈이 남지 않음 (남으면 requests가 헤더를 거부합니다)")
+_os.environ["QUANT_SEC_UA"] = _pasted
+check(sf._headers()["User-Agent"] == _got, "헤더에 다듬은 값이 들어감")
+_os.environ.pop("QUANT_SEC_UA", None)
 check("QUANT_SEC_UA" in sf.UA_HELP and "이메일" in sf.UA_HELP,
       "오류 메시지가 무엇을 어디에 넣어야 하는지 알려줌")
 

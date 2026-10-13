@@ -60,10 +60,43 @@ UA_HELP = (
 )
 
 
+def _clean_ua(raw: str) -> str:
+    """붙여넣기 실수를 견디게 다듬습니다.
+
+    HTTP 헤더 값에는 줄바꿈이 들어갈 수 없습니다. 그런데 설정 안내를 그대로
+    복사하면 'Name: QUANT_SEC_UA\nValue: ...' 두 줄이 통째로 들어옵니다
+    (실측: 2026-10-14 런이 그렇게 죽었습니다 — requests가 'Invalid ...
+    return character(s) in header value'로 거부). 그 경우 Value: 뒤만 씁니다.
+    """
+    txt = (raw or "").replace("\r", "\n")
+    lines = [ln.strip() for ln in txt.split("\n") if ln.strip()]
+    if not lines:
+        return ""
+    # 'Value:' 줄이 있으면 그 뒤만 — 없으면 변수 이름 줄만 걸러냅니다
+    picked = None
+    for ln in lines:
+        low = ln.lower()
+        if low.startswith("value:"):
+            picked = ln.split(":", 1)[1]
+            break
+    if picked is None:
+        body = [ln for ln in lines
+                if not ln.lower().startswith("name:")
+                and ln.strip() != UA_ENV]
+        picked = body[0] if body else lines[-1]
+    # 남은 제어문자를 지우고 공백을 하나로
+    picked = "".join(ch if ch.isprintable() else " " for ch in picked)
+    return " ".join(picked.split())
+
+
 def _ua() -> str:
-    ua = (os.getenv(UA_ENV) or "").strip()
+    ua = _clean_ua(os.getenv(UA_ENV))
     if not ua:
         raise RuntimeError("User-Agent가 설정되지 않았습니다.\n" + UA_HELP)
+    if UA_ENV in ua:
+        raise RuntimeError(
+            f"User-Agent에 변수 이름이 섞여 있습니다: {ua!r}\n"
+            f"Value 칸에는 **값만** 넣으세요.\n" + UA_HELP)
     if "@" not in ua or "." not in ua.split("@")[-1]:
         raise RuntimeError(f"User-Agent에 이메일이 없습니다: {ua!r}\n" + UA_HELP)
     return ua
