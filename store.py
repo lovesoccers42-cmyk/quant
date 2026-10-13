@@ -111,8 +111,12 @@ SCHEMAS: dict[str, dict[str, str]] = {
     "global_price": {"Date": "TIMESTAMP", "High": "DOUBLE", "Low": "DOUBLE",
                      "Open": "DOUBLE", "Close": "DOUBLE", "Volume": "DOUBLE",
                      "Symbol": "VARCHAR"},
+    # filed = 실제 공시일 (SEC EDGAR 수집에만 들어옵니다).
+    # 지금 백테스트는 '공시지연 90일'이라는 가정을 쓰는데, 실제 공시일이 있으면
+    # 가정 없이 '그 시점에 정말 알려졌던 것'만 쓸 수 있습니다. yahooquery에는
+    # 이 정보가 없어 비어 있고, 비어 있어도 기존 동작은 그대로입니다.
     "global_fs": {"Symbol": "VARCHAR", "date": "TIMESTAMP", "account": "VARCHAR",
-                  "value": "DOUBLE", "freq": "VARCHAR"},
+                  "value": "DOUBLE", "freq": "VARCHAR", "filed": "TIMESTAMP"},
     "global_value": {"Symbol": "VARCHAR", "date": "TIMESTAMP", "지표": "VARCHAR",
                      "값": "DOUBLE"},
 }
@@ -121,7 +125,7 @@ SCHEMAS: dict[str, dict[str, str]] = {
 # alt 프로필의 보유 테이블은 main과 스키마가 같습니다 (복제해 등록).
 SCHEMAS["kor_portfolio_alt"] = dict(SCHEMAS["kor_portfolio"])
 
-DATE_COLS = {"기준일", "날짜", "date", "Date"}
+DATE_COLS = {"기준일", "날짜", "date", "Date", "filed"}
 
 _write_lock = threading.Lock()
 

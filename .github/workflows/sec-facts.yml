@@ -1,0 +1,100 @@
+name: 미국 재무제표 (SEC EDGAR)
+
+# yahooquery는 종목당 최근 5분기쯤의 '실제 값'만 줍니다. 그 이전 분기는 행만
+# 생기고 값이 비어 있어서(2023Q4~2025Q1의 87~98%), 4분기 TTM이 2026Q1에야
+# 완성되고 미국 모델이 쓸 만한 유니버스를 갖는 건 2026-06-30부터였습니다.
+# 3개월 반으로는 전략을 판정할 수 없습니다.
+#
+# EDGAR는 공시 원본이라 10년 이상이 들어 있고 API 키가 필요 없습니다.
+#
+# **반드시 probe 를 먼저 돌리세요.** 이 파서는 실제 응답을 보지 못한 채
+# (회사 PC와 클라우드 모두 프록시가 sec.gov를 막습니다) SEC 문서의 구조만
+# 보고 작성했습니다. probe 는 아무것도 저장하지 않고 '계정별로 태그를 못 찾은
+# 회사 수'와 '계정별 데이터 기간'만 보고합니다. 그 숫자가 멀쩡한 걸 확인한
+# 뒤에 collect 를 돌리세요.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe = 저장 없이 커버리지만 · collect = 실제 수집"
+        required: true
+        default: "probe"
+        type: choice
+        options: ["probe", "collect"]
+      limit:
+        description: "처리할 회사 수 제한 (probe는 비우면 300, collect는 비우면 전체)"
+        required: false
+        default: ""
+
+concurrency:
+  group: quant-us-facts
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # SEC는 접속 주체를 밝히는 User-Agent를 요구합니다. 비워 두면 레포
+      # 주소로 식별합니다 — 메일을 쓰시려면 Variables에 QUANT_SEC_UA 를 넣으세요.
+      QUANT_SEC_UA: ${{ vars.QUANT_SEC_UA }}
+      TZ: Asia/Seoul
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 공개 데이터 내려받기 (티커가 있어야 대상을 압니다)
+        run: |
+          mkdir -p data output
+          gh release download data-store -D data \
+            -p 'global_ticker.parquet' -p 'global_fs.parquet' --clobber \
+            || echo "::warning::공개 데이터를 못 받았습니다 — 미국 월간 실행을 먼저 돌리세요."
+          ls -lh data || true
+
+      - name: 오프라인 점검 (파서 규칙)
+        run: |
+          python tools/test_sec_facts.py
+          python tools/test_ttm.py
+
+      - name: EDGAR 수집
+        run: |
+          python tools/sec_facts.py \
+            "${{ github.event.inputs.mode }}" \
+            "${{ github.event.inputs.limit || '0' }}"
+
+      - name: 데이터 기간 다시 점검
+        if: ${{ github.event.inputs.mode == 'collect' }}
+        run: python tools/probe_us.py
+
+      - name: 올리기 (collect 일 때만)
+        if: ${{ github.event.inputs.mode == 'collect' }}
+        run: |
+          [ -f data/global_fs.parquet ] || exit 1
+          for try in 1 2 3; do
+            gh release upload data-store data/global_fs.parquet --clobber && break
+            echo "::warning::업로드 재시도 $try"
+            sleep $((try * 10))
+          done
+
+      - name: 실행 기록 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-facts-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
