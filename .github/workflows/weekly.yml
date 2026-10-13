@@ -157,6 +157,7 @@ jobs:
         run: |
           python tools/test_portfolio.py
           python tools/test_perf.py
+          python tools/test_ttm.py
 
       - name: 최신 주가 받기 (일간 실행과의 순서에 의존하지 않도록)
         continue-on-error: true

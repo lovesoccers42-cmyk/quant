@@ -182,6 +182,7 @@ jobs:
         run: |
           python tools/test_portfolio.py
           python tools/test_perf.py
+          python tools/test_ttm.py
 
       # ── 순서: 구조를 먼저, 원장 다음, inbox(체결→보유)로 마무리 ────────
       - name: 보유 상태 초기화 (체결 전에만)

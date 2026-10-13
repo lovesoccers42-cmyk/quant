@@ -138,6 +138,7 @@ jobs:
         run: |
           python tools/test_weighting.py
           python tools/test_defaults.py
+          python tools/test_ttm.py
 
       - name: 데이터 기간 점검 (미국장만)
         if: ${{ github.event.inputs.market == 'us' }}

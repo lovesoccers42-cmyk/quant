@@ -40,6 +40,17 @@ def latest_ttm(fs: pd.DataFrame, *, symbol: str, account: str, date: str,
         fs["ttm"] = np.where(fs[account].isin(list(mean_accounts)),
                              fs["ttm"] / 4, fs["ttm"])
 
+    # '마지막 줄'이 아니라 **TTM이 유효한 마지막 줄**을 씁니다.
+    #
+    # tail(1)만 쓰면 가장 최근 분기의 값이 비어 있는 종목이 통째로 빠집니다.
+    # 미국 데이터에서 실제로 그렇습니다 — 분기 행은 있는데 값이 null인 경우가
+    # 많아, 그 종목은 그 이전에 멀쩡한 TTM이 있어도 점수가 안 나왔습니다
+    # (실측: cutoff 2026-06-30에서 3,207 → 3,340종목, +133).
+    # 유효한 줄이 하나도 없으면 그 종목은 어차피 빠지므로 결과가 같습니다.
+    valid = fs[fs["ttm"].notna()]
+    last_valid = valid.groupby([symbol, account]).tail(1)
+    if len(last_valid):
+        return last_valid
     return fs.groupby([symbol, account]).tail(1)
 
 

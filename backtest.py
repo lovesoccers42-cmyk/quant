@@ -883,6 +883,13 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                     else f"시장지수 {trend_ma}일 이동평균 아래면 주식비중 {risk_off:.0%}"
                          f" · 현금 이자 연 {cash_rate:.1%}"),
     }
+    if "유니버스부족" in summary:
+        u = summary["유니버스부족"]
+        summary["한계"].insert(
+            0, f"유니버스가 모자라 {u['유니버스부족회차']}는 포트폴리오를 "
+               f"다 못 채웠습니다 (최소 {u['덜찬회차 최소종목수']}종목). "
+               f"그 회차는 전략이 아니라 '남은 종목'을 담은 것이므로 전체 "
+               f"수익률을 전략 평가로 읽으면 안 됩니다 — '완성후' 숫자를 보세요")
     if ("벤치마크_지수" in perf.columns
             and float((perf["벤치마크_지수"] - perf["벤치마크"]).abs().max()) < 1e-12):
         summary["한계"].insert(0, "지수 벤치마크를 만들지 못해 '전종목 동일가중'과 "
@@ -999,11 +1006,38 @@ def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
     idx = (stats((1 + perf["벤치마크_지수"]).cumprod(), perf["벤치마크_지수"])
            if "벤치마크_지수" in perf.columns else None)
 
+    # ── 포트폴리오가 덜 찬 회차 ──────────────────────────────
+    # 유니버스가 모자라면 '전략'이 아니라 '남은 종목'을 담습니다. 미국 런에서
+    # 첫 네 회차가 5종목(한 종목 33%)이었는데 요약은 100종목 백테스트처럼
+    # 보였습니다. 그 숫자를 전략 평가로 읽으면 안 되므로 따로 적습니다.
+    FULL = 0.9
+    thin = perf[perf["종목수"] < top_n * FULL]
+    full = perf[perf["종목수"] >= top_n * FULL]
+    thin_info: dict = {}
+    if len(thin):
+        thin_info["유니버스부족회차"] = f"{len(thin)}/{len(perf)}회차"
+        thin_info["덜찬회차 최소종목수"] = int(thin["종목수"].min())
+        if len(full):
+            fr = (1 + full["비용차감수익률"] / 100).prod() - 1
+            fb = (1 + full["벤치마크"] / 100).prod() - 1
+            thin_info["포트폴리오 완성일"] = f"{full['리밸런싱일'].iloc[0]:%Y-%m-%d}"
+            thin_info["완성후 회차"] = int(len(full))
+            thin_info["완성후 누적수익률"] = round(fr * 100, 2)
+            thin_info["완성후 벤치마크"] = round(fb * 100, 2)
+            thin_info["완성후 초과수익률"] = round((fr - fb) * 100, 2)
+            if "벤치마크_지수" in full.columns:
+                fi = (1 + full["벤치마크_지수"] / 100).prod() - 1
+                thin_info["완성후 지수"] = round(fi * 100, 2)
+                thin_info["완성후 지수대비"] = round((fr - fi) * 100, 2)
+        else:
+            thin_info["포트폴리오 완성일"] = "끝까지 못 채웠습니다"
+
     return {
         "시장": spec.label,
         "기간": f"{perf['리밸런싱일'].iloc[0]:%Y-%m-%d} ~ {perf['다음리밸런싱'].iloc[-1]:%Y-%m-%d}",
         "리밸런싱횟수": int(len(perf)),
         "보유종목수": top_n,
+        **({"유니버스부족": thin_info} if thin_info else {}),
         "평균턴오버": round(float(perf["턴오버"].mean()) * 100, 1),
         # 주기가 다르면 회차당 턴오버는 비교가 안 됩니다(주간 5%와 월간 20%는
         # 같은 회전율). 연 단위로 환산해 나란히 놓을 수 있게 합니다.
