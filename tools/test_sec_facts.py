@@ -142,6 +142,30 @@ check(sf.extract(facts(NetIncomeLoss=[
     {"end": "2025-03-31", "val": None, "filed": "2025-04-20"}])) == {},
       "값이 null인 공시는 버림")
 
+print("\n[미래 날짜 공시는 버린다]")
+# probe 실측: StockholdersEquity 의 기간말이 2026-12까지 나왔습니다
+# (실행일 2026-10-14). 아직 오지 않은 분기로 과거를 테스트하면 안 됩니다.
+import pandas as _pd
+_fut = (_pd.Timestamp.today().normalize() + _pd.Timedelta(days=120)).strftime("%Y-%m-%d")
+_past = (_pd.Timestamp.today().normalize() - _pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+f_fut = facts(Assets=[inst(_fut, 999, _past), inst(_past, 100, _past)])
+ta = sf.extract(f_fut).get("TotalAssets", [])
+check(len(ta) == 1 and abs(ta[0][1] - 100) < 1e-9,
+      f"미래 기간말({_fut})을 버리고 과거 값만 ({len(ta)}개)")
+f_ff = facts(Assets=[inst(_past, 100, _fut)])
+check("TotalAssets" not in sf.extract(f_ff),
+      "공시일이 미래인 것도 버림")
+
+print("\n[금융업 매출 태그]")
+f_bank = facts(RevenuesNetOfInterestExpense=[
+    dur("2025-01-01", "2025-03-31", 500, "2025-04-20")])
+check("TotalRevenue" in sf.extract(f_bank),
+      "RevenuesNetOfInterestExpense 를 매출로 인정 (은행·보험)")
+f_int = facts(InterestAndDividendIncomeOperating=[
+    dur("2025-01-01", "2025-03-31", 300, "2025-04-20")])
+check("TotalRevenue" in sf.extract(f_int),
+      "InterestAndDividendIncomeOperating 도 인정")
+
 print("\n[User-Agent 가드 — 403으로 날리기 전에 멈추는가]")
 # 2026-10-14 런이 이메일 없는 UA로 403을 맞고 죽었습니다. 요청을 보내기
 # 전에 멈춰야 Actions 분과 시간을 안 버립니다.

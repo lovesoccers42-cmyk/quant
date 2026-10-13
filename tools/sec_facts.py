@@ -41,6 +41,8 @@ import store  # noqa: E402
 
 log = logging.getLogger("quant_agent.sec_facts")
 
+_TODAY = pd.Timestamp.today().normalize()
+
 # SEC는 접속 주체를 밝히는 User-Agent를 **반드시** 요구하고, 공식 예시가
 #     Sample Company Name AdminContact@<sample company domain>.com
 # 입니다. 즉 이름 + 연락 이메일입니다. 이메일 없이 보내면 "Undeclared
@@ -117,10 +119,18 @@ FACTS_ZIP = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zi
 DURATION_TAGS = {
     "NetIncome": ("NetIncomeLoss", "ProfitLoss",
                   "NetIncomeLossAvailableToCommonStockholdersBasic"),
+    # 금융업은 Revenues를 안 쓰고 이자·수수료 수익 태그를 씁니다.
+    # probe에서 699개가 비어 있었습니다.
     "TotalRevenue": ("Revenues",
                      "RevenueFromContractWithCustomerExcludingAssessedTax",
                      "RevenueFromContractWithCustomerIncludingAssessedTax",
-                     "SalesRevenueNet", "SalesRevenueGoodsNet"),
+                     "SalesRevenueNet", "SalesRevenueGoodsNet",
+                     "RevenuesNetOfInterestExpense",
+                     "TotalRevenuesAndOtherIncome",
+                     "RegulatedAndUnregulatedOperatingRevenue",
+                     "InterestAndDividendIncomeOperating",
+                     "HealthCareOrganizationRevenue",
+                     "RealEstateRevenueNet"),
     "GrossProfit": ("GrossProfit",),
     "CashFlowFromContinuingOperatingActivities": (
         "NetCashProvidedByUsedInOperatingActivities",
@@ -134,7 +144,10 @@ INSTANT_TAGS = {
 }
 # GrossProfit을 안 쓰는 회사가 많습니다(3,262/4,935). 매출 - 매출원가로 만듭니다.
 COST_TAGS = ("CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold",
-             "CostOfServices")
+             "CostOfServices", "CostOfSales",
+             "CostOfGoodsAndServicesSoldExcludingDepreciationDepletionAndAmortization",
+             "CostOfRevenueExcludingDepreciationDepletionAndAmortization",
+             "CostOfGoodsSoldExcludingDepreciationDepletionAndAmortization")
 
 ACCOUNTS = tuple(DURATION_TAGS) + tuple(INSTANT_TAGS)
 QUARTER_DAYS = (80, 100)       # 3개월 공시로 인정하는 기간
@@ -220,6 +233,11 @@ def _series(facts: dict, tags, instant: bool) -> list:
             for e in entries:
                 end, val, filed = e.get("end"), e.get("val"), e.get("filed")
                 if end is None or val is None or filed is None:
+                    continue
+                # 미래 날짜 공시는 버립니다. probe에서 StockholdersEquity의
+                # 기간말이 2026-12까지 나왔는데(실행일 2026-10-14) 그런 값이
+                # TTM에 섞이면 '아직 오지 않은 분기'로 과거를 테스트합니다.
+                if pd.Timestamp(end) > _TODAY or pd.Timestamp(filed) > _TODAY:
                     continue
                 if instant:
                     days = 0
@@ -310,7 +328,7 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
     for t, c in pairs.items():
         cik2sym[c].append(t)
 
-    found, missing_tag = 0, defaultdict(int)
+    found, missing_tag, all_six = 0, defaultdict(int), 0
     span = defaultdict(lambda: [None, None])
     rows, written = [], 0
     with zipfile.ZipFile(zip_path) as zf:
@@ -330,6 +348,8 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
             if not got:
                 continue
             found += 1
+            if all(a in got for a in ACCOUNTS):
+                all_six += 1
             for acct in ACCOUNTS:
                 if acct not in got:
                     missing_tag[acct] += 1
@@ -363,6 +383,7 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
                 log.info("값이 빈 행 %d개 삭제 (TTM 연속성을 깨뜨립니다)", dropped)
 
     out = {"대상종목": len(pairs), "처리한회사": found,
+           "6계정_모두있는회사": all_six,
            "계정별_태그없는회사": dict(missing_tag),
            "계정별_기간": {k: f"{v[0]:%Y-%m} ~ {v[1]:%Y-%m}"
                        for k, v in span.items() if v[0]},
