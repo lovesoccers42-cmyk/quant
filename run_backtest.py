@@ -245,24 +245,31 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
 
 
 if __name__ == "__main__":
-    market = sys.argv[1] if len(sys.argv) > 1 else "kr"
-    top_n = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-    reb = sys.argv[3] if len(sys.argv) > 3 else ""
-    cost = float(sys.argv[4]) if len(sys.argv) > 4 else -1.0
-    cap = float(sys.argv[5]) if len(sys.argv) > 5 else -1.0
-    turn = float(sys.argv[6]) if len(sys.argv) > 6 else -1.0
-    tr = int(sys.argv[7]) if len(sys.argv) > 7 else 1
-    tma = int(sys.argv[8]) if len(sys.argv) > 8 else 0
-    roff = float(sys.argv[9]) if len(sys.argv) > 9 else 0.0
-    wgt = sys.argv[10] if len(sys.argv) > 10 else ""
-    mw = float(sys.argv[11]) if len(sys.argv) > 11 else -1.0
-    bnd = float(sys.argv[12]) if len(sys.argv) > 12 else -1.0
-    buf = float(sys.argv[13]) if len(sys.argv) > 13 else -1.0
-    sn = sys.argv[14] if len(sys.argv) > 14 else ""
-    lv = int(sys.argv[15]) if len(sys.argv) > 15 else -1
-    ts = int(sys.argv[16]) if len(sys.argv) > 16 else -1
-    sw = float(sys.argv[17]) if len(sys.argv) > 17 else -1.0
-    qw = sys.argv[18] if len(sys.argv) > 18 else ""
-    spl = sys.argv[19] if len(sys.argv) > 19 else ""
-    sys.exit(main(market, top_n, reb, cost, cap, turn, tr, tma, roff,
-                  wgt, mw, bnd, buf, sn, lv, ts, sw, qw, spl))
+    # 빈 칸은 '안 줬음'입니다 — 그래야 시장별 확정 설정(CONFIRMED_KR /
+    # CONFIRMED_US)이 적용됩니다. 예전에는 int("")·float("")가 그대로 터져서
+    # 워크플로가 모든 칸을 한국 기본값으로 채워 보냈고, 그래서 미국 런에
+    # 한국 유동성 5억이 5억 달러로 들어가 런 하나가 무효가 됐습니다
+    # (2026-10-07: 통과 종목 47개, 지수 대비 연 -6.7%p).
+    def _s(i: int, d: str = "") -> str:
+        v = sys.argv[i] if len(sys.argv) > i else ""
+        return v.strip() if v and v.strip() else d
+
+    def _i(i: int, d: int) -> int:
+        v = _s(i)
+        try:
+            return int(float(v)) if v else d
+        except ValueError:
+            return d
+
+    def _f(i: int, d: float) -> float:
+        v = _s(i)
+        try:
+            return float(v) if v else d
+        except ValueError:
+            return d
+
+    sys.exit(main(
+        _s(1, "kr"), _i(2, 0), _s(3), _f(4, -1.0), _f(5, -1.0), _f(6, -1.0),
+        _i(7, -1), _i(8, -1), _f(9, -1.0), _s(10), _f(11, -1.0), _f(12, -1.0),
+        _f(13, -1.0), _s(14), _i(15, -1), _i(16, -1), _f(17, -1.0),
+        _s(18), _s(19)))

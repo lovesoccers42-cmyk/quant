@@ -2,6 +2,11 @@ name: 백테스트
 
 on:
   workflow_dispatch:
+    # 아래 칸은 **비워 두는 것이 정상**입니다. 비우면 시장별 확정 설정
+    # (config.CONFIRMED_KR / CONFIRMED_US)이 들어갑니다. 한국과 미국은
+    # 유동성 하한(5억원 vs 500만달러)과 거래비용(25bp vs 10bp)이 다르므로,
+    # 여기에 숫자를 박아 두면 미국 런에 한국 값이 그대로 들어갑니다 —
+    # 2026-10-07에 그렇게 런 하나를 날렸습니다(통과 종목 47개).
     inputs:
       market:
         description: "시장"
@@ -18,73 +23,73 @@ on:
       top_n:
         description: "보유 종목 수 (확정 100). 30은 -10.9%p, 150은 더 나빴습니다"
         required: false
-        default: "100"
+        default: ""
       rebalance:
         description: "리밸런싱 주기 — B(일간) / W-FRI(주간) / ME(월말) / QE(분기말). 확정 W-FRI"
         required: false
-        default: "W-FRI"
+        default: ""
       cost_bps:
         description: "편도 거래비용 (bp). 한국 주식은 25 안팎"
         required: false
-        default: "25"
+        default: ""
       max_sector_pct:
         description: "한 섹터 최대 비중 (0.25 = 25%). 1 이면 제한 없음. 확정 1 (모멘텀 섹터중립을 풀었으므로)"
         required: false
-        default: "1"
+        default: ""
       min_turnover:
         description: "20일 평균 거래대금 하한. 0 이면 필터 끔(예전 동작). 한국 5억 = 500000000"
         required: false
-        default: "500000000"
+        default: ""
       tranches:
         description: "분할 리밸런싱 등분 수. 1이면 매번 전체 교체. 확정 4"
         required: false
-        default: "4"
+        default: ""
       trend_ma:
         description: "리스크 오버레이 — 시장지수 이동평균 일수. 0이면 끔, 표준값 200"
         required: false
-        default: "0"
+        default: ""
       risk_off:
         description: "이동평균 아래일 때 주식비중. 0이면 전량 현금, 0.5면 절반"
         required: false
-        default: "0"
+        default: ""
       weighting:
         description: "종목별 비중 — equal(동일) / mcap(시총) / score(점수순위) / invvol(역변동성)"
         required: false
-        default: "score"
+        default: ""
         type: choice
         options: ["score", "equal", "mcap", "invvol"]
       max_weight:
         description: "한 종목 최대 비중. 0이면 방식별 기본값(mcap 8%, score·invvol 3%). 섹터상한과 혼동하지 마세요"
         required: false
-        default: "0"
+        default: ""
       rebal_band:
         description: "무매매 밴드 — 목표 비중의 ±이 비율 안이면 안 건드림. 실전과 같은 값은 0.20. 0이면 매번 되맞춤"
         required: false
-        default: "0.20"
+        default: ""
       rank_buffer:
         description: "순위 버퍼 — 상위 N위에서 사고 N×(1+버퍼)위 밖에서 매도. 0.5면 100위에서 사고 150위에서 팜. 0이면 끔"
         required: false
-        default: "0.5"
+        default: ""
       sector_neutral:
         description: "섹터 중립 — all(전부 섹터 내 비교) / no_mom(모멘텀만 전 종목 비교) / none(전부 전 종목 비교)"
         required: false
-        default: "no_mom"
+        default: ""
         type: choice
         options: ["no_mom", "all", "none"]
       use_lowvol:
         description: "저변동성 팩터 — 1이면 QVM→QVML (네 팩터 1/4씩). 낙폭을 줄이는 모델 내부 레버"
         required: false
-        default: "0"
+        default: ""
         type: choice
         options: ["0", "1"]
       trend_stock:
         description: "종목 단위 추세 필터 — 종목이 자기 N일선 아래면 후보 제외. 0이면 끔, 표준값 200"
         required: false
-        default: "0"
+        default: ""
       max_sector_weight:
         description: "보유 기준 섹터 비중 상한 (0.3=30%). 0이면 끔. 살 때 종목수 제한과 달리 실제로 걸립니다"
         required: false
-        default: "0"
+        default: ""
       qvm_weights:
         description: "팩터 가중치 '퀄리티,밸류,모멘텀' (예 0.25,0.5,0.25). 비우면 1/3씩"
         required: false
@@ -152,16 +157,16 @@ jobs:
             "${{ github.event.inputs.max_sector_pct }}" \
             "${{ github.event.inputs.min_turnover }}" \
             "${{ github.event.inputs.tranches }}" \
-            "${{ github.event.inputs.trend_ma || '0' }}" \
-            "${{ github.event.inputs.risk_off || '0' }}" \
-            "${{ github.event.inputs.weighting || 'equal' }}" \
-            "${{ github.event.inputs.max_weight || '0' }}" \
-            "${{ github.event.inputs.rebal_band || '0.20' }}" \
-            "${{ github.event.inputs.rank_buffer || '0.5' }}" \
-            "${{ github.event.inputs.sector_neutral || 'all' }}" \
-            "${{ github.event.inputs.use_lowvol || '0' }}" \
-            "${{ github.event.inputs.trend_stock || '0' }}" \
-            "${{ github.event.inputs.max_sector_weight || '0' }}" \
+            "${{ github.event.inputs.trend_ma }}" \
+            "${{ github.event.inputs.risk_off }}" \
+            "${{ github.event.inputs.weighting }}" \
+            "${{ github.event.inputs.max_weight }}" \
+            "${{ github.event.inputs.rebal_band }}" \
+            "${{ github.event.inputs.rank_buffer }}" \
+            "${{ github.event.inputs.sector_neutral }}" \
+            "${{ github.event.inputs.use_lowvol }}" \
+            "${{ github.event.inputs.trend_stock }}" \
+            "${{ github.event.inputs.max_sector_weight }}" \
             "${{ github.event.inputs.qvm_weights }}" \
             "${{ github.event.inputs.split }}"
 

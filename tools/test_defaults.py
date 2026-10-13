@@ -128,6 +128,64 @@ if not uniq:
     for k, v in stripped.items():
         print(f"    {k} -> {v}")
 
+# ── 시장별 확정 설정이 정말 시장별인가 ─────────────────────────────────
+# 2026-10-07 실제 사고: 워크플로우가 모든 칸을 한국 기본값으로 채워 보내
+# 미국 런에 유동성 하한 5억이 '5억 달러'로 들어갔습니다. 통과 종목이 47개로
+# 줄어 지수 대비 연 -6.7%p가 나왔고, 그 결과를 전략 평가로 읽을 뻔했습니다.
+# 워크플로우는 이제 칸을 비워 보내므로, 빈 칸이 시장별 확정값으로 풀리는지
+# 여기서 못 박습니다.
+print("\n[시장별 확정 설정]")
+BLANK = [0, "", -1.0, -1.0, -1.0, -1, -1, -1.0, "", -1.0, -1.0, -1.0,
+         "", -1, -1, -1.0, "", ""]        # 워크플로우가 빈 칸을 보낸 상태
+
+for market, ck in (("kr", config.CONFIRMED_KR),
+                   ("us", getattr(config, "CONFIRMED_US", {}))):
+    if not ck:
+        continue
+    captured.clear()
+    try:
+        rb.main(market, *BLANK)
+    except SystemExit:
+        pass
+    for key in ("min_turnover", "cost_bps", "top_n", "tranches", "weighting",
+                "rebal_band", "rank_buffer", "sector_neutral", "max_sector_pct"):
+        want = ck.get(key)
+        got = captured.get(key)
+        ok = (want is None) or (got == want)
+        print(("[OK ] " if ok else "[FAIL] ")
+              + f"{market} {key} = {got!r} (확정 {want!r})")
+        if not ok:
+            fails.append(f"{market}:{key}")
+
+# 두 시장의 유동성·비용이 실제로 달라야 합니다 — 같으면 한쪽이 덮인 것입니다
+vals = {}
+for market in ("kr", "us"):
+    captured.clear()
+    try:
+        rb.main(market, *BLANK)
+    except SystemExit:
+        pass
+    vals[market] = (captured.get("min_turnover"), captured.get("cost_bps"))
+diff = vals["kr"] != vals["us"]
+print(("[OK ] " if diff else "[FAIL] ")
+      + f"한국 {vals['kr']} vs 미국 {vals['us']} — 달라야 정상")
+if not diff:
+    fails.append("market_mix")
+
+# 가드: 미국에 한국 유동성을 넣으면 멈춰야 합니다
+try:
+    rb.main("us", 0, "", -1.0, -1.0, 500_000_000.0, -1, -1, -1.0, "",
+            -1.0, -1.0, -1.0, "", -1, -1, -1.0, "", "")
+    blocked = False
+except ValueError:
+    blocked = True
+except SystemExit:
+    blocked = False
+print(("[OK ] " if blocked else "[FAIL] ")
+      + "미국에 한국 유동성(5억)을 넣으면 멈춤")
+if not blocked:
+    fails.append("guard")
+
 print("\n전체 통과 — 인자 없이 돌려도 확정 설정이 들어갑니다." if not fails
       else "\n실패: " + ", ".join(fails))
 sys.exit(1 if fails else 0)
