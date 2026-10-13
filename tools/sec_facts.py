@@ -320,6 +320,18 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
     pairs = {t: c for t, c in t2c.items() if t in want}
     log.info("대상 %d종목 (보유 티커 %d개 중 CIK를 찾은 것)", len(pairs), len(want))
 
+    pre_dropped = 0
+    if mode == "collect":
+        cur = store.read("global_fs")
+        if not cur.empty and cur["value"].isna().any():
+            keep = cur[cur["value"].notna()]
+            pre_dropped = int(len(cur) - len(keep))
+            store.write("global_fs", keep)
+            log.info("값이 빈 행 %d개를 먼저 삭제 (%d → %d행) — 이후 저장이 "
+                     "빨라지고, 중간에 멈춰도 쓰레기가 남지 않습니다",
+                     pre_dropped, len(cur), len(keep))
+        del cur
+
     log.info("companyfacts.zip 내려받는 중 — 큰 파일입니다")
     zip_path = _download(FACTS_ZIP)
     log.info("받은 크기 %.0fMB", os.path.getsize(zip_path) / 1e6)
@@ -360,7 +372,7 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
                                   max(hi, d1) if hi else d1]
             for sym in cik2sym[cik]:
                 rows.extend(_rows(sym, got))
-            if mode == "collect" and len(rows) >= 400_000:
+            if mode == "collect" and len(rows) >= 200_000:
                 written += store.upsert("global_fs", pd.DataFrame(rows))
                 rows.clear()
                 log.info("  %d/%d 저장 중 (누적 %d행)", i, len(todo), written)
@@ -370,15 +382,15 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
     if mode == "collect" and rows:
         written += store.upsert("global_fs", pd.DataFrame(rows))
 
-    dropped = 0
+    dropped = pre_dropped
     if mode == "collect":
         # 값이 null인 행은 정보가 없는데 4분기 TTM 연속성을 깨뜨립니다.
         # yahooquery가 남긴 빈 행(2023Q4~2025Q1의 87~98%)이 그것입니다.
         cur = store.read("global_fs")
         if not cur.empty:
             keep = cur[cur["value"].notna()]
-            dropped = int(len(cur) - len(keep))
-            if dropped:
+            dropped += int(len(cur) - len(keep))
+            if len(cur) != len(keep):
                 store.write("global_fs", keep)
                 log.info("값이 빈 행 %d개 삭제 (TTM 연속성을 깨뜨립니다)", dropped)
 
