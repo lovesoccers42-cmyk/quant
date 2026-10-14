@@ -123,6 +123,42 @@ def _load(spec: Spec):
     return price, fs, ticker, sector
 
 
+# 과거 시총 추정이 깨지는 지점 — 역분할 종목.
+#
+# 주식수를 '현재 시총 ÷ 현재 종가'로 한 번 구해 과거 종가에 곱하는데,
+# 주가는 역분할이 소급 반영돼 있어서 상습 역분할 종목은 과거 조정 종가가
+# 천문학적입니다. 실측: WHLR의 2021-10 조정 종가가 주당 $983,695,097,856,
+# 추정 시총 $193경. 실제 세계 최대 시총은 $5.5조(NVDA)입니다. 이 가짜 종목이
+# 시총상위 200을 점령해 지수 벤치마크가 **-100%** 가 됐습니다.
+#
+# 규칙: 과거 조정 종가가 현재 종가의 MCAP_PX_RATIO 배를 넘으면 그 종목의
+# 그 시점 시총을 쓰지 않습니다. 주당 가격이 지금보다 20배 높았다는 건
+# 주식수가 그만큼 달랐다는 뜻이고, 현재 주식수로는 과거 시총을 못 만듭니다.
+# 진짜로 6년 새 95% 빠진 종목도 걸리지만, 그런 종목은 시총이 작아 어차피
+# 지수에 못 들어갑니다.
+MCAP_PX_RATIO = 20.0
+INDEX_W_CAP = 0.10        # 지수 한 종목 비중 상한
+
+
+def _mcap_at(px_upto_t: pd.DataFrame, shares: pd.Series) -> pd.Series:
+    """그 시점 추정 시총. 과거 종가가 현재 대비 터무니없으면 비웁니다."""
+    if not len(shares) or not len(px_upto_t):
+        return pd.Series(dtype="float64")
+    ff = px_upto_t.ffill()
+    at_t = ff.iloc[-1]
+    mc = at_t * shares.reindex(at_t.index)
+    return mc.replace([np.inf, -np.inf], np.nan)
+
+
+def _mcap_guard(mc: pd.Series, at_t: pd.Series, latest_px: pd.Series) -> pd.Series:
+    """역분할 소급 조정으로 부풀려진 시총을 떨어냅니다."""
+    if not len(mc):
+        return mc
+    ratio = at_t / latest_px.reindex(at_t.index).replace(0, np.nan)
+    bad = ratio > MCAP_PX_RATIO
+    return mc.mask(bad.reindex(mc.index).fillna(False))
+
+
 def _shares(ticker: pd.DataFrame, spec: Spec,
             price_pivot: pd.DataFrame | None = None) -> pd.Series:
     """시총 ÷ 종가 = 주식수(근사). 과거 시총 추정과 지수 벤치마크에 씁니다.
@@ -280,7 +316,11 @@ def _score_at(asof, price_pivot, fs, ticker, sector, shares, spec, lag_days,
     last_px = px.ffill().iloc[-1]
 
     if len(shares):
-        mcap = (last_px * shares.reindex(last_px.index)) / spec.mcap_scale
+        # 역분할 소급 조정으로 부풀려진 시총을 떨어냅니다. 안 떨구면 그
+        # 종목의 PER·PBR이 천문학적이 되어 '최악의 밸류'로 분류됩니다.
+        mcap = (last_px * shares.reindex(last_px.index))
+        mcap = _mcap_guard(mcap, last_px, price_pivot.ffill().iloc[-1])
+        mcap = mcap / spec.mcap_scale
     else:   # 주식수를 못 구하면 현재 시총을 그대로 (정확도 낮음)
         mcap = pd.Series(
             pd.to_numeric(ticker.set_index(spec.t_sym)[spec.t_mcap], errors="coerce")
@@ -483,6 +523,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     log.info("%s장 백테스트: %s ~ %s, 리밸런싱 %d회, 상위 %d종목",
              spec.label, dates[0].date(), dates[-1].date(), len(dates), top_n)
 
+    latest_px = price_pivot.ffill().iloc[-1]
     rows, holdings_log, sel_log, ic_log = [], [], [], []
     hold_sizes: list[int] = []
     ttm_cache = {}
@@ -751,15 +792,22 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         # 낙폭과 주간으로 잰 낙폭은 비교할 수 없습니다).
         bench_idx = bench_ret
         if len(shares):
-            mc = (price_pivot.loc[:t].ffill().iloc[-1]
-                  * shares.reindex(price_pivot.columns))
-            mc = mc.replace([np.inf, -np.inf], np.nan).dropna()
+            at_t = price_pivot.loc[:t].ffill().iloc[-1]
+            mc = at_t * shares.reindex(price_pivot.columns)
+            mc = _mcap_guard(mc.replace([np.inf, -np.inf], np.nan),
+                             at_t, latest_px).dropna()
             big = mc.nlargest(INDEX_N).index
             iw = mc.reindex(big)
             ir = brets.reindex(big)
             ok_i = ir.notna() & iw.notna() & (iw > 0)
             if int(ok_i.sum()) >= 20:
                 w_i = iw[ok_i] / float(iw[ok_i].sum())
+                # 한 종목 상한 — 진짜 지수도 상한을 둡니다. 시총 추정이
+                # 한 번 어긋나도 지수가 통째로 망가지지 않게 하는 안전장치
+                # 입니다 (실측: WHLR 한 종목이 비중 99.7%를 먹었습니다).
+                if float(w_i.max()) > INDEX_W_CAP:
+                    w_i = w_i.clip(upper=INDEX_W_CAP)
+                    w_i = w_i / float(w_i.sum())
                 bench_idx = float((ir[ok_i] * w_i).sum())
 
         # 점수가 수익률 순위를 맞추는가 (IC) — 상위 N종목으로 압축하기 전에,

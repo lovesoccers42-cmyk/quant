@@ -87,6 +87,36 @@ r6 = fc.latest_ttm(many, symbol="Symbol", account="account", date="date",
 check(len(r6) == 3 and set(r6["Symbol"]) == {"AAA", "CCC", "EEE"},
       f"종목·계정 조합마다 한 줄 ({len(r6)}줄)")
 
+print("\n[역분할 종목의 가짜 시총 차단]")
+# 실측 사고: WHLR의 2021-10 조정 종가가 주당 $983,695,097,856 (역분할 소급
+# 반영), 현재 시총은 $692,586. '과거 종가 × 현재 주식수'로 추정하면
+# $193경이 되어 시총상위 200을 혼자 점령했고, 지수 벤치마크가 -100%가
+# 됐습니다. 진짜 세계 최대 시총은 $5.5조입니다.
+import numpy as np  # noqa: E402
+import backtest as _bt  # noqa: E402
+
+at_t = pd.Series({"NORMAL": 100.0, "GROWN": 20.0, "REVSPLIT": 983_695_097_856.0})
+latest = pd.Series({"NORMAL": 120.0, "GROWN": 200.0, "REVSPLIT": 0.004})
+mc = pd.Series({"NORMAL": 1e11, "GROWN": 2e10, "REVSPLIT": 1.9e17})
+kept = _bt._mcap_guard(mc, at_t, latest)
+check(pd.notna(kept["NORMAL"]), "평범한 종목은 그대로")
+check(pd.notna(kept["GROWN"]), "6년 새 10배 오른 종목도 그대로 (NVDA 같은 경우)")
+check(pd.isna(kept["REVSPLIT"]),
+      f"역분할 종목의 가짜 시총은 비움 (기준 {_bt.MCAP_PX_RATIO:.0f}배)")
+check(_bt.MCAP_PX_RATIO >= 10,
+      f"기준이 너무 빡빡하지 않음 ({_bt.MCAP_PX_RATIO:.0f}배)")
+check(len(_bt._mcap_guard(pd.Series(dtype=float), at_t, latest)) == 0,
+      "빈 입력도 처리")
+
+print("\n[지수 한 종목 비중 상한]")
+# 시총 추정이 한 번 어긋나도 지수가 통째로 망가지지 않게 하는 안전장치
+check(0 < _bt.INDEX_W_CAP <= 0.2,
+      f"상한이 합리적 범위 ({_bt.INDEX_W_CAP:.0%})")
+w = pd.Series({"A": 0.95, "B": 0.03, "C": 0.02})
+w2 = w.clip(upper=_bt.INDEX_W_CAP); w2 = w2 / w2.sum()
+check(abs(float(w2.sum()) - 1.0) < 1e-9 and float(w2.max()) <= 0.9,
+      f"한 종목이 95%여도 깎고 다시 정규화 (최대 {float(w2.max()):.1%})")
+
 print("\n[유니버스 부족 신고]")
 import backtest  # noqa: E402
 
