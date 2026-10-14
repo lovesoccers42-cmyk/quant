@@ -65,6 +65,31 @@ r3 = fc.latest_ttm(ok, symbol="Symbol", account="account",
 check(abs(float(r3["ttm"].iloc[0]) - 18) < 1e-9,
       f"마지막 4분기 합 (ttm={float(r3['ttm'].iloc[0]):,.0f}, 기대 18)")
 
+print("\n[같은 분기가 두 줄로 들어올 때 — 실제 버그]")
+# EDGAR는 회계분기말(애플 2025-06-28), yahooquery는 월말(2025-06-30)로
+# 같은 분기를 적습니다. 둘 다 남으면 TTM이 그 분기를 두 번 더해 약 2배가
+# 됩니다. 실측 8,188개 (종목·계정·분기) 조합이 겹쳐 있었습니다.
+dupq = pd.concat([
+    mk("DUP", ["2024-09-28", "2024-09-30"], [10, 10]),
+    mk("DUP", ["2024-12-28", "2024-12-31"], [20, 20]),
+    mk("DUP", ["2025-03-29", "2025-03-31"], [30, 30]),
+    mk("DUP", ["2025-06-28", "2025-06-30"], [40, 40]),
+], ignore_index=True)
+r = fc.latest_ttm(dupq, symbol="Symbol", account="account",
+                  date="date", value="value")
+got = float(r["ttm"].iloc[0])
+check(abs(got - 100) < 1e-9,
+      f"같은 분기를 두 번 더하지 않음 (ttm={got:,.0f}, 기대 100 / 안 막으면 200)")
+check(fc.MIN_QUARTER_GAP_DAYS >= 30,
+      f"같은 분기 판정 간격 {fc.MIN_QUARTER_GAP_DAYS}일")
+
+# 진짜로 가까운 분기(회계연도 변경 등)는 드물지만, 정상 분기는 안 지워야 합니다
+normal = mk("OK", ["2024-09-30","2024-12-31","2025-03-31","2025-06-30"], [1,2,3,4])
+r2 = fc.latest_ttm(normal, symbol="Symbol", account="account",
+                   date="date", value="value")
+check(abs(float(r2["ttm"].iloc[0]) - 10) < 1e-9,
+      f"정상 분기 넷은 그대로 합산 (ttm={float(r2['ttm'].iloc[0]):,.0f})")
+
 print("\n[분기가 벌어져 있으면 무효]")
 gap = mk("DDD", ["2022-03-31", "2024-06-30", "2024-09-30", "2024-12-31"],
          [1, 2, 3, 4])

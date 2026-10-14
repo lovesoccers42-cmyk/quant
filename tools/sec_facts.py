@@ -393,6 +393,28 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
     if mode == "collect" and rows:
         written += store.upsert("global_fs", pd.DataFrame(rows))
 
+    stale = 0
+    if mode == "collect":
+        # EDGAR가 덮은 (종목, 계정)의 yahooquery 잔존 행을 지웁니다.
+        # 같은 분기인데 날짜가 며칠 달라(회계분기말 vs 월말) 둘 다 남고,
+        # TTM이 같은 분기를 두 번 더합니다 — 실측 8,188개 조합이 겹쳤습니다.
+        cur = store.read("global_fs")
+        if not cur.empty and "filed" in cur.columns:
+            isq = cur["freq"] == "q"
+            have = set(map(tuple, cur.loc[isq & cur["filed"].notna(),
+                                          ["Symbol", "account"]]
+                           .drop_duplicates().itertuples(index=False, name=None)))
+            if have:
+                pair = list(zip(cur["Symbol"], cur["account"]))
+                covered = pd.Series([pr in have for pr in pair], index=cur.index)
+                kill = isq & cur["filed"].isna() & covered
+                stale = int(kill.sum())
+                if stale:
+                    store.write("global_fs", cur[~kill])
+                    log.info("EDGAR가 덮은 (종목·계정)의 옛 출처 행 %d개 삭제 "
+                             "— 같은 분기를 두 번 더하는 것을 막습니다", stale)
+        del cur
+
     dropped = pre_dropped
     if mode == "collect":
         # 값이 null인 행은 정보가 없는데 4분기 TTM 연속성을 깨뜨립니다.
@@ -412,6 +434,7 @@ def run(mode: str = "probe", limit: int = 0) -> dict:
                        for k, v in span.items() if v[0]},
            "저장행수": written if mode == "collect" else 0,
            "빈값삭제행수": dropped,
+           "옛출처삭제행수": stale,
            "모드": mode}
     return out
 

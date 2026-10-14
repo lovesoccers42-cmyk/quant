@@ -18,6 +18,7 @@ import pandas as pd
 from scipy.stats import zscore
 
 SPAN_LIMIT_DAYS = 400   # 4개 분기(=diff(3))가 이보다 길면 TTM 무효
+MIN_QUARTER_GAP_DAYS = 45   # 이보다 가까운 두 줄은 같은 분기로 봅니다
 MOM_SKIP_DAYS = 21      # 모멘텀에서 제외할 최근 거래일 수 (약 1개월)
 K_RATIO_MIN_OBS = 60    # K_ratio 최소 관측치
 
@@ -28,6 +29,13 @@ def latest_ttm(fs: pd.DataFrame, *, symbol: str, account: str, date: str,
     fs = fs.copy()
     fs[date] = pd.to_datetime(fs[date])
     fs = fs.sort_values([symbol, account, date])
+
+    # 같은 분기가 두 줄로 들어오면 TTM이 그 분기를 두 번 더합니다.
+    # 실측: EDGAR의 2025-06-28(애플 회계분기말)과 yahooquery의 2025-06-30이
+    # 같은 값으로 나란히 들어와, 최근 4줄이 실제로는 2개 분기였습니다
+    # (TTM이 약 2배). 출처가 섞이면 언제든 재발하므로 여기서 막습니다.
+    gap = fs.groupby([symbol, account])[date].diff().dt.days
+    fs = fs[gap.isna() | (gap >= MIN_QUARTER_GAP_DAYS)]
 
     fs["ttm"] = (fs.groupby([symbol, account])[value]
                  .transform(lambda s: s.rolling(window=4, min_periods=4).sum()))
