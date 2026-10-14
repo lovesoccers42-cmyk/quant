@@ -215,11 +215,19 @@ def ticker_to_cik() -> dict:
     raise RuntimeError(f"티커→CIK 목록을 받지 못했습니다. 마지막 오류: {last}")
 
 
-def _series(facts: dict, tags, instant: bool) -> list:
+def _series(facts: dict, tags, *, instant: bool = False,
+            days_range: tuple | None = None) -> list:
     """태그 후보를 순서대로 보고 첫 번째로 값이 있는 것을 씁니다.
 
     돌려주는 것: [(기간끝 Timestamp, 값, 공시일 Timestamp, 기간일수)]
     같은 기간이 여러 번 보고되면 **가장 이른 공시**만 남깁니다(사후확신 방지).
+
+    days_range로 **먼저 거른 다음** 기간끝으로 중복을 없앱니다. 순서가
+    중요합니다 (실측 버그): 10-Q 하나에는 같은 기간끝에 대해 3개월·6개월·
+    9개월 누적이 함께 들어 있고 공시일이 모두 같습니다. 거르기 전에 중복을
+    없애면 누적분이 이겨서 남았다가 3개월 필터에서 통째로 버려집니다.
+    그래서 AAPL의 분기가 '회계 1분기(12월말)만 1년에 하나'가 됐고, 4분기
+    연속이 영영 안 만들어져 2025년 이전 TTM이 전부 0이었습니다.
     """
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
     for tag in tags:
@@ -247,6 +255,8 @@ def _series(facts: dict, tags, instant: bool) -> list:
                     if not e.get("start"):
                         continue
                     days = (pd.Timestamp(end) - pd.Timestamp(e["start"])).days
+                    if days_range and not (days_range[0] <= days <= days_range[1]):
+                        continue
                 key = end
                 prev = rows.get(key)
                 if prev is None or pd.Timestamp(filed) < prev[2]:
@@ -257,15 +267,14 @@ def _series(facts: dict, tags, instant: bool) -> list:
     return []
 
 
-def _quarterly(dur: list) -> list:
-    """기간 공시에서 분기 값을 만듭니다 — 3개월 공시 + 연간에서 역산한 Q4.
+def _quarterly(quarters: list, annual: list) -> list:
+    """3개월 공시 + 연간에서 역산한 Q4.
 
     많은 회사가 4분기를 따로 공시하지 않고 연간(10-K)만 냅니다. 그걸 빼면
     4분기 연속이 끊겨 TTM이 통째로 무효가 됩니다. 연간에서 앞 3분기를 빼
     Q4를 만듭니다.
     """
-    q = {r[0]: r for r in dur if QUARTER_DAYS[0] <= r[3] <= QUARTER_DAYS[1]}
-    annual = [r for r in dur if ANNUAL_DAYS[0] <= r[3] <= ANNUAL_DAYS[1]]
+    q = {r[0]: r for r in quarters}
     for end, val, filed, _days in annual:
         if end in q:
             continue
@@ -284,7 +293,8 @@ def extract(facts: dict) -> dict:
     """회사 하나의 companyfacts JSON → {계정: [(기간끝, 값, 공시일)]}"""
     out = {}
     for acct, tags in DURATION_TAGS.items():
-        rows = _quarterly(_series(facts, tags, instant=False))
+        rows = _quarterly(_series(facts, tags, days_range=QUARTER_DAYS),
+                          _series(facts, tags, days_range=ANNUAL_DAYS))
         if rows:
             out[acct] = [(r[0], r[1], r[2]) for r in rows]
     for acct, tags in INSTANT_TAGS.items():
@@ -294,7 +304,8 @@ def extract(facts: dict) -> dict:
 
     # 매출총이익이 없으면 매출 - 매출원가
     if "GrossProfit" not in out and "TotalRevenue" in out:
-        cost = _quarterly(_series(facts, COST_TAGS, instant=False))
+        cost = _quarterly(_series(facts, COST_TAGS, days_range=QUARTER_DAYS),
+                          _series(facts, COST_TAGS, days_range=ANNUAL_DAYS))
         if cost:
             cmap = {r[0]: r[1] for r in cost}
             gp = [(d, v - cmap[d], f) for d, v, f in out["TotalRevenue"]
