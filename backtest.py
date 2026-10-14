@@ -829,7 +829,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
     perf["누적_벤치마크"] = (1 + perf["벤치마크"]).cumprod()
     perf["누적_벤치마크_유동성"] = (1 + perf["벤치마크_유동성"]).cumprod()
 
-    summary = _metrics(perf, spec, top_n, cost_bps, lag_days)
+    summary = _metrics(perf, spec, top_n, cost_bps, lag_days,
+                       (price_pivot.index.min(), price_pivot.index.max()))
     summary["통계"] = _stats_block(perf, pd.DataFrame(ic_log))
     summary["제약"] = {
         "비중방식": {"equal": "동일가중 (전 종목 같은 금액)",
@@ -983,7 +984,8 @@ def _stats_block(perf: pd.DataFrame, ic: pd.DataFrame) -> dict:
     return out
 
 def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
-             cost_bps: float, lag_days: int) -> dict:
+             cost_bps: float, lag_days: int,
+             price_span: tuple | None = None) -> dict:
     days = (perf["다음리밸런싱"].iloc[-1] - perf["리밸런싱일"].iloc[0]).days
     years = max(days / 365.25, 1e-9)
 
@@ -1036,6 +1038,12 @@ def _metrics(perf: pd.DataFrame, spec: Spec, top_n: int,
         "시장": spec.label,
         "기간": f"{perf['리밸런싱일'].iloc[0]:%Y-%m-%d} ~ {perf['다음리밸런싱'].iloc[-1]:%Y-%m-%d}",
         "리밸런싱횟수": int(len(perf)),
+        # 쓴 주가의 실제 기간. 백테스트 기간이 짧을 때 '데이터가 짧아서'인지
+        # '설정 탓'인지 이 줄 하나로 갈립니다. 2026-10-14에 6년치를 모아 두고도
+        # 13회차만 나온 적이 있는데, 요약만 보고는 원인을 알 수 없었습니다.
+        **({"주가기간": f"{price_span[0]:%Y-%m-%d} ~ {price_span[1]:%Y-%m-%d}"
+                    f" ({(price_span[1] - price_span[0]).days / 365.25:.1f}년)"}
+           if price_span else {}),
         "보유종목수": top_n,
         **({"유니버스부족": thin_info} if thin_info else {}),
         "평균턴오버": round(float(perf["턴오버"].mean()) * 100, 1),
