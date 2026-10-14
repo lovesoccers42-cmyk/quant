@@ -43,7 +43,13 @@ YF_SLEEP = float(os.getenv("QUANT_YF_SLEEP", "1.0"))  # 묶음 사이 간격(초
 FS_CHUNK = int(os.getenv("QUANT_FS_CHUNK", "50"))     # yahooquery 묶음 크기
 US_FS_WORKERS = int(os.getenv("QUANT_US_FS_WORKERS", "8"))  # 재무제표 동시 조회 수
 US_DAILY_PRICE_DAYS = int(os.getenv("QUANT_US_DAILY_PRICE_DAYS", "10"))
-US_MONTHLY_PRICE_YEARS = int(os.getenv("QUANT_US_MONTHLY_PRICE_YEARS", "2"))
+# 2 → 6년. EDGAR로 재무제표를 2012년까지 받고 나니 이제 **주가가**
+# 병목입니다. 12개월 모멘텀이 필요해서 백테스트 시작은 "주가 시작 +
+# 1년"이고, 2년치면 2025-09부터 = 월간 13회차뿐입니다. 6년이면
+# 2021-10부터 = 약 60회차가 나옵니다.
+# 더 늘리지 않는 이유: 2018년 이전은 6계정을 모두 갖춘 종목이
+# 266개뿐이라 주가를 더 받아도 쓸 종목이 없습니다 (실측).
+US_MONTHLY_PRICE_YEARS = int(os.getenv("QUANT_US_MONTHLY_PRICE_YEARS", "6"))
 
 # 테스트용: 티커 수를 제한합니다 (0이면 전체)
 TICKER_LIMIT = int(os.getenv("QUANT_TICKER_LIMIT", "0"))
