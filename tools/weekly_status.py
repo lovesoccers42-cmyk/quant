@@ -36,6 +36,17 @@ def main() -> int:
             out["계좌"][key] = {"오류": f"{type(e).__name__}: {str(e)[:120]}"}
             continue
         row = {k: d.get(k) for k in KEEP if k in d}
+        # 주문서를 뽑는 순간 '샀다'고 상태에 적힙니다. 그래서 보유종목수는
+        # **주문 뒤 예정** 숫자이고, 지금 계좌에 있는 수가 아닙니다.
+        # 실측 혼선(2026-10-15): 배우자 계좌가 23종목인데 48로 보였습니다.
+        #   체결 전 보유 = 보유종목수 + 매도 - 매수
+        try:
+            held = (int(d.get("보유종목수") or 0)
+                    + int(d.get("매도") or 0) - int(d.get("매수") or 0))
+            row["체결전_실제보유"] = max(0, held)
+            row["주문후_보유예정"] = d.get("보유종목수")
+        except (TypeError, ValueError):
+            pass
         # 금액은 숫자를 남기지 않고 '잡혔는지'만 알려 줍니다.
         row["배정액설정됨"] = bool(d.get("종목당배정액"))
         row["주문건수"] = len(d.get("orders") or [])
@@ -74,7 +85,8 @@ def main() -> int:
             continue
         print(f"  {key}: 기준일 {a.get('기준일')} · 주가 {a.get('주가기준일')} "
               f"· 등분 {a.get('이번등분')}/{a.get('등분수')}")
-        print(f"       보유 {a.get('보유종목수')}"
+        print(f"       체결 전 보유 {a.get('체결전_실제보유')}"
+              f" → 주문 뒤 {a.get('주문후_보유예정')}"
               + (f" + 미매수 {a.get('미매수')}" if a.get("미매수") else "")
               + f" · 매도 {a.get('매도')} · 매수 {a.get('매수')}"
               f" · 가격초과제외 {a.get('가격초과제외')}"
