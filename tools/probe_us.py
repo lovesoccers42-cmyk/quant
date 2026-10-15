@@ -36,6 +36,62 @@ def span(df: pd.DataFrame, col: str) -> str:
     return f"{d.min():%Y-%m-%d} ~ {d.max():%Y-%m-%d}  ({yrs:.1f}년)"
 
 
+def model_universe(fs: pd.DataFrame) -> None:
+    """과거 시점마다 '모델이 실제로 점수를 낼 수 있는 종목 수'.
+
+    위의 '4분기 이상 N종목'은 계정을 섞어 센 숫자라 과대평가입니다. 모델은
+    여섯 계정이 **각각** 유효한 TTM을 가져야 점수를 냅니다. 그걸 안 재서
+    '585종목'이라고 믿고 미국 백테스트를 두 번 돌렸는데, 실제 회차당
+    점수산출종목은 평균 25개(범위 19~63)였습니다.
+
+    계정별 수도 같이 찍습니다 — 하나가 막으면 교집합이 통째로 무너지고,
+    어느 계정인지는 교집합 숫자만 봐서는 알 수 없기 때문입니다.
+    (실측 2026-10-15: 2022-01 교집합 37종목, 영업현금흐름만 66종목,
+     그것만 빼면 1,709종목이었습니다.)
+    """
+    import backtest as bt
+    import factor_core as fc
+
+    spec = bt.SPECS["us"]
+    accts = sorted({a for pair in spec.quality.values() for a in pair}
+                   | set(spec.value.values()))
+    q = fs[(fs["freq"] == "q") & (fs["account"].isin(accts))]
+    if q.empty:
+        print("\n  여섯 계정 중 아무것도 없습니다 — 수집부터 다시 보세요.")
+        return
+
+    today = pd.Timestamp(date.today())
+    cutoffs = [c for c in pd.date_range(end=today.normalize(), periods=6,
+                                        freq="YS") if c >= q["date"].min()]
+    cutoffs = (cutoffs or [today])[-5:] + [today]
+
+    print("\n  시점별 '여섯 계정 모두 유효한 TTM' 종목 수"
+          "  ← 모델이 실제로 점수를 낼 수 있는 모수")
+    head = "    " + "시점".ljust(12) + "모두".rjust(7) + "".join(
+        a[:14].rjust(16) for a in accts)
+    print(head)
+    for c in cutoffs:
+        t = fc.latest_ttm(q[q["date"] <= c], symbol="Symbol",
+                          account="account", date="date", value="value",
+                          mean_accounts=spec.mean_accounts)
+        t = t[t["ttm"].notna()]
+        per = {a: set(t.loc[t["account"] == a, "Symbol"]) for a in accts}
+        both = set.intersection(*per.values()) if per else set()
+        line = "    " + f"{c:%Y-%m}".ljust(12) + f"{len(both):,}".rjust(7)
+        for a in accts:
+            line += f"{len(per[a]):,}".rjust(16)
+        print(line)
+
+    worst = min(accts, key=lambda a: len(per[a]))
+    print(f"\n    가장 좁은 계정: {worst} ({len(per[worst]):,}종목)")
+    if len(both) and len(per[worst]) < len(both) * 2:
+        print("    → 이 계정이 모수를 결정합니다. 여기가 비면 나머지 다섯이 "
+              "멀쩡해도 백테스트가 못 돕니다.")
+    if len(both) < 200:
+        print(f"    → 200종목 포트폴리오를 담을 수 없습니다 "
+              f"(현재 {len(both):,}종목). 백테스트 결과를 믿지 마세요.")
+
+
 def main() -> int:
     print("=" * 66)
     print("  미국 데이터 점검")
@@ -69,6 +125,8 @@ def main() -> int:
         per = q.groupby("Symbol")["date"].nunique()
         print(f"\n  종목당 분기 수: 중앙 {per.median():.0f} · "
               f"4분기 이상 {int((per >= 4).sum())}/{len(per)}종목")
+
+    model_universe(fs)
 
     price = store.read("global_price")
     pyrs = 0.0

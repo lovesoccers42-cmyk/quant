@@ -215,19 +215,15 @@ def ticker_to_cik() -> dict:
     raise RuntimeError(f"티커→CIK 목록을 받지 못했습니다. 마지막 오류: {last}")
 
 
-def _series(facts: dict, tags, *, instant: bool = False,
-            days_range: tuple | None = None) -> list:
+def _facts(facts: dict, tags, *, instant: bool = False) -> list:
     """태그 후보를 순서대로 보고 첫 번째로 값이 있는 것을 씁니다.
 
-    돌려주는 것: [(기간끝 Timestamp, 값, 공시일 Timestamp, 기간일수)]
-    같은 기간이 여러 번 보고되면 **가장 이른 공시**만 남깁니다(사후확신 방지).
+    돌려주는 것: [(기간시작, 기간끝, 값, 공시일, 기간일수)] — 기간을 여기서
+    거르지 않습니다. 누적 공시를 분기로 되돌리려면(_discrete) 3개월짜리가
+    아닌 줄도 필요하기 때문입니다.
 
-    days_range로 **먼저 거른 다음** 기간끝으로 중복을 없앱니다. 순서가
-    중요합니다 (실측 버그): 10-Q 하나에는 같은 기간끝에 대해 3개월·6개월·
-    9개월 누적이 함께 들어 있고 공시일이 모두 같습니다. 거르기 전에 중복을
-    없애면 누적분이 이겨서 남았다가 3개월 필터에서 통째로 버려집니다.
-    그래서 AAPL의 분기가 '회계 1분기(12월말)만 1년에 하나'가 됐고, 4분기
-    연속이 영영 안 만들어져 2025년 이전 TTM이 전부 0이었습니다.
+    같은 (시작, 끝) 기간이 여러 번 보고되면 **가장 이른 공시**만 남깁니다
+    (사후확신 방지). 순간 계정은 시작이 None.
     """
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
     for tag in tags:
@@ -248,23 +244,89 @@ def _series(facts: dict, tags, *, instant: bool = False,
                 if pd.Timestamp(end) > _TODAY or pd.Timestamp(filed) > _TODAY:
                     continue
                 if instant:
-                    days = 0
                     if e.get("start"):
                         continue            # 순간 계정에 기간 공시가 섞인 것
+                    start, days = None, 0
                 else:
                     if not e.get("start"):
                         continue
-                    days = (pd.Timestamp(end) - pd.Timestamp(e["start"])).days
-                    if days_range and not (days_range[0] <= days <= days_range[1]):
-                        continue
-                key = end
+                    start = pd.Timestamp(e["start"])
+                    days = (pd.Timestamp(end) - start).days
+                key = (start, end)
                 prev = rows.get(key)
-                if prev is None or pd.Timestamp(filed) < prev[2]:
-                    rows[key] = (pd.Timestamp(end), float(val),
+                if prev is None or pd.Timestamp(filed) < prev[3]:
+                    rows[key] = (start, pd.Timestamp(end), float(val),
                                  pd.Timestamp(filed), days)
         if rows:
-            return sorted(rows.values(), key=lambda r: r[0])
+            return sorted(rows.values(), key=lambda r: (r[1], r[4]))
     return []
+
+
+def _series(facts: dict, tags, *, instant: bool = False,
+            days_range: tuple | None = None) -> list:
+    """_facts를 기간으로 거르고 기간끝 한 줄씩으로 줄입니다.
+
+    돌려주는 것: [(기간끝 Timestamp, 값, 공시일 Timestamp, 기간일수)]
+
+    days_range로 **먼저 거른 다음** 기간끝으로 중복을 없앱니다. 순서가
+    중요합니다 (실측 버그): 10-Q 하나에는 같은 기간끝에 대해 3개월·6개월·
+    9개월 누적이 함께 들어 있고 공시일이 모두 같습니다. 거르기 전에 중복을
+    없애면 누적분이 이겨서 남았다가 3개월 필터에서 통째로 버려집니다.
+    그래서 AAPL의 분기가 '회계 1분기(12월말)만 1년에 하나'가 됐고, 4분기
+    연속이 영영 안 만들어져 2025년 이전 TTM이 전부 0이었습니다.
+    """
+    rows = {}
+    for start, end, val, filed, days in _facts(facts, tags, instant=instant):
+        if days_range and not (days_range[0] <= days <= days_range[1]):
+            continue
+        prev = rows.get(end)
+        if prev is None or filed < prev[2]:
+            rows[end] = (end, val, filed, days)
+    return sorted(rows.values(), key=lambda r: r[0])
+
+
+# 누적 두 구간의 일수 차이가 '한 분기'로 인정되는 범위
+CUM_STEP_DAYS = (80, 100)
+
+
+def _discrete(rows: list) -> list:
+    """기간 공시 목록 → 분기 목록 [(기간끝, 값, 공시일, 기간일수)].
+
+    **영업현금흐름이 과거를 통째로 막고 있던 원인입니다.** XBRL에서 현금흐름표
+    (그리고 많은 회사의 손익계산서)는 분기별이 아니라 **회계연도 누적**으로
+    공시됩니다: Q1=3개월, Q2=6개월, Q3=9개월, 10-K=12개월. 3개월짜리만 받으면
+    한 회계연도에서 Q1 하나만 건져집니다.
+
+    실측(2026-10-15, 5,065종목):
+      · AAPL 영업현금흐름 16행 — 전부 12월말(회계 1분기). NetIncome은 72행.
+      · 2021년 한 해에 현금흐름 분기가 4개인 종목은 34개, 1개뿐인 종목이 3,372개.
+      · 그 결과 2022-01 시점에 6계정이 모두 유효한 종목이 **37개**. 현금흐름만
+        빼면 1,709개 — 나머지 다섯 계정은 멀쩡했습니다.
+
+    그래서 **같은 시작일**을 공유하는 누적 구간들을 끝일 순으로 빼서 분기를
+    복원합니다 (6개월 − 3개월 = Q2, 9개월 − 6개월 = Q3, 12개월 − 9개월 = Q4).
+    실제로 공시된 3개월짜리가 있으면 그쪽이 우선입니다.
+    """
+    out = {}
+    for _s, end, val, filed, days in rows:
+        if QUARTER_DAYS[0] <= days <= QUARTER_DAYS[1]:
+            prev = out.get(end)
+            if prev is None or filed < prev[2]:
+                out[end] = (end, val, filed, days)
+
+    by_start: dict = {}
+    for r in rows:
+        by_start.setdefault(r[0], []).append(r)
+    for _start, grp in by_start.items():
+        grp = sorted(grp, key=lambda r: r[4])          # 기간 길이 순
+        for a, b in zip(grp, grp[1:]):
+            step = b[4] - a[4]
+            if not (CUM_STEP_DAYS[0] <= step <= CUM_STEP_DAYS[1]):
+                continue
+            if b[1] in out:                            # 3개월 공시가 이미 있음
+                continue
+            out[b[1]] = (b[1], b[2] - a[2], max(a[3], b[3]), step)
+    return sorted(out.values(), key=lambda r: r[0])
 
 
 def _quarterly(quarters: list, annual: list) -> list:
@@ -293,8 +355,11 @@ def extract(facts: dict) -> dict:
     """회사 하나의 companyfacts JSON → {계정: [(기간끝, 값, 공시일)]}"""
     out = {}
     for acct, tags in DURATION_TAGS.items():
-        rows = _quarterly(_series(facts, tags, days_range=QUARTER_DAYS),
-                          _series(facts, tags, days_range=ANNUAL_DAYS))
+        raw = _facts(facts, tags)
+        annual = sorted({r[1]: (r[1], r[2], r[3], r[4]) for r in raw
+                         if ANNUAL_DAYS[0] <= r[4] <= ANNUAL_DAYS[1]}.values(),
+                        key=lambda r: r[0])
+        rows = _quarterly(_discrete(raw), annual)
         if rows:
             out[acct] = [(r[0], r[1], r[2]) for r in rows]
     for acct, tags in INSTANT_TAGS.items():
@@ -304,8 +369,11 @@ def extract(facts: dict) -> dict:
 
     # 매출총이익이 없으면 매출 - 매출원가
     if "GrossProfit" not in out and "TotalRevenue" in out:
-        cost = _quarterly(_series(facts, COST_TAGS, days_range=QUARTER_DAYS),
-                          _series(facts, COST_TAGS, days_range=ANNUAL_DAYS))
+        craw = _facts(facts, COST_TAGS)
+        cann = sorted({r[1]: (r[1], r[2], r[3], r[4]) for r in craw
+                       if ANNUAL_DAYS[0] <= r[4] <= ANNUAL_DAYS[1]}.values(),
+                      key=lambda r: r[0])
+        cost = _quarterly(_discrete(craw), cann)
         if cost:
             cmap = {r[0]: r[1] for r in cost}
             gp = [(d, v - cmap[d], f) for d, v, f in out["TotalRevenue"]

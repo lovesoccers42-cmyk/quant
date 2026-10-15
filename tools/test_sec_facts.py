@@ -87,6 +87,60 @@ f_only_cum = facts(NetIncomeLoss=[
 check("NetIncome" not in sf.extract(f_only_cum),
       "6개월 누적만 있으면 분기로 만들지 않음")
 
+print("\n[회계연도 누적만 오는 계정 — 영업현금흐름의 실제 모습]")
+# 현금흐름표는 거의 모든 회사가 분기별이 아니라 **회계연도 누적**으로
+# 공시합니다. 3개월짜리만 받으면 한 해에 Q1 하나만 건져집니다.
+# 실측 피해(2026-10-15): AAPL 영업현금흐름 16행이 전부 12월말(회계 1분기),
+# 2021년에 현금흐름 분기가 4개인 종목은 34개뿐. 그래서 2022-01에 6계정이
+# 모두 유효한 종목이 37개였고, 현금흐름만 빼면 1,709개였습니다.
+f_cf = facts(NetCashProvidedByUsedInOperatingActivities=[
+    dur("2025-01-01", "2025-03-31", 100, "2025-04-20"),           # 3개월
+    dur("2025-01-01", "2025-06-30", 250, "2025-07-20"),           # 6개월 누적
+    dur("2025-01-01", "2025-09-30", 420, "2025-10-20"),           # 9개월 누적
+    dur("2025-01-01", "2025-12-31", 600, "2026-02-20", "10-K"),   # 12개월
+])
+cf = sf.extract(f_cf).get("CashFlowFromContinuingOperatingActivities", [])
+vals = [round(v) for _, v in sorted((d, v) for d, v, _ in cf)]
+check(len(cf) == 4 and vals == [100, 150, 170, 180],
+      f"누적을 빼서 분기 넷을 복원 ({len(cf)}개 {vals}, 기대 [100,150,170,180])")
+ends = sorted(f"{d:%m-%d}" for d, _, _ in cf)
+check(ends == ["03-31", "06-30", "09-30", "12-31"],
+      f"분기말 넷 {ends}")
+
+print("\n[누적을 되돌려도 실제 3개월 공시가 우선]")
+# 같은 분기에 3개월 공시와 '누적 차이'가 둘 다 만들어질 수 있습니다.
+# 회사가 직접 낸 3개월 값을 써야 합니다 (반올림·재분류 차이).
+f_both = facts(NetIncomeLoss=[
+    dur("2025-01-01", "2025-03-31", 100, "2025-04-20"),
+    dur("2025-04-01", "2025-06-30", 111, "2025-07-20"),   # 회사가 낸 3개월
+    dur("2025-01-01", "2025-06-30", 210, "2025-07-20"),   # 누적 → 빼면 110
+])
+got_both = {f"{d:%m-%d}": v for d, v, _ in sf.extract(f_both)["NetIncome"]}
+check(got_both.get("06-30") == 111,
+      f"3개월 공시 111을 씀 (누적 차이 110이 아니라) — {got_both.get('06-30')}")
+
+print("\n[회계연도가 1월에 시작하지 않아도]")
+# AAPL은 9월말에 회계연도가 끝납니다. 시작일이 같은 누적끼리만 빼야 합니다.
+f_fy = facts(NetCashProvidedByUsedInOperatingActivities=[
+    dur("2024-09-29", "2024-12-28", 100, "2025-01-30"),
+    dur("2024-09-29", "2025-03-29", 180, "2025-05-01"),
+    dur("2024-09-29", "2025-06-28", 240, "2025-07-31"),
+    dur("2024-09-29", "2025-09-27", 300, "2025-10-30", "10-K"),
+    dur("2025-09-28", "2025-12-27", 120, "2026-01-29"),   # 다음 회계연도
+])
+cf2 = sf.extract(f_fy)["CashFlowFromContinuingOperatingActivities"]
+vals2 = [round(v) for _, v in sorted((d, v) for d, v, _ in cf2)]
+check(len(cf2) == 5 and vals2 == [100, 80, 60, 60, 120],
+      f"회계연도 경계를 넘어 빼지 않음 ({vals2}, 기대 [100,80,60,60,120])")
+
+print("\n[연간만 있으면 분기를 지어내지 않음]")
+f_only_fy = facts(NetCashProvidedByUsedInOperatingActivities=[
+    dur("2024-01-01", "2024-12-31", 400, "2025-02-20", "10-K"),
+    dur("2025-01-01", "2025-12-31", 500, "2026-02-20", "10-K"),
+])
+check("CashFlowFromContinuingOperatingActivities" not in sf.extract(f_only_fy),
+      "연간 둘만 있으면 분기 없음 (연간끼리 빼지 않음)")
+
 print("\n[연간에서 Q4 역산]")
 f = facts(NetIncomeLoss=[
     dur("2025-01-01", "2025-03-31", 100, "2025-04-20"),
