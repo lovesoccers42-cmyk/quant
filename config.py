@@ -309,21 +309,45 @@ PROFILES: dict[str, dict] = {
 DEFAULT_PROFILE = os.getenv("QUANT_PROFILE", "main").strip().lower()
 
 
-def profile(name: str | None = None) -> dict:
-    """프로필 설정을 돌려줍니다. 모르는 이름은 조용히 main으로 넘기지 않습니다."""
+def profile(name: str | None = None, market: str = "kr") -> dict:
+    """프로필 설정을 돌려줍니다. 모르는 이름은 조용히 main으로 넘기지 않습니다.
+
+    market="us"면 같은 프로필(상수/배우자)을 미국 테이블·모델 파일에 겹칩니다.
+    설정 자체는 한국과 같은 것을 씁니다 — 미국 백테스트에서 확정한 값이
+    점수가중·no_mom·섹터캡 없음으로 한국과 같았기 때문입니다(CONFIRMED_US).
+
+    통화가 다르므로 테이블은 반드시 갈라야 합니다. us_capital의 총자본은
+    **달러**입니다. 원화 총자본과 더하면 수익률이 통째로 거짓이 됩니다.
+    """
     key = (name or DEFAULT_PROFILE or "main").strip().lower()
     if key not in PROFILES:
         raise ValueError(f"모르는 프로필 '{key}'. 쓸 수 있는 값: {list(PROFILES)}")
+    mkt = str(market).strip().lower()
+    if mkt not in ("kr", "us"):
+        raise ValueError(f"시장은 'kr' 또는 'us'만 됩니다: {market!r}")
     out = dict(PROFILES[key])
     out.setdefault("qvm_weights", None)
     out.setdefault("split", None)
     out["key"] = key
+    out["market"] = mkt
     # 프로필별 테이블·파일 이름 — main은 기존 이름을 그대로 써서 호환됩니다
     suffix = "" if key == "main" else f"_{key}"
-    out["state_table"] = f"kor_portfolio{suffix}"
-    out["capital_table"] = f"kor_capital{suffix}"
-    out["model_file"] = f"model_kr{suffix}_latest.parquet"
-    out["hold_file"] = f"model_kr{suffix}_hold.parquet"
+    if mkt == "us":
+        out["통화"] = "USD"
+        out["state_table"] = f"us_portfolio{suffix}"
+        out["capital_table"] = f"us_capital{suffix}"
+        out["trades_table"] = "us_trades"
+        out["holdings_log"] = "us_holdings_log"
+        out["model_file"] = f"model_us{suffix}_latest.parquet"
+        out["hold_file"] = f"model_us{suffix}_hold.parquet"
+    else:
+        out["통화"] = "KRW"
+        out["state_table"] = f"kor_portfolio{suffix}"
+        out["capital_table"] = f"kor_capital{suffix}"
+        out["trades_table"] = "kor_trades"
+        out["holdings_log"] = "kor_holdings_log"
+        out["model_file"] = f"model_kr{suffix}_latest.parquet"
+        out["hold_file"] = f"model_kr{suffix}_hold.parquet"
     return out
 
 # ── 확정 설정 (한국) ─────────────────────────────────────────
