@@ -407,7 +407,7 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
         rank_buffer: float = 0.0, sector_neutral=None,
         use_lowvol: bool = False, trend_stock: int = 0,
         max_sector_weight: float = 0.0, qvm_weights=None,
-        split=None) -> dict:
+        split=None, mcap_top: int = 0) -> dict:
     """tranches=K 면 자금을 K등분해 매 회차 1/K만 점검합니다(분할 리밸런싱).
 
     주기를 월말에서 주간으로 줄이면 한 번에 포트폴리오 전체가 바뀌어
@@ -543,6 +543,30 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                            weights=qvm_weights, trend_stock=trend_stock)
         if scored is None or scored.empty:
             continue
+
+        # 시총 상위 N종목으로 모수를 좁힙니다 (mcap_top).
+        #
+        # 왜 있는가: 11년 미국 실측에서 QVM 순위 자체는 작동하는데
+        # (IC t 2.80, 분위스프레드 t 2.43, 분위 단조) 포트폴리오는 지수에
+        # 졌습니다(연 13.28% vs 14.60%). 모델이 고르는 모수 — 유동성만
+        # 통과한 전 종목 — 가 시총상위 200에 10년 내내 졌기 때문입니다.
+        # 즉 '순위는 맞는데 풀이 진' 상태입니다. 이 값은 그 가설 하나를
+        # 재려고 넣었습니다: 풀을 대형주로 올리면 지수를 이기는가.
+        #
+        # 0이면 끕니다(예전 동작). 과거 시총은 '그날 종가 × 현재 주식수'
+        # 근사라 증자·감자가 반영되지 않습니다 — 이 필터의 정확도도 딱
+        # 그만큼입니다.
+        if mcap_top and mcap_top > 0 and len(shares):
+            mc_t = _mcap_guard(_mcap_at(price_pivot.loc[:t], shares),
+                               price_pivot.loc[:t].ffill().iloc[-1],
+                               latest_px).dropna()
+            if len(mc_t) > mcap_top:
+                big_u = set(mc_t.nlargest(mcap_top).index.astype(str))
+                narrowed = scored[scored["symbol"].astype(str).isin(big_u)]
+                # 너무 적게 남으면(데이터 구멍) 그 회차는 거르지 않습니다 —
+                # 조용히 5종목 포트폴리오가 되는 것보다 낫습니다.
+                if len(narrowed) >= max(30, top_n):
+                    scored = narrowed
 
         eligible = None
         if turnover_pivot is not None:
@@ -926,6 +950,8 @@ def run(market: str = "kr", top_n: int = 30, rebalance: str = "ME",
                   else f"한 섹터 최대 {max_sector_pct:.0%}"),
         "유동성기준": ("없음" if min_turnover <= 0
                    else f"{config.LIQUIDITY_WINDOW}일 평균 거래대금 {min_turnover:,.0f} 이상"),
+        "모수제한": ("없음 — 유동성 통과 전 종목" if not mcap_top or mcap_top <= 0
+                 else f"시총 상위 {mcap_top:,}종목 (지수는 상위 {INDEX_N}종목)"),
         "분할리밸런싱": ("없음 (매 회차 전체 교체)" if n_tr <= 1
                     else f"{n_tr}등분 — 매 회차 {sizes[0]}종목만 점검"),
         "리스크오버레이": ("없음 (항상 100% 투자)" if not trend_ma or trend_ma <= 0

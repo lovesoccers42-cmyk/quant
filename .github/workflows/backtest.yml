@@ -98,6 +98,10 @@ on:
         description: "분할 '등분수/몇번째@공용비중' — 상수 2/0@0.7 · 배우자 2/1@0.7. 비우면 분할 없음"
         required: false
         default: ""
+      mcap_top:
+        description: "모수를 시총 상위 N종목으로 제한 (비우면 제한 없음). 지수는 상위 200종목이라, 미국에서 '순위는 맞는데 풀이 졌다'를 재는 값입니다"
+        required: false
+        default: ""
 
 concurrency:
   group: quant-backtest
@@ -169,7 +173,8 @@ jobs:
             "${{ github.event.inputs.trend_stock }}" \
             "${{ github.event.inputs.max_sector_weight }}" \
             "${{ github.event.inputs.qvm_weights }}" \
-            "${{ github.event.inputs.split }}"
+            "${{ github.event.inputs.split }}" \
+            "${{ github.event.inputs.mcap_top }}"
 
       - name: 결과 올리기
         if: always()

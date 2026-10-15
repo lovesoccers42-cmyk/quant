@@ -102,6 +102,31 @@ print(("[OK ] " if blank_ok else "[FAIL] ")
 if not blank_ok:
     fails.append("blank")
 
+# mcap_top — 안 주면 꺼져 있어야 합니다. 켜져 있으면 예전 실행과 비교가
+# 안 되는데, 요약만 봐서는 모수가 좁아진 걸 눈치채기 어렵습니다.
+captured.clear()
+try:
+    rb.main("us")
+except SystemExit:
+    pass
+off_ok = int(captured.get("mcap_top", -1)) == 0
+print(("[OK ] " if off_ok else "[FAIL] ")
+      + f"mcap_top은 기본 꺼짐 ({captured.get('mcap_top')})")
+if not off_ok:
+    fails.append("mcap_top-default")
+
+captured.clear()
+try:
+    rb.main("us", 0, "", -1.0, -1.0, -1.0, 1, 0, 0.0, "", -1.0, -1.0, -1.0,
+            "", -1, -1, -1.0, "", "", 500)
+except SystemExit:
+    pass
+on_ok = int(captured.get("mcap_top", 0)) == 500
+print(("[OK ] " if on_ok else "[FAIL] ")
+      + f"mcap_top=500이 그대로 전달됨 ({captured.get('mcap_top')})")
+if not on_ok:
+    fails.append("mcap_top-pass")
+
 # 리포트 파일명 — GitHub 릴리스는 에셋 이름에서 한글을 떼어냅니다. 영문 토큰이
 # 없으면 서로 다른 리포트가 "1006_100.xlsx" 하나로 합쳐져 덮어써집니다
 # (10-06에 주간 주문서가 백테스트 리포트에 덮여 실제로 사라졌습니다).

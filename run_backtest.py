@@ -86,7 +86,8 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
          rebal_band: float = -1.0, rank_buffer: float = -1.0,
          sector_neutral: str = "", use_lowvol: int = -1,
          trend_stock: int = -1, max_sector_weight: float = -1.0,
-         qvm_weights: str = "", split: str = "") -> int:
+         qvm_weights: str = "", split: str = "",
+         mcap_top: int = -1) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -169,7 +170,8 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
                                                     config.MAX_SECTOR_WEIGHT)),
                        qvm_weights=(_parse_weights(qvm_weights)
                                     or CK.get("qvm_weights")),
-                       split=_parse_split(split))
+                       split=_parse_split(split),
+                       mcap_top=int(pick("mcap_top", mcap_top, 0)))
     s = res["summary"]
     _n = int(s.get("리밸런싱횟수", 0))
     _yrs = _n / {"B": 252, "W-FRI": 52, "ME": 12, "QE": 4}.get(rebalance, 52)
@@ -272,4 +274,4 @@ if __name__ == "__main__":
         _s(1, "kr"), _i(2, 0), _s(3), _f(4, -1.0), _f(5, -1.0), _f(6, -1.0),
         _i(7, -1), _i(8, -1), _f(9, -1.0), _s(10), _f(11, -1.0), _f(12, -1.0),
         _f(13, -1.0), _s(14), _i(15, -1), _i(16, -1), _f(17, -1.0),
-        _s(18), _s(19)))
+        _s(18), _s(19), _i(20, -1)))
