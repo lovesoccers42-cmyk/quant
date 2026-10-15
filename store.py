@@ -33,6 +33,15 @@ PRIMARY_KEYS: dict[str, list[str]] = {
     # 거래·보유 기록 (덮어쓰지 않고 쌓습니다 — 성과 계산의 원장)
     "kor_trades": ["기준일", "계좌", "종목코드", "구분"],
     "kor_holdings_log": ["기준일", "계좌", "종목코드"],
+    # 미국 실전 운용 — 한국과 같은 스키마, 별도 테이블.
+    # 통화가 다르고(USD) 주기가 다릅니다(월 1회). 섞이면 달러 평가액이
+    # 원화 총자본에 더해져 수익률이 통째로 거짓이 됩니다.
+    "us_portfolio": ["종목코드"],
+    "us_capital": ["기준일"],
+    "us_portfolio_alt": ["종목코드"],
+    "us_capital_alt": ["기준일"],
+    "us_trades": ["기준일", "계좌", "종목코드", "구분"],
+    "us_holdings_log": ["기준일", "계좌", "종목코드"],
     # 미국장
     "global_ticker": ["Symbol", "country", "date"],
     "global_price": ["Date", "Symbol"],
@@ -42,6 +51,12 @@ PRIMARY_KEYS: dict[str, list[str]] = {
 
 KOR_TABLES = [t for t in PRIMARY_KEYS if t.startswith("kor_")]
 US_TABLES = [t for t in PRIMARY_KEYS if t.startswith("global_")]
+# 운용 상태(보유·자금·원장)는 공개 릴리스에 올리지 않습니다 — 금액이 들어
+# 있어서 quant-state(비공개)에만 둡니다. 데이터 테이블과 구분해 둡니다.
+STATE_TABLES = [t for t in PRIMARY_KEYS
+                if t.startswith(("kor_portfolio", "kor_capital", "kor_trades",
+                                 "kor_holdings_log", "us_portfolio",
+                                 "us_capital", "us_trades", "us_holdings_log"))]
 
 # 파일이 없을 때 만들어 둘 빈 테이블의 컬럼 (타입 포함).
 # 예전에는 dummy 컬럼 하나짜리 빈 테이블을 만들었는데, 그러면 실제 컬럼을 쓰는
@@ -105,6 +120,26 @@ SCHEMAS: dict[str, dict[str, str]] = {
     "kor_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
                       "기준금액": "DOUBLE", "수량": "DOUBLE",
                       "종목명": "VARCHAR", "섹터": "VARCHAR"},
+    # 미국 실전 운용 — 한국과 같은 모양, 통화만 USD입니다.
+    "us_capital": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
+                   "총자본": "DOUBLE", "약정액": "DOUBLE"},
+    "us_capital_alt": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
+                       "총자본": "DOUBLE", "약정액": "DOUBLE"},
+    "us_trades": {"기준일": "TIMESTAMP", "계좌": "VARCHAR", "구분": "VARCHAR",
+                  "종목코드": "VARCHAR", "종목명": "VARCHAR", "섹터": "VARCHAR",
+                  "주가": "DOUBLE", "수량": "DOUBLE", "예상금액": "DOUBLE",
+                  "등분": "BIGINT", "메모": "VARCHAR",
+                  "체결가": "DOUBLE", "체결수량": "DOUBLE",
+                  "체결일": "TIMESTAMP"},
+    "us_holdings_log": {"기준일": "TIMESTAMP", "계좌": "VARCHAR",
+                        "종목코드": "VARCHAR", "종목명": "VARCHAR",
+                        "평가금액": "DOUBLE", "수량": "DOUBLE"},
+    "us_portfolio": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
+                     "기준금액": "DOUBLE", "수량": "DOUBLE",
+                     "종목명": "VARCHAR", "섹터": "VARCHAR"},
+    "us_portfolio_alt": {"종목코드": "VARCHAR", "등분": "BIGINT", "편입일": "TIMESTAMP",
+                         "기준금액": "DOUBLE", "수량": "DOUBLE",
+                         "종목명": "VARCHAR", "섹터": "VARCHAR"},
     "global_ticker": {"Name": "VARCHAR", "Symbol": "VARCHAR", "Exchange": "VARCHAR",
                       "Sector": "VARCHAR", "Market Cap": "DOUBLE",
                       "Dividend": "DOUBLE", "country": "VARCHAR", "date": "TIMESTAMP"},
@@ -143,10 +178,17 @@ def _normalize(df: pd.DataFrame, table: str) -> pd.DataFrame:
     for col in df.columns:
         if col in DATE_COLS:
             df[col] = pd.to_datetime(df[col], errors="coerce").dt.normalize()
-    # 한국 종목코드는 항상 6자리 문자열 (미국 Symbol은 문자라 건드리지 않음)
-    for col in ("종목코드", "CMP_CD"):
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.zfill(6)
+    # 한국 종목코드는 항상 6자리 문자열 (미국 Symbol은 문자라 건드리지 않음).
+    #
+    # us_* 운용 테이블은 '종목코드' 칸에 티커가 들어갑니다. 여기서 0을 채우면
+    # 'AAPL' → '00AAPL'이 되어, 주문서는 멀쩡한데 보유 상태와 원장만 다른
+    # 코드를 갖게 됩니다. 그러면 '산 적 없는 종목을 팔라'는 주문이 나옵니다.
+    if not str(table).startswith("us_"):
+        for col in ("종목코드", "CMP_CD"):
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.zfill(6)
+    elif "종목코드" in df.columns:
+        df["종목코드"] = df["종목코드"].astype(str).str.strip().str.upper()
     if "Symbol" in df.columns:
         df["Symbol"] = df["Symbol"].astype(str).str.strip()
     return df

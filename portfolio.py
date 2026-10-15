@@ -38,6 +38,55 @@ log = logging.getLogger("quant_agent.portfolio")
 # 두지 않습니다 — 실수로 main 테이블에 alt를 쓰는 일을 막습니다.
 STATE = "kor_portfolio"     # main 프로필 (기존 이름 유지)
 
+# ── 시장 전환 ────────────────────────────────────────────────
+# 이 모듈은 원래 한국 전용이었습니다. 종목코드를 "앞자리 0을 살린 6자리
+# 숫자"로 다루는 곳이 아홉 군데 있는데, 거기에 'AAPL'이 들어가면
+#   · zfill(6)  → '00AAPL'
+#   · \D 제거   → ''  (종목이 통째로 사라집니다)
+# 이 됩니다. 인자로 넘기면 아홉 군데 중 하나만 빠뜨려도 조용히 망가지므로
+# 프로세스 단위 스위치로 둡니다. 러너는 한 번에 한 시장만 다룹니다.
+#
+# 한국 경로는 MARKET이 "kr"로 남아 있는 한 동작이 한 글자도 달라지지
+# 않습니다. 실제 돈이 들어 있는 쪽이라 그게 조건입니다.
+MARKET = "kr"
+
+
+def set_market(market: str) -> None:
+    """이 프로세스가 다룰 시장을 정합니다 ('kr' 또는 'us'). 러너 맨 위에서."""
+    global MARKET
+    m = str(market).lower()
+    if m not in ("kr", "us"):
+        raise ValueError(f"시장은 'kr' 또는 'us'만 됩니다: {market!r}")
+    MARKET = m
+
+
+def _code(x) -> str:
+    """종목코드 정규화 — 한국은 6자리 0채움, 미국은 대문자 티커."""
+    s = str(x).strip()
+    if MARKET == "us":
+        return s.upper()
+    return re.sub(r"\D", "", s).zfill(6)
+
+
+def _code_ok(s: pd.Series) -> pd.Series:
+    """정규화된 코드가 쓸 만한지."""
+    if MARKET == "us":
+        return s.str.len().between(1, 10) & s.str.match(r"^[A-Z0-9.\-]+$")
+    return (s.str.len() == 6) & (s != "000000")
+
+
+def _guard(table: str) -> str:
+    """미국 러너가 한국 테이블에 쓰는 사고를 막습니다 (반대도)."""
+    t = str(table)
+    if MARKET == "us" and t.startswith("kor_"):
+        raise ValueError(
+            f"시장이 'us'인데 한국 테이블 {t!r}에 쓰려고 합니다. "
+            f"러너가 table= 인자를 빠뜨렸습니다.")
+    if MARKET == "kr" and t.startswith("us_"):
+        raise ValueError(
+            f"시장이 'kr'인데 미국 테이블 {t!r}에 쓰려고 합니다.")
+    return t
+
 # 무매매 밴드 — 목표 금액에서 이 비율 안으로 벗어난 건 되돌리지 않습니다.
 # 백테스트(config.REBAL_BAND)와 같은 값이어야 합니다. 비중 조절과 현금 투입이
 # 같은 숫자를 써야 "밴드 안은 손대지 않는다"는 규칙이 한 가지로 유지됩니다.
@@ -221,9 +270,9 @@ def parse_holdings(src) -> pd.DataFrame:
             f"읽어낸 컬럼: {list(df.columns)}. "
             "엑셀에서 '종목코드 / 평가금액 / 종목명' 세 칸을 복사해 붙여넣으세요.")
 
-    # 엑셀이 지워버린 앞자리 0을 되살립니다 (70 → 000070)
-    df["종목코드"] = (df["종목코드"].astype(str)
-                   .str.replace(r"\D", "", regex=True).str.zfill(6))
+    # 엑셀이 지워버린 앞자리 0을 되살립니다 (70 → 000070).
+    # 미국은 티커라 숫자 추출을 하면 안 됩니다 — _code가 갈라 줍니다.
+    df["종목코드"] = df["종목코드"].map(_code)
     df["평가금액"] = df["평가금액"].map(_to_number)
     if "종목명" not in df.columns:
         df["종목명"] = ""
@@ -237,7 +286,7 @@ def parse_holdings(src) -> pd.DataFrame:
     else:
         df["수량"] = np.nan
 
-    df = df[(df["종목코드"].str.len() == 6) & (df["종목코드"] != "000000")]
+    df = df[_code_ok(df["종목코드"])]
     df = df[df["평가금액"] > 0].drop_duplicates("종목코드")
     return df[["종목코드", "평가금액", "종목명", "수량"]].reset_index(drop=True)
 
@@ -358,7 +407,7 @@ def target_amounts(ranked, *, capital: float, n: int, weighting: str = "equal",
     매깁니다 — 상위 n위 안에서만 매기면 버퍼 구간 종목이 꼴찌 비중을 받고
     n위 안에 들어오는 순간 비중이 튑니다.
     """
-    codes = [str(c).zfill(6) for c in ranked]
+    codes = [_code(c) for c in ranked]
     if not codes or capital <= 0:
         return {}
     w = {}
@@ -441,11 +490,12 @@ def _affordable(codes, price_map, amount_of):
 
 
 def load_state(table: str = STATE) -> pd.DataFrame:
+    table = _guard(table)
     cols = ["종목코드", "등분", "편입일", "기준금액", "종목명", "섹터"]
     df = store.read(table)
     if df.empty:
         return pd.DataFrame(columns=cols)
-    df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
+    df["종목코드"] = df["종목코드"].map(_code)
     # 기준금액은 나중에 추가된 컬럼입니다 — 예전 파일에는 없습니다.
     if "기준금액" not in df.columns:
         df["기준금액"] = np.nan
@@ -493,7 +543,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     sizes = _sizes(n, tranches)
 
     picks = picks.copy()
-    picks[symbol] = picks[symbol].astype(str).str.zfill(6)
+    picks[symbol] = picks[symbol].map(_code)
     info = picks.drop_duplicates(symbol).set_index(symbol)
 
     price_map = None
@@ -574,7 +624,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         others = state[state["등분"] != slot_used]["종목코드"].tolist()
         buy_set = set(target[:n])
         # 유지 판정은 넓은 명단으로 (순위 버퍼). 안 주면 예전처럼 상위 n위.
-        hold_set = ({str(c).zfill(6) for c in hold_universe}
+        hold_set = ({_code(c) for c in hold_universe}
                     if hold_universe is not None and len(hold_universe)
                     else buy_set)
         base = dict(zip(state["종목코드"], pd.to_numeric(state["기준금액"],
@@ -843,7 +893,7 @@ def log_trades(orders, *, account: str, today: date | None = None,
         "기준일": pd.Timestamp(today),
         "계좌": str(account),
         "구분": df["구분"].astype(str),
-        "종목코드": df["종목코드"].astype(str).str.zfill(6),
+        "종목코드": df["종목코드"].map(_code),
         "종목명": df.get("종목명", "").astype(str),
         "섹터": df.get("섹터", "").astype(str),
         "주가": pd.to_numeric(df.get("주가"), errors="coerce"),
@@ -936,9 +986,8 @@ def parse_fills(src) -> pd.DataFrame:
     # 남아, 종목명만 있는 체결내역이 조용히 전부 사라집니다(실측 버그).
     out = pd.DataFrame(index=df.index)
     if "종목코드" in df.columns:
-        out["종목코드"] = (df["종목코드"].astype(str)
-                        .str.extract(r"(\d{1,6})", expand=False)
-                        .fillna("").str.zfill(6).where(lambda x: x != "000000", ""))
+        _c = df["종목코드"].map(_code)
+        out["종목코드"] = _c.where(_code_ok(_c), "")
     else:
         out["종목코드"] = ""
     out["종목명"] = (df["종목명"].astype(str).str.strip()
@@ -989,7 +1038,7 @@ def record_fills(src, *, account: str, today: date | None = None,
     # asof를 명시했는데 그 날 주문이 없으면(원장이 생기기 전 거래) 체결내역
     # 자체를 기록으로 남깁니다. 계획가는 없지만 실제 체결은 성과에 들어갑니다.
 
-    by_code = {str(c).zfill(6): i for i, c in week["종목코드"].items()}
+    by_code = {_code(c): i for i, c in week["종목코드"].items()}
     by_name = {}
     for i, nm in week["종목명"].items():
         if isinstance(nm, str) and nm.strip():
@@ -1038,7 +1087,7 @@ def record_fills(src, *, account: str, today: date | None = None,
 
     return {"체결반영": len(matched), "원장밖": len(rows),
             "미체결": int(len(left)), "기준일": f"{asof_ts:%Y-%m-%d}",
-            "미체결종목": [str(c).zfill(6) for c in week.loc[left, "종목코드"]]}
+            "미체결종목": [_code(c) for c in week.loc[left, "종목코드"]]}
 
 
 def log_trades_from_json(src, *, account: str, table: str = TRADES) -> dict:
@@ -1109,6 +1158,7 @@ def reset_state(table: str = STATE) -> int:
     이미 체결한 계좌에 쓰면 보유 이력과 등분 배정이 날아갑니다. 그 경우는
     reset이 아니라 resync(실제 보유 목록으로 다시 맞추기)를 쓰세요.
     """
+    table = _guard(table)
     cols = list(store.SCHEMAS.get(table) or store.SCHEMAS["kor_portfolio"])
     before = len(load_state(table))
     store.write(table, pd.DataFrame(columns=cols))
