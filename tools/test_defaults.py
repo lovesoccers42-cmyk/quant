@@ -115,6 +115,38 @@ print(("[OK ] " if off_ok else "[FAIL] ")
 if not off_ok:
     fails.append("mcap_top-default")
 
+
+# tranches=1 — 일부러 넣은 1이 확정값 4로 덮이면 안 됩니다.
+#
+# 실제 사고(2026-10-16): 미국 런에 tranches=1을 넣었는데 요약에 '4등분'이
+# 찍히고 결과가 직전 런과 한 자리도 다르지 않았습니다. 원인은
+# `tranches if tranches != 1 else None` — 함수 기본값이 1이라 "1은 안 준
+# 것"으로 보고 None으로 바꿔 버린 것이었습니다. 1은 넣을 수 없는 값이었고,
+# 그걸 '1등분 결과'로 읽을 뻔했습니다.
+for _t in (1, 2, 4, 8):
+    captured.clear()
+    try:
+        rb.main("us", 0, "", -1.0, -1.0, -1.0, _t)
+    except SystemExit:
+        pass
+    _ok = int(captured.get("tranches", -1)) == _t
+    print(("[OK ] " if _ok else "[FAIL] ")
+          + f"tranches={_t}가 그대로 전달됨 ({captured.get('tranches')})")
+    if not _ok:
+        fails.append(f"tranches-{_t}")
+
+captured.clear()
+try:
+    rb.main("us")                      # 안 주면 확정값
+except SystemExit:
+    pass
+_ok = int(captured.get("tranches", -1)) == config.CONFIRMED_US["tranches"]
+print(("[OK ] " if _ok else "[FAIL] ")
+      + f"안 주면 확정값 {config.CONFIRMED_US['tranches']}등분 "
+        f"({captured.get('tranches')})")
+if not _ok:
+    fails.append("tranches-default")
+
 captured.clear()
 try:
     rb.main("us", 0, "", -1.0, -1.0, -1.0, 1, 0, 0.0, "", -1.0, -1.0, -1.0,

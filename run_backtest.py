@@ -80,8 +80,8 @@ def _summary_rows(s: dict) -> pd.DataFrame:
 
 def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
          cost_bps: float = -1.0, max_sector_pct: float = -1.0,
-         min_turnover: float = -1.0, tranches: int = 1,
-         trend_ma: int = 0, risk_off: float = 0.0,
+         min_turnover: float = -1.0, tranches: int = -1,
+         trend_ma: int = -1, risk_off: float = -1.0,
          weighting: str = "", max_weight: float = -1.0,
          rebal_band: float = -1.0, rank_buffer: float = -1.0,
          sector_neutral: str = "", use_lowvol: int = -1,
@@ -132,10 +132,16 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
     top_n = int(pick("top_n", top_n or None, config.N_PORTFOLIO))
     rebalance = str(pick("rebalance", rebalance, "ME"))
     cost_bps = float(pick("cost_bps", cost_bps, 25.0))
-    tranches = int(pick("tranches", tranches if tranches != 1 else None,
-                        tranches))
-    trend_ma = int(pick("trend_ma", trend_ma if trend_ma else None, trend_ma))
-    risk_off = float(pick("risk_off", risk_off if risk_off else None, risk_off))
+    # '안 줬음'은 음수로만 판정합니다 (pick의 규칙).
+    #
+    # 예전에는 `tranches if tranches != 1 else None` 이었습니다. 함수 기본값이
+    # 1이라 "1은 안 준 것"으로 본 건데, 그러면 **1을 일부러 넣어도 넣을 수
+    # 없었습니다** — None으로 바뀌어 확정값 4로 덮였습니다. 2026-10-16 미국
+    # 런에서 tranches=1을 넣었는데 요약에 '4등분'이 찍히고 결과가 직전 런과
+    # 한 자리도 다르지 않게 나온 원인입니다. 조용히 덮는 쪽이 가장 나쁩니다.
+    tranches = int(pick("tranches", tranches, 1))
+    trend_ma = int(pick("trend_ma", trend_ma, 0))
+    risk_off = float(pick("risk_off", risk_off, 0.0))
 
     # 시장을 바꿀 때 가장 쉽게 틀리는 값입니다. 한국 5억(원)을 미국에
     # 그대로 넣으면 5억 달러가 되고, 통과 종목이 1~2개로 줄어 런이 무효가
@@ -150,6 +156,19 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
         raise ValueError(
             f"한국장 유동성 하한이 {min_turnover:,.0f}원입니다 — 달러 기준값을 "
             f"넣은 것 같습니다. 한국은 {config.MIN_TURNOVER_KR:,.0f}원 안팎입니다.")
+
+    # 확정값이 입력을 덮는 것은 정상 동작이지만, **조용히** 덮으면 입력한
+    # 사람은 자기 설정으로 돌았다고 믿습니다. 2026-10-16에 tranches=1을
+    # 넣고 4등분으로 돌아간 런을 '1등분 결과'로 읽을 뻔했습니다. 무엇이
+    # 실제로 쓰였는지 로그 맨 앞에 한 줄로 찍습니다.
+    _mt = int(pick("mcap_top", mcap_top, 0))
+    log.info("실제 적용된 설정 — 시장 %s · 종목 %d · 주기 %s · 등분 %d "
+             "· 비용 %gbp · 유동성 %s · 비중 %s · 밴드 %g · 버퍼 %g "
+             "· 섹터중립 %s · 모수제한 %s",
+             market, int(top_n), rebalance, max(1, int(tranches)),
+             float(cost_bps), f"{float(min_turnover):,.0f}", weighting,
+             float(rebal_band), float(rank_buffer), sector_neutral,
+             (f"상위 {_mt:,}종목" if _mt > 0 else "없음"))
 
     res = backtest.run(market=market, top_n=top_n, rebalance=rebalance,
                        cost_bps=cost_bps, max_sector_pct=max_sector_pct,
@@ -171,7 +190,7 @@ def main(market: str = "kr", top_n: int = 0, rebalance: str = "",
                        qvm_weights=(_parse_weights(qvm_weights)
                                     or CK.get("qvm_weights")),
                        split=_parse_split(split),
-                       mcap_top=int(pick("mcap_top", mcap_top, 0)))
+                       mcap_top=_mt)
     s = res["summary"]
     _n = int(s.get("리밸런싱횟수", 0))
     _yrs = _n / {"B": 252, "W-FRI": 52, "ME": 12, "QE": 4}.get(rebalance, 52)
