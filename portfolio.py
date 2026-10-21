@@ -1268,7 +1268,8 @@ def reset_state(table: str = STATE) -> int:
 
 
 def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
-                table: str = CAPITAL, ramp: bool = False) -> dict:
+                table: str = CAPITAL, ramp: bool = False,
+                state_table: str | None = None) -> dict:
     """이 전략에 쓸 **약정 운용금액**을 적어 둡니다 (계좌 잔고가 아닙니다).
 
     약정액만 정하는 명령입니다. 이미 재동기화 기록이 있으면 측정값
@@ -1289,9 +1290,24 @@ def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
         raise ValueError("운용금액은 0보다 커야 합니다.")
     cash = max(0.0, float(cash))
     prev = load_capital(table)
+
+    # 자본 기록이 아직 없는데 **보유는 있는** 경우 — seed만 하고 재동기화를
+    # 안 돌린 계좌입니다. 그냥 두면 '현금 total로 시작'으로 보고 평가액을
+    # total - cash 로 적습니다. 그러면 램프 시작액이 0이 되어 첫 달부터
+    # 전액이 배정되고, 단계 인상이 무의미해집니다.
+    # (2026-10-22: 미국 두 계좌가 정확히 이 상태였습니다 — 보유 58·22종목,
+    #  자본 기록 0점.)
+    held = 0.0
+    if not prev and state_table:
+        _st = load_state(state_table)
+        if len(_st):
+            held = float(pd.to_numeric(_st["기준금액"],
+                                       errors="coerce").fillna(0).sum())
+
     # ramp=True 면 목표액까지 RAMP_MONTHS에 걸쳐 올립니다. 시작액은 지금
     # 계좌에 있는 돈 — 거기서 목표까지 매달 같은 폭으로 늘립니다.
-    ramp_from = (float(prev.get("총자본") or 0.0) if prev else 0.0) if ramp else None
+    ramp_from = ((float(prev.get("총자본") or 0.0) if prev else held)
+                 if ramp else None)
     ramp_day = pd.Timestamp(today) if (ramp and ramp_from is not None
                                        and ramp_from < total) else pd.NaT
     if prev and float(prev.get("총자본") or 0) > 0:
@@ -1299,6 +1315,10 @@ def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
         현금 = float(prev["현금"]) if cash <= 0 else cash
         총자본 = 평가액 + 현금
         기준일 = prev["기준일"]
+    elif held > 0:
+        # 보유가 있으면 그 평가액이 실측입니다 — total로 덮지 않습니다.
+        평가액, 현금, 총자본 = held, cash, held + cash
+        기준일 = pd.Timestamp(today)
     else:
         cash = min(cash, total)
         평가액, 현금, 총자본 = total - cash, cash, total

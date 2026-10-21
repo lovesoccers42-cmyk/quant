@@ -241,6 +241,34 @@ check(abs(_m1 - 23_142) < 2,
 check(float(cap_after.get("최종약정액") or 0) == 30_162.0,
       f"최종약정액으로 목표를 돌려줌 (${float(cap_after.get('최종약정액') or 0):,.0f})")
 
+print("\n[자본 기록 없이 보유만 있을 때 — 2026-10-22 실측 상태]")
+# seed만 하고 재동기화를 안 돌린 계좌입니다(미국 두 계좌가 정확히 이랬습니다:
+# 보유 58·22종목, 자본 기록 0점). 그냥 두면 set_capital이 '현금 total로
+# 시작'으로 보고 평가액을 total로 적어, 램프 시작액이 0이 되어 첫 달부터
+# 전액이 배정됩니다 — 단계 인상이 무의미해집니다.
+ST2, CT2 = "us_portfolio", "us_capital"
+store.write(CT2, pd.DataFrame(columns=list(store.SCHEMAS[CT2])))
+pf.reset_state(ST2)
+pf.seed(pf.parse_holdings(
+    "종목코드,평가금액,종목명\nAAPL,12000,Apple\nMSFT,7631.65,MS\n"),
+    tranches=1, table=ST2)
+rr = pf.set_capital(30_162.0, table=CT2, today=date(2026, 10, 22), ramp=True,
+                    state_table=ST2)
+check(abs(float(rr["평가액"]) - 19_631.65) < 1,
+      f"보유 평가액을 실측으로 씀 (${float(rr['평가액']):,.2f}) — total로 덮지 않음")
+check(abs(float(rr["약정액"]) - 19_631.65) < 1,
+      f"0개월차 적용액 = 지금 보유 (${float(rr['약정액']):,.2f})")
+check(abs(float(rr.get("목표액", 0)) - 30_162.0) < 1, "목표액은 30,162")
+_m3 = pf._ramp(pd.Series({"램프시작일": pd.Timestamp("2026-10-22"),
+                          "램프시작액": 19_631.65}), 30_162.0,
+               today=date(2027, 1, 22))["적용약정"]
+check(abs(_m3 - 30_162.0) < 1, f"3개월 뒤 목표 도달 (${_m3:,.0f})")
+
+check(abs(float(pf.set_capital(
+    9_000.0, table="us_capital_alt", today=date(2026, 10, 22),
+    state_table="us_portfolio_alt")["평가액"]) - 9_000.0) < 1,
+      "보유가 없으면 예전대로 현금 시작")
+
 print("\n[램프를 안 쓰면 예전 그대로]")
 NT = "us_capital_alt"
 store.write(NT, pd.DataFrame(columns=list(store.SCHEMAS[NT])))

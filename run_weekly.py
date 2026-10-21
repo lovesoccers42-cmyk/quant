@@ -408,7 +408,8 @@ def capital_main(total: float, cash: float = 0.0,
     """이 계좌에 쓰기로 한 **약정 운용금액**을 적어 둡니다 (한 번만)."""
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     prof = prof or config.profile()
-    r = portfolio.set_capital(total, cash=cash, table=prof["capital_table"])
+    r = portfolio.set_capital(total, cash=cash, table=prof["capital_table"],
+                              state_table=prof["state_table"])
     print("\n" + "=" * 60)
     print(f"  약정 운용금액 설정 — {prof['라벨']} 계좌")
     print("=" * 60)

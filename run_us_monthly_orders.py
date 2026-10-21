@@ -285,7 +285,7 @@ def capital_main(total: float, cash: float = 0.0,
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     prof = prof or _prof()
     r = portfolio.set_capital(total, cash=cash, table=prof["capital_table"],
-                              ramp=ramp)
+                              ramp=ramp, state_table=prof["state_table"])
     print("\n" + "=" * 60)
     print(f"  약정 운용금액 설정 — {prof['라벨']} 계좌 (미국 · USD)")
     print("=" * 60)
