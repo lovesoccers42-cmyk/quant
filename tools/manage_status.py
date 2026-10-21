@@ -28,11 +28,17 @@ def _acct(key: str, market: str = "kr") -> dict:
     base = pd.to_numeric(st["기준금액"], errors="coerce") if len(st) else pd.Series(dtype=float)
     pending = int((base == 0).sum())
     cap = store.read(prof["capital_table"])
-    cap_date, cap_pledged = None, 0.0
+    cap_date, cap_pledged, ramp = None, 0.0, ""
     if not cap.empty:
         cap_date = f"{pd.to_datetime(cap['기준일']).max():%Y-%m-%d}"
-        cap_pledged = float(portfolio.load_capital(prof["capital_table"])
-                            .get("약정액") or 0.0)
+        ci = portfolio.load_capital(prof["capital_table"])
+        cap_pledged = float(ci.get("약정액") or 0.0)
+        # 램프 진행도는 **금액 없이** 적습니다 — 이 파일은 공개 릴리스에
+        # 올라갑니다. 켜졌는지/몇 달째인지만 알면 충분하고, 그걸 모르면
+        # "단계 인상 칸을 체크했던가?"를 확인할 방법이 없습니다.
+        _r = str(ci.get("램프") or "")
+        if _r:
+            ramp = _r.split("—")[0].strip()          # "1/3개월차"
 
     log = portfolio.trade_log(table=prof["trades_table"], account=key)
     last_order, filled, unfilled, marked, weeks = None, 0, 0, 0, 0
@@ -64,6 +70,7 @@ def _acct(key: str, market: str = "kr") -> dict:
         "원장_미체결표시": marked,       # 표시가 붙은 미체결 (= 체결내역 반영됨)
         "원장_기록주차수": weeks,
         "약정액설정": bool(cap_pledged), # 금액은 적지 않습니다 — 설정 여부만
+        "약정액단계인상": ramp,           # "1/3개월차" 또는 빈 문자열
     }
 
 
@@ -115,11 +122,16 @@ def main() -> int:
         label = key if mkt == "kr" else f"{key}(미국)"
         try:
             a = _acct(key, mkt)
-            # 아직 시작 안 한 미국 계좌는 조용히 넘어갑니다 — 보유도
-            # 원장도 없으면 '아직 안 쓰는 계좌'이지 이상이 아닙니다.
-            if mkt == "us" and not a["배정완료종목수"] and not a["원장_기록주차수"]:
-                continue
+            # 아직 시작 안 한 미국 계좌도 **한 줄은 찍습니다.**
+            #
+            # 예전에는 조용히 건너뛰었는데, 그러면 "보유 CSV를 올렸는데 왜
+            # 아무것도 안 나오지?"를 알 수 없습니다 (2026-10-22에 실제로
+            # 그래서 올렸는지 아닌지를 두 번 되물었습니다). 비어 있다는
+            # 것도 정보입니다.
             a["시장"] = mkt
+            a["미시작"] = bool(mkt == "us"
+                             and not a["배정완료종목수"]
+                             and not a["원장_기록주차수"])
             out["계좌"][label] = a
         except Exception as e:
             out["계좌"][label] = {"오류": f"{type(e).__name__}: {str(e)[:120]}",
@@ -127,6 +139,8 @@ def main() -> int:
     portfolio.set_market("kr")
     점검 = []
     for label, a in out["계좌"].items():
+        if a.get("미시작"):
+            continue
         점검 += _checks(label, a, today, a.get("시장", "kr"))
     out["점검"] = 점검
     out["판정"] = "이상 없음" if not 점검 else f"확인 필요 {len(점검)}건"
@@ -142,11 +156,18 @@ def main() -> int:
         if "오류" in a:
             print(f"  {key}: 오류 — {a['오류']}")
             continue
+        if a.get("미시작"):
+            print(f"  {key}: 비어 있음 — 보유 0 · 원장 0. "
+                  f"보유 CSV를 올렸는데 이 줄이 보이면 적용이 안 된 것입니다 "
+                  f"(파일 이름에 'us'가 들어갔는지 보세요)")
+            continue
         print(f"  {key}: 보유 {a['보유종목수']}종목"
               + (f" + 미매수 {a['미매수']}" if a["미매수"] else "")
               + f" · 등분 {a['등분별종목수']}")
         print(f"       자본기준일 {a['자본기준일']} (기록 {a['자본기록수']}점)"
-              f" · 원장 {a['원장_기록주차수']}주차")
+              f" · 원장 {a['원장_기록주차수']}주차"
+              + (f" · 약정액 단계인상 {a['약정액단계인상']}"
+                 if a.get("약정액단계인상") else ""))
         if a["원장_최근주문일"]:
             print(f"       최근주문 {a['원장_최근주문일']} — "
                   f"체결반영 {a['원장_체결반영']} / 미체결 {a['원장_미체결']}"
