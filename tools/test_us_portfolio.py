@@ -183,8 +183,74 @@ check(kc <= {"005930", "000070", "000660"},
       f"한국은 여전히 6자리 0채움 ({sorted(kc)})")
 check("000070" in kc, "'70'이 '000070'으로 복원됨")
 
+
+# ── 목표액까지 단계 인상 ──────────────────────────────────────
+print("\n[목표액 램프 — 전환을 하루에 몰지 않기]")
+# 왜: 약정 $30,162를 한 번에 켜면 첫 주문서가 95건(42종목 신규매수 +
+# 31종목 비중확대 + 22종목 비중축소, 추가 투입 $16,449)이 됩니다.
+# 백테스트는 119번의 진입 시점에 흩어져 있어 하루 운을 평균내지만,
+# 전환은 그 평균 안에 없는 일회성 사건입니다.
+pf.set_market("us")
+RT = "us_capital"
+store.write(RT, pd.DataFrame(columns=list(store.SCHEMAS[RT])))
+pf.set_capital(19_631.65, table=RT, today=date(2026, 10, 21))
+r0 = pf.set_capital(30_162.0, table=RT, today=date(2026, 10, 21), ramp=True)
+check(abs(float(r0["약정액"]) - 19_631.65) < 1,
+      f"0개월차는 지금 돈 그대로 (${float(r0['약정액']):,.0f})")
+check(abs(float(r0.get("목표액", 0)) - 30_162.0) < 1,
+      f"목표액은 따로 기록 (${float(r0.get('목표액', 0)):,.0f})")
+
+_row = pd.Series({"램프시작일": pd.Timestamp("2026-10-21"),
+                  "램프시작액": 19_631.65})
+want = {0: 19_632, 1: 23_142, 2: 26_652, 3: 30_162, 6: 30_162}
+for m, w in want.items():
+    d = pd.Timestamp("2026-10-21") + pd.DateOffset(months=m)
+    got = pf._ramp(_row, 30_162.0, today=d.date())["적용약정"]
+    check(abs(got - w) < 2, f"{m}개월차 ${got:,.0f} (기대 ${w:,.0f})")
+
+print("\n[같은 달에 여러 번 돌려도 같은 값 — 날짜의 순수 함수]")
+vals = {pf._ramp(_row, 30_162.0, today=date(2026, 11, d))["적용약정"]
+        for d in (1, 10, 21, 30)}
+check(len(vals) == 1, f"11월 안에서는 항상 같은 값 ({vals})")
+
+print("\n[재동기화가 램프를 지우지 않는가 — 놓치기 쉬운 자리]")
+# load_capital이 돌려주는 '약정액'은 램프가 적용된 이번 달 값입니다.
+# resync가 그걸 그대로 다시 저장하면 다음 달 램프가 더 작은 값에서
+# 시작해 목표액에 영영 도달하지 못합니다.
+pf.reset_state(ST)
+pf.seed(pf.parse_holdings("종목코드,평가금액,종목명\nAAPL,10000,Apple\n"),
+        tranches=1, table=ST)
+pf.resync("종목코드,평가금액,종목명\nAAPL,10000,Apple\n", cash=0.0, tranches=1,
+          today=date(2026, 11, 21), table=ST, capital_table=RT)
+after = store.read(RT).sort_values("기준일").iloc[-1]
+check(abs(float(after["약정액"]) - 30_162.0) < 1,
+      f"저장된 약정액은 **목표액** 그대로 (${float(after['약정액']):,.0f})")
+check(pd.notna(after["램프시작일"]),
+      f"램프시작일도 살아 있음 ({after['램프시작일']})")
+cap_after = pf.load_capital(RT)
+# load_capital은 '오늘' 기준으로 램프를 적용합니다. 재동기화를 11월 날짜로
+# 돌렸어도 오늘이 10월이면 0개월차 값이 나오는 게 맞습니다 — 중요한 건
+# 저장된 목표액과 시작일이 살아남아 다음 달에 올라갈 수 있다는 것입니다.
+_m1 = pf._ramp(pd.Series({"램프시작일": after["램프시작일"],
+                          "램프시작액": after["램프시작액"]}),
+               float(after["약정액"]),
+               today=pd.Timestamp(after["램프시작일"])
+               + pd.DateOffset(months=1))["적용약정"]
+check(abs(_m1 - 23_142) < 2,
+      f"재동기화 뒤에도 다음 달이면 1개월차로 올라감 (${_m1:,.0f})")
+check(float(cap_after.get("최종약정액") or 0) == 30_162.0,
+      f"최종약정액으로 목표를 돌려줌 (${float(cap_after.get('최종약정액') or 0):,.0f})")
+
+print("\n[램프를 안 쓰면 예전 그대로]")
+NT = "us_capital_alt"
+store.write(NT, pd.DataFrame(columns=list(store.SCHEMAS[NT])))
+rn = pf.set_capital(6_064.0, table=NT, today=date(2026, 10, 21))
+check(abs(float(rn["약정액"]) - 6_064.0) < 1,
+      f"ramp 없이 설정하면 즉시 전액 (${float(rn['약정액']):,.0f})")
+check("목표액" not in rn, "목표액 항목이 안 붙음")
+
 print()
 if FAIL:
     print(f"실패 {FAIL}건 — 고치기 전에는 미국 주문서를 만들지 마세요.")
     sys.exit(1)
-print("전체 통과 — 티커가 코드로 쓰여도 주문·상태·원장이 같은 코드를 씁니다.")
+print("전체 통과 — 티커·테이블·램프가 모두 제자리입니다.")

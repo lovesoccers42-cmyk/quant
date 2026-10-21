@@ -37,7 +37,11 @@ on:
         required: false
         default: ""
       capital_usd:
-        description: "미국 약정 운용금액(달러) — 계좌당 한 번. 원화와 섞이지 않게 칸을 따로 둡니다. 예: 28000"
+        description: "미국 약정 운용금액(달러) — 계좌당 한 번. 원화와 섞이지 않게 칸을 따로 둡니다. 예: 30162"
+        required: false
+        default: ""
+      capital_usd_ramp:
+        description: "목표액까지 3개월에 걸쳐 올리기 (1). 기존 보유를 모델로 바꾸는 전환을 하루에 몰지 않습니다"
         required: false
         default: ""
       reset_state:
@@ -218,7 +222,8 @@ jobs:
           CAPUSD: ${{ github.event.inputs.capital_usd }}
         run: |
           python run_us_monthly_orders.py \
-            -p "${{ github.event.inputs.profile }}" capital "$CAPUSD"
+            -p "${{ github.event.inputs.profile }}" capital "$CAPUSD" \
+            ${{ github.event.inputs.capital_usd_ramp == '1' && 'ramp' || '' }}
 
       - name: 원장 백필 (한 번만 · inbox보다 먼저)
         if: ${{ github.event.inputs.backfill_log == '1' }}

@@ -144,7 +144,10 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
                    f"교차분할 {res.get('교차분할')}")},
             {"항목": "주가 기준일", "값": _price_asof()},
             {"항목": "마지막 재동기화", "값": _resync_age(cap_info)},
-            {"항목": "약정 운용금액", "값": _fmt(pledged)},
+            {"항목": "약정 운용금액",
+             "값": (_fmt(pledged)
+                   + (f"   ({cap_info['램프']})" if cap_info.get("램프")
+                      else ""))},
             {"항목": "계좌 실측 (평가액+예수금)", "값": _fmt(measured)},
             {"항목": "배정 기준",
              "값": (_fmt(capital)
@@ -272,11 +275,17 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
 
 # ── 보조 명령 ────────────────────────────────────────────────
 def capital_main(total: float, cash: float = 0.0,
-                 prof: dict | None = None) -> int:
-    """이 계좌에 쓰기로 한 **약정 운용금액(달러)** 을 적어 둡니다."""
+                 prof: dict | None = None, ramp: bool = False) -> int:
+    """이 계좌에 쓰기로 한 **약정 운용금액(달러)** 을 적어 둡니다.
+
+    ramp=True 면 목표액까지 portfolio.RAMP_MONTHS(기본 3개월)에 걸쳐
+    매달 같은 폭으로 올립니다. 기존 보유를 모델 포트폴리오로 바꾸는 전환은
+    백테스트에 없는 일회성 사건이라, 하루에 몰면 그날 운을 통째로 떠안습니다.
+    """
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     prof = prof or _prof()
-    r = portfolio.set_capital(total, cash=cash, table=prof["capital_table"])
+    r = portfolio.set_capital(total, cash=cash, table=prof["capital_table"],
+                              ramp=ramp)
     print("\n" + "=" * 60)
     print(f"  약정 운용금액 설정 — {prof['라벨']} 계좌 (미국 · USD)")
     print("=" * 60)
@@ -285,6 +294,11 @@ def capital_main(total: float, cash: float = 0.0,
           f"(평가액 {_fmt(r['평가액'])} + 예수금 {_fmt(r['현금'])})")
     print(f"  배정기준 {_fmt(r['운용기준']):>14}  → 종목당 "
           f"{_fmt(r['종목당배정액'])}")
+    if r.get("목표액"):
+        print(f"\n  목표 {_fmt(r['목표액'])}까지 {portfolio.RAMP_MONTHS}개월에 "
+              f"걸쳐 올립니다 — {r['램프']}")
+        print("  달마다 주문서를 돌리기만 하면 배정액이 저절로 올라갑니다 "
+              "(다시 설정할 필요 없습니다).")
     alloc = float(r.get("종목당배정액") or 0)
     if alloc > 0:
         print(f"\n  참고: 유동성 통과 미국 종목의 주가 중앙값은 약 $40, "
@@ -414,7 +428,17 @@ if __name__ == "__main__":
             return d
 
     if _cmd == "capital":
-        sys.exit(capital_main(_f(1), _f(2, 0.0), prof=_p))
+        _ramp = any(str(a).lower() in ("ramp", "단계", "--ramp")
+                    for a in _argv[1:])
+        _rest = [a for a in _argv[1:]
+                 if str(a).lower() not in ("ramp", "단계", "--ramp")]
+
+        def _g(i, d=0.0):
+            try:
+                return float(str(_rest[i]).replace(",", "").replace("$", ""))
+            except (IndexError, ValueError):
+                return d
+        sys.exit(capital_main(_g(0), _g(1, 0.0), prof=_p, ramp=_ramp))
     if _cmd == "seed":
         sys.exit(seed_main(_argv[1], prof=_p))
     if _cmd == "resync":

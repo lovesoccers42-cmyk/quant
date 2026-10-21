@@ -88,11 +88,19 @@ SCHEMAS: dict[str, dict[str, str]] = {
     # 평가액 210만 + 예수금 0 → 종목당 배정액이 10만원에서 2.1만원으로).
     # 배정액은 약정액에서, 성과는 평가액·예수금에서 계산합니다.
     "kor_capital": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
-                    "총자본": "DOUBLE", "약정액": "DOUBLE"},
+                    "총자본": "DOUBLE", "약정액": "DOUBLE",
+                   # 목표액까지 단계 인상 (portfolio._ramp).
+                   # 비어 있으면 약정액을 그대로 씁니다.
+                   "램프시작일": "TIMESTAMP",
+                   "램프시작액": "DOUBLE"},
     # 두 번째 프로필(alt) — 같은 스키마, 별도 테이블. 상태가 섞이면
     # 한 사람의 매도가 다른 사람 주문서에 나타납니다.
     "kor_capital_alt": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
-                        "총자본": "DOUBLE", "약정액": "DOUBLE"},
+                        "총자본": "DOUBLE", "약정액": "DOUBLE",
+                   # 목표액까지 단계 인상 (portfolio._ramp).
+                   # 비어 있으면 약정액을 그대로 씁니다.
+                   "램프시작일": "TIMESTAMP",
+                   "램프시작액": "DOUBLE"},
     # 주문서가 낸 모든 주문. 매주 덮어쓰지 않고 쌓습니다.
     #
     # 왜 필요한가: 상태 테이블(kor_portfolio)은 '지금 들고 있는 것'만 담습니다.
@@ -122,9 +130,17 @@ SCHEMAS: dict[str, dict[str, str]] = {
                       "종목명": "VARCHAR", "섹터": "VARCHAR"},
     # 미국 실전 운용 — 한국과 같은 모양, 통화만 USD입니다.
     "us_capital": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
-                   "총자본": "DOUBLE", "약정액": "DOUBLE"},
+                   "총자본": "DOUBLE", "약정액": "DOUBLE",
+                   # 목표액까지 단계 인상 (portfolio._ramp).
+                   # 비어 있으면 약정액을 그대로 씁니다.
+                   "램프시작일": "TIMESTAMP",
+                   "램프시작액": "DOUBLE"},
     "us_capital_alt": {"기준일": "TIMESTAMP", "평가액": "DOUBLE", "현금": "DOUBLE",
-                       "총자본": "DOUBLE", "약정액": "DOUBLE"},
+                       "총자본": "DOUBLE", "약정액": "DOUBLE",
+                   # 목표액까지 단계 인상 (portfolio._ramp).
+                   # 비어 있으면 약정액을 그대로 씁니다.
+                   "램프시작일": "TIMESTAMP",
+                   "램프시작액": "DOUBLE"},
     "us_trades": {"기준일": "TIMESTAMP", "계좌": "VARCHAR", "구분": "VARCHAR",
                   "종목코드": "VARCHAR", "종목명": "VARCHAR", "섹터": "VARCHAR",
                   "주가": "DOUBLE", "수량": "DOUBLE", "예상금액": "DOUBLE",

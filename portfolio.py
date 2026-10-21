@@ -1151,6 +1151,39 @@ def trade_log(table: str = TRADES, account: str | None = None) -> pd.DataFrame:
 
 
 
+# 목표액까지 몇 달에 걸쳐 올릴지 — 기본 3개월.
+RAMP_MONTHS = int(config.__dict__.get("RAMP_MONTHS", 3) or 3)
+
+
+def _ramp(r, 약정: float, today: date | None = None) -> dict:
+    """목표액을 향한 단계 인상. 날짜만 보고 계산하므로 몇 번 돌려도 같습니다.
+
+        적용약정 = 시작액 + (약정액 - 시작액) x min(1, 경과개월 / 램프개월)
+
+    목표액(=최종 약정액)과 램프시작일이 모두 있어야 동작합니다. 없으면
+    약정액을 그대로 쓰므로 기존 계좌는 동작이 달라지지 않습니다.
+    """
+    out = {"적용약정": 약정, "목표액": 0.0, "설명": ""}
+    start = r.get("램프시작일") if hasattr(r, "get") else None
+    base = r.get("램프시작액") if hasattr(r, "get") else None
+    if start is None or pd.isna(start) or 약정 <= 0:
+        return out
+    base = float(base) if base is not None and pd.notna(base) else 0.0
+    if base >= 약정:
+        return out
+    t0 = pd.Timestamp(start).normalize()
+    now = pd.Timestamp(today or date.today()).normalize()
+    months = max(0, (now.year - t0.year) * 12 + (now.month - t0.month))
+    n = max(1, RAMP_MONTHS)
+    frac = min(1.0, months / n)
+    cur = base + (약정 - base) * frac
+    out["적용약정"] = float(cur)
+    out["목표액"] = float(약정)
+    out["설명"] = (f"{months}/{n}개월차 — 목표 {약정:,.0f} 중 {cur:,.0f} 적용"
+                 + ("  (도달)" if frac >= 1.0 else ""))
+    return out
+
+
 def load_capital(table: str = CAPITAL) -> dict:
     """마지막 자금 기록. 없으면 빈 dict.
 
@@ -1170,9 +1203,27 @@ def load_capital(table: str = CAPITAL) -> dict:
     총자본 = float(r["총자본"])
     약정 = r.get("약정액")
     약정 = float(약정) if 약정 is not None and pd.notna(약정) else 0.0
-    return {"기준일": r["기준일"], "평가액": 평가액, "현금": 현금,
-            "총자본": 총자본, "약정액": 약정,
-            "운용기준": max(약정, 총자본)}
+
+    # 목표액을 향해 매달 조금씩 — 전환을 하루에 몰지 않기 위한 장치입니다.
+    #
+    # 왜 필요한가 (2026-10-21 실측): 미국 계좌를 약정 $30,162로 한 번에
+    # 켜면 첫 주문서가 95건이 됩니다 — 42종목 신규매수 + 31종목 비중확대
+    # + 22종목 비중축소, 추가 투입 $16,449. 백테스트는 119번의 진입 시점에
+    # 흩어져 있어 하루 운을 평균내지만, 전환은 그 평균 안에 없는 일회성
+    # 사건입니다.
+    #
+    # **날짜의 순수 함수로 만든 이유**: 돌릴 때마다 약정액을 조금씩 올리는
+    # 방식이면 한 달에 두 번 돌리면 두 번 올라갑니다. 여기서는 '시작일로부터
+    # 몇 달 지났나'로만 계산하므로 몇 번을 돌려도 같은 값이 나옵니다.
+    램프 = _ramp(r, 약정)
+    약정_적용 = 램프["적용약정"]
+    out = {"기준일": r["기준일"], "평가액": 평가액, "현금": 현금,
+           "총자본": 총자본, "약정액": 약정_적용,
+           "운용기준": max(약정_적용, 총자본)}
+    if 램프["목표액"]:
+        out.update({"목표액": 램프["목표액"], "램프": 램프["설명"],
+                    "최종약정액": 약정})
+    return out
 
 
 def reset_state(table: str = STATE) -> int:
@@ -1195,7 +1246,7 @@ def reset_state(table: str = STATE) -> int:
 
 
 def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
-                table: str = CAPITAL) -> dict:
+                table: str = CAPITAL, ramp: bool = False) -> dict:
     """이 전략에 쓸 **약정 운용금액**을 적어 둡니다 (계좌 잔고가 아닙니다).
 
     약정액만 정하는 명령입니다. 이미 재동기화 기록이 있으면 측정값
@@ -1216,6 +1267,11 @@ def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
         raise ValueError("운용금액은 0보다 커야 합니다.")
     cash = max(0.0, float(cash))
     prev = load_capital(table)
+    # ramp=True 면 목표액까지 RAMP_MONTHS에 걸쳐 올립니다. 시작액은 지금
+    # 계좌에 있는 돈 — 거기서 목표까지 매달 같은 폭으로 늘립니다.
+    ramp_from = (float(prev.get("총자본") or 0.0) if prev else 0.0) if ramp else None
+    ramp_day = pd.Timestamp(today) if (ramp and ramp_from is not None
+                                       and ramp_from < total) else pd.NaT
     if prev and float(prev.get("총자본") or 0) > 0:
         평가액 = float(prev["평가액"])
         현금 = float(prev["현금"]) if cash <= 0 else cash
@@ -1227,12 +1283,20 @@ def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
         기준일 = pd.Timestamp(today)
     store.upsert(table, pd.DataFrame([{
         "기준일": pd.Timestamp(기준일), "평가액": 평가액,
-        "현금": 현금, "총자본": 총자본, "약정액": total}]))
-    기준 = max(total, 총자본)
-    log.info("약정 운용금액 %.0f원 (계좌 실측 평가액 %.0f + 예수금 %.0f = %.0f) "
-             "→ 배정 기준 %.0f원", total, 평가액, 현금, 총자본, 기준)
-    return {"약정액": total, "총자본": 총자본, "평가액": 평가액, "현금": 현금,
-            "운용기준": 기준, "종목당배정액": 기준 / 100}
+        "현금": 현금, "총자본": 총자본, "약정액": total,
+        "램프시작일": ramp_day,
+        "램프시작액": (ramp_from if pd.notna(ramp_day) else np.nan)}]))
+    now = load_capital(table)             # 램프가 적용된 값을 그대로 읽습니다
+    기준 = float(now.get("운용기준") or max(total, 총자본))
+    적용 = float(now.get("약정액") or total)
+    log.info("약정 운용금액 %.0f (계좌 실측 평가액 %.0f + 예수금 %.0f = %.0f) "
+             "→ 배정 기준 %.0f%s", total, 평가액, 현금, 총자본, 기준,
+             f" · {now['램프']}" if now.get("램프") else "")
+    out = {"약정액": 적용, "총자본": 총자본, "평가액": 평가액, "현금": 현금,
+           "운용기준": 기준, "종목당배정액": 기준 / 100}
+    if now.get("목표액"):
+        out.update({"목표액": now["목표액"], "램프": now["램프"]})
+    return out
 
 
 def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
@@ -1314,10 +1378,21 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
     # 약정액은 재동기화가 건드리지 않습니다 — 계좌 잔고에서 역산하면
     # 아직 입금 안 한 돈이 사라져 배정액이 쪼그라듭니다.
     prev = load_capital(capital_table)
-    약정 = float(prev.get("약정액") or 0.0)
+    # **최종약정액**을 씁니다 — load_capital이 돌려주는 '약정액'은 램프가
+    # 적용된 이번 달 값입니다. 그걸 다시 저장하면 다음 달 램프가 그보다
+    # 작은 값에서 다시 시작해 목표액에 영영 도달하지 못합니다.
+    약정 = float(prev.get("최종약정액") or prev.get("약정액") or 0.0)
+    # 램프 설정도 그대로 들고 갑니다 (재동기화가 전환 계획을 지우면 안 됩니다)
+    _pr = store.read(capital_table)
+    _ramp_day, _ramp_base = pd.NaT, np.nan
+    if not _pr.empty and "램프시작일" in _pr.columns:
+        _last = _pr.sort_values("기준일").iloc[-1]
+        _ramp_day = _last.get("램프시작일", pd.NaT)
+        _ramp_base = _last.get("램프시작액", np.nan)
     store.upsert(capital_table, pd.DataFrame([{
         "기준일": pd.Timestamp(today), "평가액": 평가액,
-        "현금": 현금, "총자본": 총자본, "약정액": 약정}]))
+        "현금": 현금, "총자본": 총자본, "약정액": 약정,
+        "램프시작일": _ramp_day, "램프시작액": _ramp_base}]))
 
     # 종목별 평가금액도 기록합니다 — 실제 계좌와 맞춰 본 지점입니다.
     store.upsert(HOLDINGS_LOG, pd.DataFrame([
