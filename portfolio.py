@@ -75,6 +75,27 @@ def _code_ok(s: pd.Series) -> pd.Series:
     return (s.str.len() == 6) & (s != "000000")
 
 
+def _hold_log() -> str:
+    """재동기화 기록 테이블 — 시장마다 다릅니다.
+
+    예전에는 모듈 상수 `HOLDINGS_LOG = "kor_holdings_log"` 하나였습니다.
+    그러면 **미국 재동기화가 달러 평가액을 한국 기록에 씁니다.** 이 테이블이
+    대시보드의 평가액 곡선과 시간가중수익률의 원천이라, 섞이는 순간 한국
+    성과가 통째로 망가집니다 (되돌릴 방법도 없습니다).
+    """
+    return "us_holdings_log" if MARKET == "us" else "kor_holdings_log"
+
+
+def _write(table: str, df):
+    """store.write — 시장 가드를 반드시 통과시킵니다."""
+    return store.write(_guard(table), df)
+
+
+def _upsert(table: str, df):
+    """store.upsert — 시장 가드를 반드시 통과시킵니다."""
+    return store.upsert(_guard(table), df)
+
+
 def _guard(table: str) -> str:
     """미국 러너가 한국 테이블에 쓰는 사고를 막습니다 (반대도)."""
     t = str(table)
@@ -329,7 +350,7 @@ def seed(holdings, *, tranches: int = 4, today: date | None = None,
 
     state = pd.DataFrame(rows)
     state["편입일"] = pd.to_datetime(state["편입일"])
-    store.write(table, state)
+    _write(table, state)
 
     total = float(df["평가금액"].sum())
     share = [round(v / total, 4) if total else 0.0 for v in totals]
@@ -752,7 +773,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     new_state["섹터"] = new_state["종목코드"].map(
         info[sector] if sector in info.columns else {})
     new_state["편입일"] = pd.to_datetime(new_state["편입일"])
-    store.write(table, new_state)
+    _write(table, new_state)
 
     # 팔 종목은 모델 상위권에서 밀려났으니 picks에 없습니다. 이름을 info에서만
     # 찾으면 매도 줄이 종목코드만 남은 빈 줄이 됩니다 — 22개를 코드만 보고
@@ -869,6 +890,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
 CAPITAL = "kor_capital"      # main 프로필 (기준일 · 평가액 · 현금 · 총자본)
 TRADES = "kor_trades"        # 주문 원장 (계좌별 · 쌓임)
 HOLDINGS_LOG = "kor_holdings_log"   # 재동기화 시점의 종목별 평가금액
+# ↑ 호환용으로 남겨 둡니다. 실제로는 _hold_log()를 쓰세요 — 시장을 봅니다.
 
 
 def log_trades(orders, *, account: str, today: date | None = None,
@@ -908,7 +930,7 @@ def log_trades(orders, *, account: str, today: date | None = None,
     # (같은 주에 두 번 돌린 경우 — 중복 주문이 쌓이면 안 됩니다).
     rows = rows.drop_duplicates(subset=["기준일", "계좌", "종목코드", "구분"],
                                 keep="last")
-    return store.upsert(table, rows)
+    return _upsert(table, rows)
 
 
 _FILL_WORDS = {
@@ -1111,7 +1133,7 @@ def record_fills(src, *, account: str, today: date | None = None,
                 "미체결 (체결내역에 없음)"
     if rows:
         upd = pd.concat([upd, pd.DataFrame(rows)], ignore_index=True)
-    store.write(table, upd)
+    _write(table, upd)
 
     return {"체결반영": len(matched), "원장밖": len(rows),
             "미체결": int(len(left)), "기준일": f"{asof_ts:%Y-%m-%d}",
@@ -1240,7 +1262,7 @@ def reset_state(table: str = STATE) -> int:
     table = _guard(table)
     cols = list(store.SCHEMAS.get(table) or store.SCHEMAS["kor_portfolio"])
     before = len(load_state(table))
-    store.write(table, pd.DataFrame(columns=cols))
+    _write(table, pd.DataFrame(columns=cols))
     log.info("보유 상태 초기화 — %s (%d종목 → 0)", table, before)
     return before
 
@@ -1281,7 +1303,7 @@ def set_capital(total: float, *, cash: float = 0.0, today: date | None = None,
         cash = min(cash, total)
         평가액, 현금, 총자본 = total - cash, cash, total
         기준일 = pd.Timestamp(today)
-    store.upsert(table, pd.DataFrame([{
+    _upsert(table, pd.DataFrame([{
         "기준일": pd.Timestamp(기준일), "평가액": 평가액,
         "현금": 현금, "총자본": 총자본, "약정액": total,
         "램프시작일": ramp_day,
@@ -1368,7 +1390,7 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
         lambda r: names.get(r["종목코드"]) or r.get("종목명") or "", axis=1)
     st["수량"] = st["종목코드"].map(qty)
     st["편입일"] = pd.to_datetime(st["편입일"])
-    store.write(table, st)
+    _write(table, st)
 
     평가액 = float(got["평가금액"].sum())
     현금 = max(0.0, float(cash))
@@ -1389,13 +1411,13 @@ def resync(holdings, *, cash: float = 0.0, tranches: int = 4,
         _last = _pr.sort_values("기준일").iloc[-1]
         _ramp_day = _last.get("램프시작일", pd.NaT)
         _ramp_base = _last.get("램프시작액", np.nan)
-    store.upsert(capital_table, pd.DataFrame([{
+    _upsert(capital_table, pd.DataFrame([{
         "기준일": pd.Timestamp(today), "평가액": 평가액,
         "현금": 현금, "총자본": 총자본, "약정액": 약정,
         "램프시작일": _ramp_day, "램프시작액": _ramp_base}]))
 
     # 종목별 평가금액도 기록합니다 — 실제 계좌와 맞춰 본 지점입니다.
-    store.upsert(HOLDINGS_LOG, pd.DataFrame([
+    _upsert(_hold_log(), pd.DataFrame([
         {"기준일": pd.Timestamp(today),
          "계좌": "alt" if capital_table.endswith("_alt") else "main",
          "종목코드": c, "종목명": names.get(c, ""), "평가금액": float(v),

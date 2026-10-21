@@ -105,6 +105,34 @@ check(set(kr_m["종목코드"]) == {"005930", "000660"},
 kr_sum = float(pd.to_numeric(kr_m["기준금액"]).sum())
 check(abs(kr_sum - 2_100_000) < 1, f"한국 기준금액 합 {kr_sum:,.0f}원")
 
+print("\n[두 번째 올리기 — 이번엔 seed가 아니라 resync]")
+# 첫 파일은 seed(첫 등록)라 기록 테이블을 건드리지 않습니다. 실제로
+# 달마다 일어나는 일은 resync이고, 아래 버그는 거기서 터집니다.
+(BOX / "holdings_us_main_2026-11-20.csv").write_text(US_MAIN, encoding="utf-8")
+(BOX / "holdings_main_2026-11-20.csv").write_text(KR_MAIN, encoding="utf-8")
+rc2 = ia.main(str(BOX), str(ARCH), tranches=4)
+check(rc2 == 0, f"두 번째 처리 (반환 {rc2})")
+
+print("\n[재동기화 기록도 시장별로 — 2026-10-21에 잡힌 버그]")
+# resync가 종목별 평가금액을 적는 테이블이 모듈 상수 하나(kor_holdings_log)
+# 였습니다. 그러면 미국 재동기화가 **달러 평가액을 한국 기록에** 씁니다.
+# 이 테이블이 대시보드 평가액 곡선과 시간가중수익률의 원천이라, 섞이는
+# 순간 한국 성과가 통째로 망가지고 되돌릴 수 없습니다.
+us_log = store.read("us_holdings_log")
+kr_log = store.read("kor_holdings_log")
+check(not us_log.empty, f"미국 기록이 us_holdings_log에 ({len(us_log)}행)")
+us_codes = set(us_log["종목코드"].astype(str))
+kr_codes = set(kr_log["종목코드"].astype(str)) if not kr_log.empty else set()
+check(us_codes <= {"APA", "BKTI", "NUS", "M", "CRCT", "INVA", "WHLRP",
+                   "FBIOP", "DLX", "HOVNP"},
+      f"미국 기록은 티커뿐 ({sorted(us_codes)})")
+check(not (us_codes & kr_codes),
+      "한국 기록에 미국 티커가 섞이지 않음")
+check(kr_codes <= {"005930", "000660"},
+      f"한국 기록은 6자리 코드뿐 ({sorted(kr_codes)})")
+us_amt = float(pd.to_numeric(us_log["평가금액"]).max())
+check(us_amt < 1e5, f"한국 기록에 달러 자릿수가 안 들어감 (미국 최대 {us_amt:,.0f})")
+
 print("\n[통화가 섞이지 않았는가 — 가장 중요]")
 us_sum = float(pd.to_numeric(us_m["기준금액"]).sum())
 check(kr_sum > 1e6 and us_sum < 1e5,
@@ -116,7 +144,7 @@ print("\n[처리 후 정리]")
 left = sorted(p.name for p in BOX.iterdir())
 check(not left, f"inbox가 비었음 ({left})")
 moved = sorted(p.name for p in ARCH.rglob("*.csv"))
-check(len(moved) == 3, f"archive로 3개 이동 ({len(moved)})")
+check(len(moved) == 5, f"archive로 5개 이동 ({len(moved)})")
 
 print("\n[이름에 us가 없으면 한국 — 오탐 방지]")
 for nm, want in (("holdings_august_main.csv", "kr"),
