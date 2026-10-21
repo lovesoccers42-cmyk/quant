@@ -36,6 +36,10 @@ on:
         description: "약정 운용금액(원) — 계좌당 한 번. 예수금을 미리 넣지 않아도 배정액은 여기서 나옵니다. 예: 10000000"
         required: false
         default: ""
+      capital_usd:
+        description: "미국 약정 운용금액(달러) — 계좌당 한 번. 원화와 섞이지 않게 칸을 따로 둡니다. 예: 28000"
+        required: false
+        default: ""
       reset_state:
         description: "보유 상태 초기화 (1). 주문서를 뽑았지만 체결하지 않은 계좌만!"
         required: false
@@ -205,6 +209,16 @@ jobs:
         env:
           CAP: ${{ github.event.inputs.capital_krw }}
         run: python run_weekly.py -p "${{ github.event.inputs.profile }}" capital "$CAP"
+
+      # 미국은 테이블도 통화도 다릅니다. 칸을 따로 둔 이유: 한 칸에 숫자만
+      # 넣으면 4,000만원이 4,000만 달러로 들어가도 아무도 모릅니다.
+      - name: 미국 운용금액 설정 (달러 · 계좌당 한 번)
+        if: ${{ github.event.inputs.capital_usd != '' }}
+        env:
+          CAPUSD: ${{ github.event.inputs.capital_usd }}
+        run: |
+          python run_us_monthly_orders.py \
+            -p "${{ github.event.inputs.profile }}" capital "$CAPUSD"
 
       - name: 원장 백필 (한 번만 · inbox보다 먼저)
         if: ${{ github.event.inputs.backfill_log == '1' }}

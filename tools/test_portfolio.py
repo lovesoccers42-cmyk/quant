@@ -1040,13 +1040,29 @@ _spec = _u.spec_from_file_location("_inbox_apply", _ia_path)
 _ia = _u.module_from_spec(_spec)
 _spec.loader.exec_module(_ia)
 
+# 네 번째 값은 시장입니다. 이름에 'us' 토큰이 있으면 미국(USD · us_* 테이블),
+# 없으면 한국. 통화가 섞이면 달러 평가액이 원화 총자본에 더해져 수익률이
+# 통째로 거짓이 되므로, 시장은 이름 하나로만 정해지고 추측하지 않습니다.
 NAME_CASES = {
-    "fills_main_2026-10-08.csv": ("fills", "main", date(2026, 10, 8)),
-    "holdings_alt.csv": ("holdings", "alt", None),
-    "FILLS_ALT_20261016.CSV": ("fills", "alt", date(2026, 10, 16)),
-    "holdings-main-2026_10_16.csv": ("holdings", "main", date(2026, 10, 16)),
-    "엉뚱한파일.csv": (None, None, None),
-    "fills.csv": ("fills", None, None),          # 계좌를 못 읽으면 건너뜀
+    "fills_main_2026-10-08.csv": ("fills", "main", date(2026, 10, 8), "kr"),
+    "holdings_alt.csv": ("holdings", "alt", None, "kr"),
+    "FILLS_ALT_20261016.CSV": ("fills", "alt", date(2026, 10, 16), "kr"),
+    "holdings-main-2026_10_16.csv": ("holdings", "main", date(2026, 10, 16), "kr"),
+    "엉뚱한파일.csv": (None, None, None, "kr"),  # 종류를 못 읽으면 전부 None
+    "fills.csv": ("fills", None, None, "kr"),    # 계좌를 못 읽으면 건너뜀
+    # 미국
+    "holdings_us_main_2026-10-16.csv":
+        ("holdings", "main", date(2026, 10, 16), "us"),
+    "fills_us_alt_2026-10-16.csv":
+        ("fills", "alt", date(2026, 10, 16), "us"),
+    "FILLS_US_MAIN_20261016.CSV":
+        ("fills", "main", date(2026, 10, 16), "us"),
+    "holdings-us-alt.csv": ("holdings", "alt", None, "us"),
+    # 'us'가 다른 단어 안에 들어 있는 경우는 미국이 아닙니다 —
+    # 여기서 잘못 걸리면 한국 체결이 달러 테이블로 들어갑니다.
+    "holdings_august_main.csv": ("holdings", "main", None, "kr"),
+    "fills_plus_main.csv": ("fills", "main", None, "kr"),
+    "holdings_bonus_alt.csv": ("holdings", "alt", None, "kr"),
 }
 for name, want in NAME_CASES.items():
     got = _ia._parse_name(name)
