@@ -428,7 +428,16 @@ def account_perf(acct: str) -> dict:
     px = perf.price_pivot(price, codes)
     pos = perf.positions_timeline(hlog, acct, px)
     value = perf.daily_value(pos, px)
-    tw = perf.twr(value, perf.net_flows(trades, acct))
+    # 현금흐름을 평가액 곡선과 같은 시계에 올립니다.
+    #
+    # 평가액은 재동기화 스냅샷에서만 수량이 바뀌는 계단입니다. 금요일에
+    # 사고 일요일에 재동기화하면 새 종목이 월요일에야 곡선에 나타나는데,
+    # 현금흐름은 금요일에 찍혀 있어 하루가 어긋납니다. 그러면 그 점프가
+    # 수익으로 계산됩니다 (2026-10-22 실측: 상수 6,231,798원 / 배우자
+    # 2,062,585원이 설명되지 않는 점프로 잡혔습니다).
+    flows = perf.align_flows(perf.net_flows(trades, acct), value.index,
+                             pos.index)
+    tw = perf.twr(value, flows)
     out.update({"px": px, "pos": pos, "value": value, "tw": tw})
 
     # 평단 기준 수익률 — TWR은 거래일이 둘 있어야 나오지만 이건 첫날부터

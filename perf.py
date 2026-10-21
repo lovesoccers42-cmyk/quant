@@ -189,6 +189,48 @@ def twr(value: pd.Series, flows: pd.Series | None = None) -> pd.DataFrame:
                          "누적": (1 + r).cumprod()})
 
 
+def align_flows(flows: pd.Series, value_index, snapshots) -> pd.Series:
+    """현금흐름을 **평가액 곡선이 그 거래를 알게 되는 날**로 옮깁니다.
+
+    왜 필요한가 (2026-10-22 실측): 금요일 10/16에 체결하고 일요일 10/18에
+    재동기화를 돌렸습니다. 평가액 곡선은 스냅샷에서만 보유 수량이 바뀌는
+    계단이라, 새로 산 종목이 처음 나타나는 날은 10/18 다음 거래일인
+    **10/19(월)** 입니다. 그런데 현금흐름은 실제 체결일인 10/16에 찍힙니다.
+    하루가 어긋나서, 10/19의 평가액 점프 6,231,798원이 입출금으로 설명되지
+    않고 **수익으로** 계산됐습니다.
+
+    체결일을 틀리게 적는 것(그건 따로 고쳤습니다)과는 다른 문제입니다.
+    둘 다 맞는데 **측정 시점이 다른** 것이고, 둘을 같은 시계에 올려야
+    서로 상쇄됩니다.
+
+    규칙: 체결일 f 이후(같은 날 포함) 첫 스냅샷 s를 찾고, s 이후 첫
+    거래일에 그 현금흐름을 놓습니다. f 뒤에 스냅샷이 없으면 **버립니다** —
+    평가액 곡선이 아직 그 거래를 모르므로(옛 수량으로 계산 중), 현금흐름만
+    넣으면 없는 손실이 생깁니다.
+    """
+    out = pd.Series(dtype="float64")
+    if flows is None or not len(flows):
+        return out
+    idx = pd.DatetimeIndex(value_index).sort_values()
+    snap = pd.DatetimeIndex(pd.Index(snapshots)).sort_values()
+    if not len(idx) or not len(snap):
+        return out
+    acc: dict = {}
+    for f, amt in flows.items():
+        f = pd.Timestamp(f).normalize()
+        j = snap.searchsorted(f, side="left")       # f 이후 첫 스냅샷
+        if j >= len(snap):
+            continue                                # 아직 반영 안 된 거래
+        k = idx.searchsorted(snap[j], side="left")  # 그 뒤 첫 거래일
+        if k >= len(idx):
+            continue
+        d = idx[k]
+        acc[d] = acc.get(d, 0.0) + float(amt)
+    if not acc:
+        return out
+    return pd.Series(acc).sort_index()
+
+
 def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
     """이 시간가중수익률을 믿어도 되는가.
 

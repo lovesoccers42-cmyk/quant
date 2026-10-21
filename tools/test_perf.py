@@ -288,6 +288,46 @@ _calm = pd.Series([1_000_000 * (1.004 ** i) for i in range(20)],
 check(perf.twr_trust(perf.twr(_calm, None))["신뢰"],
       "하루 0.4%씩 꾸준히 오르는 정상 곡선은 경고 없음")
 
+
+print("\n[평가액 곡선과 현금흐름의 시계 맞추기 — 2026-10-22 실측]")
+# 금요일 10/16 체결 → 일요일 10/18 재동기화 → 월요일 10/19에 평가액 점프.
+# 체결일은 10/16으로 **맞는데도** 하루가 어긋나 점프가 수익으로 잡혔습니다.
+_dy = pd.bdate_range("2026-10-12", "2026-10-22")
+_vv = pd.Series(30_000_000.0, index=_dy)
+_vv.loc["2026-10-19":] = 36_231_798.0
+_fl = pd.Series({pd.Timestamp("2026-10-16"): 6_200_000.0})
+_sn = pd.DatetimeIndex(["2026-10-12", "2026-10-18"])
+
+_t0 = perf.twr(_vv, _fl)
+check(not perf.twr_trust(_t0)["신뢰"],
+      f"옮기기 전에는 못 믿는다고 판정 ({(_t0['누적'].iloc[-1]-1):+.2%})")
+_al = perf.align_flows(_fl, _vv.index, _sn)
+check(list(_al.index) == [pd.Timestamp("2026-10-19")],
+      f"현금흐름이 10/19로 옮겨짐 ({[f'{d:%m/%d}' for d in _al.index]})")
+check(abs(float(_al.iloc[0]) - 6_200_000) < 1, "금액은 그대로")
+_t1 = perf.twr(_vv, _al)
+check(perf.twr_trust(_t1)["신뢰"],
+      f"옮긴 뒤에는 믿을 수 있음 ({(_t1['누적'].iloc[-1]-1):+.2%})")
+check(abs(float(_t1["누적"].iloc[-1] - 1)) < 0.02,
+      f"수익률이 현실적인 범위 ({(_t1['누적'].iloc[-1]-1):+.2%})")
+
+print("\n[아직 스냅샷에 안 잡힌 거래는 현금흐름에서 뺀다]")
+# 마지막 스냅샷 뒤에 산 종목은 평가액 곡선이 아직 모릅니다(옛 수량으로
+# 계산 중). 현금흐름만 넣으면 없는 손실이 생깁니다.
+_late = pd.Series({pd.Timestamp("2026-10-21"): 5_000_000.0})
+_al2 = perf.align_flows(_late, _vv.index, _sn)
+check(len(_al2) == 0, f"스냅샷 뒤 거래는 버림 ({len(_al2)}건)")
+
+print("\n[옮길 것이 없으면 그대로]")
+_fl3 = pd.Series({pd.Timestamp("2026-10-13"): 1_000_000.0})
+_al3 = perf.align_flows(_fl3, _vv.index, pd.DatetimeIndex(["2026-10-13"]))
+check(list(_al3.index) == [pd.Timestamp("2026-10-13")],
+      "스냅샷과 체결일이 같은 거래일이면 제자리")
+check(len(perf.align_flows(pd.Series(dtype=float), _vv.index, _sn)) == 0,
+      "빈 현금흐름도 처리")
+check(len(perf.align_flows(_fl, _vv.index, pd.DatetimeIndex([]))) == 0,
+      "스냅샷이 없으면 빈 결과")
+
 print()
 if FAIL:
     print(f"실패 {FAIL}건 — 고치기 전에는 수익률 숫자를 믿지 마세요.")
