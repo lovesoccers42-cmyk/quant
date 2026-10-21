@@ -252,9 +252,24 @@ jobs:
         if: always()
         run: |
           shopt -s nullglob
-          for f in data/kor_portfolio*.parquet data/kor_capital*.parquet \
-                   data/kor_trades.parquet data/kor_holdings_log.parquet; do
-            [ -f "$f" ] && cp -v "$f" state-repo/state/
+          # 저장할 상태 테이블 목록을 **코드에서** 받아옵니다.
+          #
+          # 예전에는 여기에 kor_* 네 줄이 손으로 적혀 있었습니다. 미국
+          # 테이블(us_portfolio 등)을 추가했을 때 이 목록을 같이 못 고쳐서,
+          # 미국 보유를 seed 해도 컨테이너 안에서만 만들어졌다가 **실행이
+          # 끝나면 통째로 사라졌습니다.** 로그에는 성공이라고 찍히는데
+          # 다음 실행에서 보면 계좌가 비어 있습니다 (2026-10-22 실측:
+          # 보유 CSV를 올리고 돌렸는데 요약에 미국이 안 나온 원인).
+          #
+          # store.STATE_TABLES가 단일 출처입니다 — 테이블을 새로 만들면
+          # 여기는 저절로 따라옵니다.
+          python -c "import store; print(' '.join(store.STATE_TABLES))" \
+            > /tmp/state_tables.txt
+          echo "--- 저장 대상 테이블 ---"; cat /tmp/state_tables.txt
+          for t in $(cat /tmp/state_tables.txt); do
+            for f in data/"$t".parquet; do
+              [ -f "$f" ] && cp -v "$f" state-repo/state/
+            done
           done
           if [ ! -d state-repo/.git ]; then
             echo "::error::state-repo가 없습니다 — 이번 실행의 상태 변경을 저장하지 못했습니다. 위쪽 체크아웃 실패를 먼저 고치세요."
