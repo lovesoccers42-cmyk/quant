@@ -21,8 +21,9 @@ import portfolio  # noqa: E402
 import store  # noqa: E402
 
 
-def _acct(key: str) -> dict:
-    prof = config.profile(key)
+def _acct(key: str, market: str = "kr") -> dict:
+    portfolio.set_market(market)
+    prof = config.profile(key, market=market)
     st = portfolio.load_state(prof["state_table"])
     base = pd.to_numeric(st["기준금액"], errors="coerce") if len(st) else pd.Series(dtype=float)
     pending = int((base == 0).sum())
@@ -33,7 +34,7 @@ def _acct(key: str) -> dict:
         cap_pledged = float(portfolio.load_capital(prof["capital_table"])
                             .get("약정액") or 0.0)
 
-    log = portfolio.trade_log(account=key)
+    log = portfolio.trade_log(table=prof["trades_table"], account=key)
     last_order, filled, unfilled, marked, weeks = None, 0, 0, 0, 0
     if not log.empty:
         weeks = int(log["기준일"].nunique())
@@ -66,7 +67,7 @@ def _acct(key: str) -> dict:
     }
 
 
-def _checks(key: str, a: dict, today: date) -> list:
+def _checks(key: str, a: dict, today: date, market: str = "kr") -> list:
     """요약만 보고 '됐나'를 판정할 수 있게 경고를 글로 적습니다.
 
     숫자를 늘리는 것만으로는 부족합니다 — 체결내역을 안 넣은 주와 넣은 주의
@@ -78,7 +79,9 @@ def _checks(key: str, a: dict, today: date) -> list:
     if a["원장_최근주문일"] and a["원장_체결반영"] == 0 and a["원장_미체결"]:
         out.append(f"{key}: {a['원장_최근주문일']} 주문의 체결내역이 "
                    f"안 들어왔습니다 (미체결 {a['원장_미체결']}건) — "
-                   f"inbox에 fills_{key}_*.csv 를 올리세요")
+                   f"inbox에 fills_"
+                   + ("us_" if market == "us" else "")
+                   + f"{key}_*.csv 를 올리세요")
     elif a["원장_미체결"] > a["원장_미체결표시"]:
         out.append(f"{key}: 미체결 {a['원장_미체결']}건 중 "
                    f"{a['원장_미체결'] - a['원장_미체결표시']}건에 표시가 "
@@ -89,7 +92,7 @@ def _checks(key: str, a: dict, today: date) -> list:
                    f"예수금이 0이면 배정액이 쪼그라듭니다")
     if a["자본기준일"]:
         age = (today - pd.Timestamp(a["자본기준일"]).date()).days
-        if age > 10:
+        if age > (40 if market == "us" else 10):
             out.append(f"{key}: 마지막 재동기화가 {age}일 전입니다 — "
                        f"매도 주문을 믿기 전에 보유목록을 올리세요")
     else:
@@ -99,15 +102,32 @@ def _checks(key: str, a: dict, today: date) -> list:
 
 def main() -> int:
     today = date.today()
+    # 한국과 미국을 **둘 다** 봅니다.
+    #
+    # 예전에는 config.profile(key)를 시장 인자 없이 불러 한국만 점검했습니다.
+    # 그러면 미국 쪽이 통째로 망가져 있어도 '판정: 이상 없음'이 찍힙니다.
+    # 2026-10-21에 미국 CSV를 올리고도 요약에 아무것도 안 나와서, 제가
+    # "안 올리셨다"고 잘못 말한 원인이 이것입니다.
     out = {"작성일": f"{today:%Y-%m-%d}", "계좌": {}}
-    for key in config.PROFILES:
+    plan = [(k, "kr") for k in config.PROFILES]
+    plan += [(k, "us") for k in config.PROFILES]
+    for key, mkt in plan:
+        label = key if mkt == "kr" else f"{key}(미국)"
         try:
-            out["계좌"][key] = _acct(key)
+            a = _acct(key, mkt)
+            # 아직 시작 안 한 미국 계좌는 조용히 넘어갑니다 — 보유도
+            # 원장도 없으면 '아직 안 쓰는 계좌'이지 이상이 아닙니다.
+            if mkt == "us" and not a["배정완료종목수"] and not a["원장_기록주차수"]:
+                continue
+            a["시장"] = mkt
+            out["계좌"][label] = a
         except Exception as e:
-            out["계좌"][key] = {"오류": f"{type(e).__name__}: {str(e)[:120]}"}
+            out["계좌"][label] = {"오류": f"{type(e).__name__}: {str(e)[:120]}",
+                                 "시장": mkt}
+    portfolio.set_market("kr")
     점검 = []
-    for key, a in out["계좌"].items():
-        점검 += _checks(key, a, today)
+    for label, a in out["계좌"].items():
+        점검 += _checks(label, a, today, a.get("시장", "kr"))
     out["점검"] = 점검
     out["판정"] = "이상 없음" if not 점검 else f"확인 필요 {len(점검)}건"
 
