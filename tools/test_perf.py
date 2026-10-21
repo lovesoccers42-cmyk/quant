@@ -255,6 +255,39 @@ check(perf.position_pnl(e, e, px, "main").empty, "둘 다 없으면 빈 손익�
 check(perf.rule_check(pd.DataFrame(columns=["종목코드", "등분", "기준금액"]),
                       e, "main")["보유종목수"] == 0, "빈 상태도 처리")
 
+
+print("\n[못 믿을 TWR을 숫자로 내보내지 않는가 — 실제 사고]")
+# 2026-10-21: 분할 진입 중이던 배우자 계좌가 9일에 +93.57%로 찍혔습니다.
+# 실제 손익은 -145,625원. 원인은 체결일이 '파일을 넣은 날'로 적혀 현금흐름이
+# 측정 구간 밖으로 빠진 것 — 그러면 주식을 산 것이 통째로 수익이 됩니다.
+_d = pd.bdate_range("2026-10-12", periods=9)
+_v = pd.Series([2_000_000, 2_010_000, 2_600_000, 2_610_000, 3_200_000,
+                3_190_000, 3_800_000, 3_810_000, 3_860_000],
+               index=_d, dtype=float)
+_t_bad = perf.twr(_v, None)                      # 현금흐름 누락
+_r_bad = float(_t_bad["누적"].iloc[-1] - 1)
+check(_r_bad > 0.5,
+      f"현금흐름이 없으면 TWR이 터집니다 ({_r_bad:+.1%}) — 재현")
+_tr = perf.twr_trust(_t_bad)
+check(not _tr["신뢰"], f"그걸 못 믿는다고 판정 ({_tr['점프일수']}일 점프)")
+check("체결" in _tr["사유"] or "입출금" in _tr["사유"],
+      "무엇을 고쳐야 하는지 사유에 적힘")
+
+_f = pd.Series(0.0, index=_d)
+_f.iloc[2] = _f.iloc[4] = _f.iloc[6] = 600_000
+_t_ok = perf.twr(_v, _f)                         # 제 날짜에 들어온 경우
+_r_ok = float(_t_ok["누적"].iloc[-1] - 1)
+check(abs(_r_ok) < 0.05,
+      f"현금흐름이 제 날짜에 있으면 실제 수익률 ({_r_ok:+.2%})")
+check(perf.twr_trust(_t_ok)["신뢰"], "그건 믿어도 된다고 판정")
+
+# 주가만으로 하루 8%는 못 움직인다는 가정이 100종목에서 타당한지 —
+# 평범한 등락은 경고가 뜨면 안 됩니다 (안 그러면 경고가 무의미해집니다)
+_calm = pd.Series([1_000_000 * (1.004 ** i) for i in range(20)],
+                  index=pd.bdate_range("2026-09-01", periods=20), dtype=float)
+check(perf.twr_trust(perf.twr(_calm, None))["신뢰"],
+      "하루 0.4%씩 꾸준히 오르는 정상 곡선은 경고 없음")
+
 print()
 if FAIL:
     print(f"실패 {FAIL}건 — 고치기 전에는 수익률 숫자를 믿지 마세요.")

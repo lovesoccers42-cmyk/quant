@@ -189,6 +189,46 @@ def twr(value: pd.Series, flows: pd.Series | None = None) -> pd.DataFrame:
                          "누적": (1 + r).cumprod()})
 
 
+def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
+    """이 시간가중수익률을 믿어도 되는가.
+
+    TWR은 `(평가액 - 그날 입출금) / 어제 평가액`입니다. 입출금이 원장에
+    안 들어와 있으면 **주식을 산 것이 수익으로 계산됩니다.** 2026-10-21
+    실측: 분할 진입 중이던 배우자 계좌가 9일에 +93.57%로 찍혔는데 실제
+    손익은 -145,625원이었습니다. 체결내역의 체결일이 '파일을 넣은 날'로
+    찍혀 측정 구간 밖으로 빠져 있었던 탓입니다.
+
+    그래서 숫자를 내기 전에 되묻습니다 — 하루 평가액이 band(기본 8%)보다
+    크게 움직였는데 그날 입출금이 0이면, 설명되지 않은 점프입니다. 하루에
+    8%는 100종목 포트폴리오가 주가만으로 움직이기 어려운 폭입니다.
+
+    돌려주는 것: {"신뢰": bool, "점프일수": n, "점프합": 금액, "사유": str}
+    """
+    out = {"신뢰": True, "점프일수": 0, "점프합": 0.0, "사유": ""}
+    if t is None or t.empty or len(t) < 2:
+        out["신뢰"] = False
+        out["사유"] = "거래일이 2일 미만 — 아직 재질 수 없습니다"
+        return out
+    v = pd.to_numeric(t["평가액"], errors="coerce")
+    f = pd.to_numeric(t["순입출금"], errors="coerce").fillna(0.0)
+    prev = v.shift(1)
+    chg = (v - prev).abs()
+    unexplained = (chg > prev.abs() * band) & (f.abs() < chg * 0.5)
+    unexplained = unexplained.fillna(False)
+    n = int(unexplained.sum())
+    out["점프일수"] = n
+    out["점프합"] = float(chg[unexplained].sum())
+    if n:
+        out["신뢰"] = False
+        days = ", ".join(f"{d:%m/%d}" for d in t.index[unexplained][:4])
+        out["사유"] = (
+            f"입출금으로 설명되지 않는 평가액 점프 {n}일 ({days}"
+            f"{' …' if n > 4 else ''}, 합 {out['점프합']:,.0f}). "
+            f"체결내역이 원장에 안 들어왔거나 체결일이 틀렸을 때 생깁니다 "
+            f"— 그 매수가 수익으로 계산됩니다.")
+    return out
+
+
 def index_benchmark(px: pd.DataFrame, shares: pd.Series, *,
                     start=None, end=None, top_n: int = INDEX_N) -> pd.DataFrame:
     """시총 상위 top_n 시총가중 지수 (백테스트의 '지수 벤치마크'와 같은 정의).

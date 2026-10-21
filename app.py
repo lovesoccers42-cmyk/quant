@@ -445,6 +445,20 @@ def account_perf(acct: str) -> dict:
         out["스냅샷"] = len(pos)
         return out
 
+    # 못 믿을 TWR은 숫자로 내보내지 않습니다.
+    #
+    # TWR은 (평가액 - 그날 입출금) / 어제 평가액입니다. 매수가 원장에 안
+    # 들어와 있거나 체결일이 측정 구간 밖에 찍혀 있으면 **그 매수가 수익으로**
+    # 계산됩니다. 2026-10-21 실측: 분할 진입 중이던 배우자 계좌가 9일에
+    # +93.57%로 찍혔고 실제 손익은 -145,625원이었습니다. 틀린 숫자를
+    # 자신있게 띄우는 것이 아무 숫자도 안 띄우는 것보다 나쁩니다.
+    trust = perf.twr_trust(tw)
+    out["신뢰"] = trust
+    if not trust["신뢰"]:
+        out["이유"] = "입출금누락"
+        out["신뢰사유"] = trust["사유"]
+        return out
+
     out["가능"], out["이유"] = True, ""
     out["수익률"] = float(tw["누적"].iloc[-1] - 1)
     out["시작"], out["끝"] = tw.index[0], tw.index[-1]
@@ -457,7 +471,10 @@ def account_perf(acct: str) -> dict:
 
 _WHY = {"설정없음": "설정 전", "기록없음": "기록 전",
         "계좌기록없음": "측정 전", "한점": "다음 주부터",
-        "주가없음": "주가 없음"}
+        "주가없음": "주가 없음",
+        # 입출금이 원장에 없으면 매수가 수익으로 잡힙니다 — 숫자를 숨기고
+        # 무엇을 고쳐야 하는지 띄웁니다.
+        "입출금누락": "체결내역 필요"}
 
 
 def perf_strip() -> None:
@@ -486,6 +503,17 @@ def perf_strip() -> None:
             col.metric(name, "–", delta=_WHY.get(r["이유"], "측정 전"),
                        delta_color="off")
         asof = r.get("주가기준일") or asof
+
+    # 입출금이 빠져 TWR을 못 믿는 계좌가 있으면 그 사실을 먼저 알립니다.
+    bad = [(lab.split(" (")[0], r) for lab, r in rows
+           if r["이유"] == "입출금누락"]
+    if bad:
+        st.warning(
+            "**시간가중수익률을 띄우지 않았습니다** — "
+            + " / ".join(f"{n}: {r.get('신뢰사유', '')}" for n, r in bad)
+            + "\n\n체결내역(체결가·체결수량·체결일)을 inbox에 올리면 "
+              "복구됩니다. 위에 보이는 수익률은 **평단 기준**이고 그건 맞는 "
+              "숫자입니다.")
 
     done = [r for _, r in rows if r["가능"]]
     bits = []

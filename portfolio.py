@@ -917,6 +917,9 @@ _FILL_WORDS = {
     "구분": ("구분", "매매", "매도수", "주문구분", "거래구분", "side"),
     "체결수량": ("체결수량", "체결량", "수량", "주문수량", "qty"),
     "체결가": ("체결가", "체결단가", "단가", "평균단가", "가격", "price"),
+    # 체결일이 있으면 받습니다. 없으면 record_fills가 **주문 날짜**로 채웁니다
+    # (실행한 날이 아닙니다 — 아래 record_fills의 주석을 보세요).
+    "체결일": ("체결일", "거래일", "주문일", "일자", "날짜", "date"),
 }
 
 
@@ -993,6 +996,8 @@ def parse_fills(src) -> pd.DataFrame:
     out["종목명"] = (df["종목명"].astype(str).str.strip()
                   if "종목명" in df.columns else "")
     out["종목명"] = out["종목명"].fillna("").replace("nan", "")
+    out["체결일"] = (pd.to_datetime(df["체결일"], errors="coerce")
+                  if "체결일" in df.columns else pd.NaT)
     if "구분" in df.columns:
         g = df["구분"].astype(str)
         out["구분"] = np.where(g.str.contains("매도|sell|SELL"), "매도",
@@ -1008,9 +1013,22 @@ def parse_fills(src) -> pd.DataFrame:
     out["_금액"] = out["체결수량"] * out["체결가"]
     key = ["종목코드", "종목명", "구분"]
     g = out.groupby(key, as_index=False).agg(체결수량=("체결수량", "sum"),
-                                             _금액=("_금액", "sum"))
+                                             _금액=("_금액", "sum"),
+                                             체결일=("체결일", "min"))
     g["체결가"] = g["_금액"] / g["체결수량"]
     return g.drop(columns=["_금액"]).reset_index(drop=True)
+
+
+def _fill_day(f, asof_ts: pd.Timestamp) -> pd.Timestamp:
+    """체결일 — 체결내역의 날짜 칸이 있으면 그걸, 없으면 주문 날짜.
+
+    실행한 날(today)은 쓰지 않습니다. 며칠 뒤에 체결내역을 넣는 일이
+    흔하고, 그러면 현금흐름이 엉뚱한 날에 찍혀 수익률이 망가집니다.
+    """
+    d = f.get("체결일") if hasattr(f, "get") else None
+    if d is not None and pd.notna(d):
+        return pd.Timestamp(d).normalize()
+    return pd.Timestamp(asof_ts).normalize()
 
 
 def record_fills(src, *, account: str, today: date | None = None,
@@ -1020,6 +1038,16 @@ def record_fills(src, *, account: str, today: date | None = None,
     asof를 주지 않으면 그 계좌의 **가장 최근 주문 날짜**에 채웁니다(보통
     이번 주 주문서). 원장에 없던 종목이 체결돼 있으면 '원장밖' 주문으로
     새로 적습니다 — 직접 사신 종목도 성과에 들어가야 하니까요.
+
+    **체결일은 '이 함수를 돌린 날'이 아닙니다.** 체결내역에 날짜 칸이 있으면
+    그걸 쓰고, 없으면 주문 날짜(asof)를 씁니다.
+
+    왜 중요한가 (2026-10-21 실측 사고): 예전에는 체결일에 `today`를 적었습니다.
+    그러면 10/16에 산 주식의 현금흐름이 10/21에 찍힙니다. 시간가중수익률은
+    `(평가액 - 그날 입출금) / 어제 평가액`으로 재는데, 평가액은 재동기화
+    스냅샷(10/12·10/18)에서 오고 현금흐름만 10/21에 있으니, 주식을 산 것이
+    통째로 **수익**으로 계산됐습니다. 분할 진입 중이던 배우자 계좌가 9일에
+    +93.57%로 찍혔습니다. 실제 손익은 -145,625원이었습니다.
     """
     today = today or date.today()
     fills = parse_fills(src)
@@ -1059,7 +1087,7 @@ def record_fills(src, *, account: str, today: date | None = None,
     for i, f in matched:
         upd.loc[i, "체결가"] = float(f["체결가"])
         upd.loc[i, "체결수량"] = float(f["체결수량"])
-        upd.loc[i, "체결일"] = pd.Timestamp(today)
+        upd.loc[i, "체결일"] = _fill_day(f, asof_ts)
     rows = []
     for f in extra:
         rows.append({"기준일": asof_ts, "계좌": account,
@@ -1070,7 +1098,7 @@ def record_fills(src, *, account: str, today: date | None = None,
                      "메모": "원장밖 체결 (주문서에 없던 종목)",
                      "체결가": float(f["체결가"]),
                      "체결수량": float(f["체결수량"]),
-                     "체결일": pd.Timestamp(today)})
+                     "체결일": _fill_day(f, asof_ts)})
     # 안 채워진 주문 — 체결내역에 없으니 **일어나지 않은 거래**입니다.
     # 여기에 표시를 남기지 않으면 체결가가 비어 있는 행을 '계획값으로 추정'
     # 으로 읽어, 실제로는 못 판 종목을 계획가에 팔았다고 계산합니다
