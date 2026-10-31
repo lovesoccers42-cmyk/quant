@@ -195,7 +195,12 @@ jobs:
         run: python tools/weekly_status.py
 
       - name: 상태·주문서 비공개 레포에 저장
-        if: always()
+        # always() 는 **취소할 때도** 돕니다. 주문서를 만들다가 중간에
+        # 취소하면 반쯤 바뀐 상태가 저장됩니다 — 산 적 없는 종목이 보유로
+        # 남습니다. !cancelled() 는 성공·실패에는 돌고 취소에는 안 돕니다
+        # (한쪽 계좌가 실패해도 다른 쪽 상태는 저장돼야 하므로 failure는
+        #  살려 둡니다).
+        if: ${{ !cancelled() }}
         run: |
           shopt -s nullglob
           mkdir -p state-repo/state state-repo/orders
