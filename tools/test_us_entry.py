@@ -214,3 +214,39 @@ for month in range(3):
                  table=TBL, slot=p["slot"], today=_month(month))
 over = len(pf.load_state(TBL))
 check(over > 100, f"재배분 없이 세 달 돌리면 {over}종목 — 목표 100을 넘김")
+
+
+# ── 6. 넘치지는 않지만 속도가 들쭉날쭉한 계좌 ────────────────
+# alt(미국)이 이 경우입니다 — 22종목이 전부 0번 등분. 자리(25)를 넘지
+# 않으니 보유가 목표를 넘지는 않지만, 25·25·25·3종목으로 들어갑니다.
+print("\n[보유가 한 등분에만 있으면 넘치지 않아도 고르게 나눈다]")
+put([(f"T{i:03d}", 0, 1000.0) for i in range(22)])
+p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+check(p["단계"] == "진입중", f"22/100종목 → {p['단계']}")
+check(p["등분재배분필요"] is True,
+      "자리(25)를 넘지는 않지만 한 등분에만 몰려 있어 재배분")
+sp = pf.respread_slots(TBL, tranches=4)
+cnt = sp["등분별종목수"]
+check(max(cnt.values()) - min(cnt.values()) <= 1, f"고르게 나뉨 {cnt}")
+p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+check(p["등분재배분필요"] is False, "나눈 뒤에는 그만")
+
+print("\n[22종목이 네 달에 걸쳐 고르게 들어가는가]")
+buys = []
+for month in range(4):
+    p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+    r = pf.rebalance(picks, n=100, tranches=p["등분수"], capital=100_000.0,
+                     table=TBL, slot=p["slot"], today=_month(month))
+    buys.append(r["매수"])
+    print(f"    {month + 1}개월차  등분 {p['slot']}번 · 매수 {r['매수']}종목 "
+          f"· 보유 {len(pf.load_state(TBL))}종목")
+check(len(pf.load_state(TBL)) == 100, "4개월 뒤 100종목")
+check(max(buys) - min(buys) <= 2,
+      f"월별 매수가 고름 {buys} (재배분 없으면 25·25·25·3)")
+
+print("\n[이미 네 등분을 쓰고 있으면 건드리지 않는다]")
+put([(f"T{i:03d}", i % 4, (1000.0 if i % 4 == 0 else 0.0))
+     for i in range(100)])
+p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+check(p["등분재배분필요"] is False,
+      "첫 진입 직후(0번만 샀고 1~3번은 배정만) 상태는 그대로")
