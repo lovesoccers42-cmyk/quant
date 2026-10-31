@@ -127,7 +127,18 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
     # 돌아갑니다 — 미국은 1이라 그 뒤부터 매달 전체를 점검합니다.
     plan = portfolio.entry_stage(prof["state_table"],
                                  entry_tranches=config.ENTRY_TRANCHES,
-                                 tranches=tranches)
+                                 tranches=tranches, n=config.N_PORTFOLIO)
+    if plan.get("등분재배분필요"):
+        # 보유가 한 등분에 몰려 있습니다 — 고르게 나누지 않으면 빈 등분이
+        # 차례마다 목표치를 통째로 사서 보유가 목표를 넘깁니다.
+        sp = portfolio.respread_slots(prof["state_table"],
+                                      tranches=plan["등분수"])
+        log.info("보유 %d종목을 %d등분에 다시 나눴습니다 %s (%d종목 이동)",
+                 sp["보유종목수"], plan["등분수"], sp["등분별종목수"],
+                 sp["바뀐종목수"])
+        plan = portfolio.entry_stage(prof["state_table"],
+                                     entry_tranches=config.ENTRY_TRANCHES,
+                                     tranches=tranches, n=config.N_PORTFOLIO)
     if plan["등분정리필요"]:
         # 진입이 끝난 첫 회차 — 등분을 합치지 않으면 0번 등분만 손보고
         # 나머지는 영구히 방치됩니다.

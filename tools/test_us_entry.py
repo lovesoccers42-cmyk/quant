@@ -37,6 +37,11 @@ def check(cond: bool, msg: str) -> None:
         FAIL += 1
 
 
+def _month(i: int) -> date:
+    """진입 시뮬레이션용 — 11월부터 i개월 뒤 1일 (해를 넘겨도 됩니다)."""
+    return date(2026 + (10 + i) // 12, (10 + i) % 12 + 1, 1)
+
+
 def put(rows):
     """가짜 보유 상태를 깔아 둡니다. rows = [(종목코드, 등분, 기준금액)]"""
     pf.set_market("us")
@@ -144,3 +149,68 @@ if FAIL:
     print(f"실패 {FAIL}건 — 고치기 전에는 실제 주문을 내지 마세요.")
     sys.exit(1)
 print("전체 통과 — 진입만 쪼개지고, 다 채우면 전체 점검으로 돌아갑니다.")
+
+
+# ── 5. 진입이 덜 끝난 계좌 (미매수 표시가 없는 경우) ─────────
+# 지금 미국 두 계좌가 이 상태입니다 — 보유 58·22종목인데 미매수는 0.
+# 체결이 덜 됐거나 보유 목록으로 resync를 돌려 미매수 표시가 지워지면
+# 이렇게 됩니다. n을 안 보면 '진입 완료'로 읽고 남은 42종목을 한 달에
+# 몰아서 사라는 주문서가 나옵니다.
+print("\n[보유가 목표에 모자라면 미매수 표시가 없어도 진입 중]")
+put([(f"T{i:03d}", 0, 1000.0) for i in range(58)])
+p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+check(p["단계"] == "진입중", f"58/100종목 → 단계 {p['단계']}")
+check(p["미매수"] == 0, "미매수 표시는 0인데도 진입 중으로 봄")
+check(p["등분재배분필요"] is True,
+      "58종목이 전부 0번 등분에 몰려 있어 재배분이 필요")
+check(pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=0)["단계"] == "운용",
+      "n을 안 주면 예전처럼 '운용'으로 읽음 (한국 경로 호환)")
+
+print("\n[등분 재배분 — 금액이 고르게]")
+sp = pf.respread_slots(TBL, tranches=4)
+check(sp["보유종목수"] == 58, f"종목이 사라지지 않음 ({sp['보유종목수']})")
+cnt = sp["등분별종목수"]
+check(max(cnt.values()) - min(cnt.values()) <= 1,
+      f"등분별 종목 수가 고름 {cnt}")
+st = pf.load_state(TBL)
+amt_by = (pd.to_numeric(st["기준금액"], errors="coerce")
+          .groupby(pd.to_numeric(st["등분"], errors="coerce")).sum())
+check(float(amt_by.max() - amt_by.min()) <= float(amt_by.max()) * 0.2,
+      f"등분별 금액도 고름 (최대-최소 {float(amt_by.max()-amt_by.min()):,.0f})")
+p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+check(p["등분재배분필요"] is False, "재배분 뒤에는 더 필요 없다고 답함")
+
+print("\n[네 달에 걸쳐 100종목으로 수렴하는가]")
+held = []
+for month in range(4):
+    p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+    if p["등분재배분필요"]:
+        pf.respread_slots(TBL, tranches=p["등분수"])
+        p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+    r = pf.rebalance(picks, n=100, tranches=p["등분수"], capital=100_000.0,
+                     table=TBL, slot=p["slot"],
+                     today=_month(month))
+    n_now = len(pf.load_state(TBL))
+    held.append((p["slot"], r["매수"], n_now))
+    print(f"    {month + 1}개월차  등분 {p['slot']}번 · 매수 {r['매수']}종목 "
+          f"· 보유 {n_now}종목")
+check(all(n <= 100 for _, _, n in held),
+      f"목표를 넘지 않음 (최대 {max(n for _, _, n in held)}종목)")
+check(held[-1][2] == 100, f"4개월 뒤 100종목 ({held[-1][2]})")
+check(max(b for _, b, _ in held) <= 25,
+      f"한 달에 담는 종목이 한 등분 치를 넘지 않음 "
+      f"(최대 {max(b for _, b, _ in held)}종목)")
+check(len({s for s, _, _ in held}) == 4,
+      f"네 등분을 한 번씩 돌았음 {[s for s, _, _ in held]}")
+p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+check(p["단계"] == "운용" and p["등분정리필요"] is True,
+      "다 채웠으니 운용 단계 + 등분 정리 대기")
+
+print("\n[재배분을 건너뛰면 실제로 목표를 넘는다 — 그래서 필요합니다]")
+put([(f"T{i:03d}", 0, 1000.0) for i in range(58)])
+for month in range(3):
+    p = pf.entry_stage(TBL, entry_tranches=4, tranches=1, n=100)
+    pf.rebalance(picks, n=100, tranches=4, capital=100_000.0,
+                 table=TBL, slot=p["slot"], today=_month(month))
+over = len(pf.load_state(TBL))
+check(over > 100, f"재배분 없이 세 달 돌리면 {over}종목 — 목표 100을 넘김")
