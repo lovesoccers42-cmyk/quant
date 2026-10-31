@@ -20,13 +20,17 @@ store의 테이블 가드가 섞임을 막지만, 사람이 숫자를 섞어 읽
 한 달에 한 번 점검되고, 이게 한국(주 1회 × 4등분 = 4주마다)과 같은 리듬
 입니다. 등분을 늘리면 그만큼 느려집니다 — 4등분이면 4개월에 한 번입니다.
 
-**진입만은 나눕니다.** 위 등분을 첫 달에 그대로 적용하면 100종목을 하루에
-담습니다. 그래서 100종목을 채울 때까지만 config.ENTRY_TRANCHES(기본 4)개월
-에 걸쳐 한 등분씩 담고, 다 채우면 portfolio.merge_slots()로 등분을 합쳐
-매달 전체 점검으로 돌아갑니다. 어느 등분을 담을 차례인지는 주차가 아니라
-'아직 안 산 등분 중 가장 작은 번호'로 정합니다 — 월 1회 실행에서는 주차가
-달마다 4~5주씩 뛰어 등분이 겹치거나 건너뛰기 때문입니다(portfolio.entry_stage
+**진입의 매수만 나눕니다.** 위 등분을 첫 달에 그대로 적용하면 100종목을
+하루에 담습니다. 그래서 목표를 채울 때까지는 신규 매수를
+config.N_PORTFOLIO ÷ config.ENTRY_TRANCHES(100÷4 = 25)종목까지만 냅니다.
+**리밸런싱은 진입 중에도 매달 전체에 돕니다** — 순위 버퍼 밖으로 밀려난
+종목은 그 달에 팔리고, 비중이 ±20% 넘게 벗어난 종목은 그 달에 조절됩니다.
+등분을 쪼개서 진입을 나누면 그 기간 한 종목이 네 달에 한 번만 점검돼
+백테스트와 다른 전략이 되므로 그 방법은 쓰지 않습니다(portfolio.entry_stage
 의 설명 참고). 금액 분산은 약정액 단계인상(램프)이 따로 맡습니다.
+
+보유 58종목이면 83 → 100으로 두 달, 22종목이면 47 → 72 → 97 → 100으로
+네 달에 걸쳐 들어갑니다.
 숫자를 인자로 주면 바꿀 수 있지만(`run_us_monthly_orders.py 4`), 그러면
 백테스트로 잰 것과 다른 전략을 돌리는 것입니다.
 """
@@ -128,28 +132,18 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
     plan = portfolio.entry_stage(prof["state_table"],
                                  entry_tranches=config.ENTRY_TRANCHES,
                                  tranches=tranches, n=config.N_PORTFOLIO)
-    if plan.get("등분재배분필요"):
-        # 보유가 한 등분에 몰려 있습니다 — 고르게 나누지 않으면 빈 등분이
-        # 차례마다 목표치를 통째로 사서 보유가 목표를 넘깁니다.
-        sp = portfolio.respread_slots(prof["state_table"],
-                                      tranches=plan["등분수"])
-        log.info("보유 %d종목을 %d등분에 다시 나눴습니다 %s (%d종목 이동)",
-                 sp["보유종목수"], plan["등분수"], sp["등분별종목수"],
-                 sp["바뀐종목수"])
-        plan = portfolio.entry_stage(prof["state_table"],
-                                     entry_tranches=config.ENTRY_TRANCHES,
-                                     tranches=tranches, n=config.N_PORTFOLIO)
     if plan["등분정리필요"]:
-        # 진입이 끝난 첫 회차 — 등분을 합치지 않으면 0번 등분만 손보고
-        # 나머지는 영구히 방치됩니다.
+        # 상태가 등분 수보다 잘게 쪼개져 있습니다 — 합치지 않으면 0번
+        # 등분만 손보고 나머지는 영구히 방치됩니다.
         n_merged = portfolio.merge_slots(prof["state_table"],
                                          tranches=plan["등분수"])
-        log.info("진입 완료 — %d종목의 등분을 하나로 합쳤습니다. "
-                 "이제부터 매달 전체를 점검합니다.", n_merged)
+        log.info("등분 %d종목을 하나로 합쳤습니다 — 이제 매달 전체를 "
+                 "점검합니다.", n_merged)
     tr = int(plan["등분수"])
-    log.info("진입 단계 %s · 이번 등분 %s / 총 %d등분%s", plan["단계"],
-             "전체" if plan["slot"] is None else plan["slot"], tr,
-             f" · 미매수 {plan['미매수']}종목" if plan["미매수"] else "")
+    log.info("진입 단계 %s · 보유 %d/%d종목 · 등분 %d · 이번 회차 신규 "
+             "매수 상한 %s", plan["단계"], plan["보유종목수"],
+             config.N_PORTFOLIO, tr,
+             plan["최대매수"] or "없음")
 
     r = portfolio.rebalance(picks, n=config.N_PORTFOLIO, tranches=tr,
                             capital=capital, cash=cash,
@@ -158,7 +152,7 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
                             slot_offset=prof["slot_offset"],
                             weighting=prof["weighting"],
                             max_weight=config.MAX_WEIGHT,
-                            slot=plan["slot"])
+                            max_buys=plan["최대매수"])
 
     n_logged = portfolio.log_trades(r["orders"], account=prof["key"],
                                     table=prof["trades_table"])
@@ -195,11 +189,12 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
             {"항목": "종목별 배정액 범위",
              "값": (f"{_fmt(rng[0])} ~ {_fmt(rng[1])}" if rng else "-")},
             {"항목": "진입 단계",
-             "값": {"첫진입": f"첫 진입 — {tr}개월에 걸쳐 나눠 담습니다",
-                   "진입중": (f"진입 중 — 아직 안 산 {plan['미매수']}종목이 "
-                            "다음 달들에 들어갑니다"),
-                   "운용": "진입 완료 — 매달 전체를 점검합니다",
-                   }[plan["단계"]]},
+             "값": ("진입 완료 — 매달 전체 점검"
+                   if plan["단계"] == "운용" else
+                   f"{'첫 진입' if plan['단계'] == '첫진입' else '진입 중'}"
+                   f" — 보유 {plan['보유종목수']}/{config.N_PORTFOLIO}종목"
+                   f" · 이번 달 신규 매수 {plan['최대매수']}종목까지"
+                   f" (리밸런싱은 매달 전체에 돕니다)")},
             {"항목": "이번에 손보는 등분",
              "값": (("첫 진입(분할) — "
                     f"{r['이번등분']}번 등분부터 달마다 한 등분씩 "
