@@ -535,6 +535,83 @@ def current_slot(tranches: int, today: date | None = None,
     return (int(today.isocalendar()[1]) + int(offset)) % tr
 
 
+# ── 초기 진입 분할 ───────────────────────────────────────────
+# tranches 하나가 두 가지를 같이 정합니다: 한 종목을 얼마나 자주 점검하는지
+# (리밸런싱 주기)와, 처음 100종목을 몇 번에 나눠 담는지(진입 분할). 한국은
+# 주 1회 x 4등분이라 둘이 같은 값이어도 맞습니다 — 4주마다 한 바퀴.
+#
+# 미국은 월 1회 전체 점검(1등분)이 검증된 리듬입니다. 그런데 그러면 첫 달에
+# 100종목을 하루에 담습니다 — 전 재산이 그 하루의 주가에 걸립니다. 진입만
+# 쪼개고 다 채운 뒤에 원래 주기로 돌아가는 것이 이 두 함수입니다.
+def entry_stage(table: str = STATE, *, entry_tranches: int = 4,
+                tranches: int = 1) -> dict:
+    """이번 회차에 쓸 등분 수와 등분 번호를 정합니다.
+
+    단계
+      첫진입  상태가 비어 있음 — entry_tranches개 등분에 배정하고 0번만 산다
+      진입중  기준금액 0(배정만 하고 아직 안 산) 종목이 남아 있음 — 다음 등분
+      운용    다 채웠음 — tranches로 돌아간다
+
+    등분 번호를 주차로 고르지 않는 이유: current_slot은 ISO 주차 % 등분수라
+    주 1회 실행(한국)에서는 0,1,2,3을 정확히 한 바퀴 돕니다. 월 1회
+    실행에서는 달마다 주차가 4~5주씩 뛰어 같은 등분이 두 번 걸리거나 아예
+    안 옵니다 (2026-11-01은 44주 → 0번, 12-01은 49주 → 1번, 2027-01-01은
+    1주 → 또 1번. 2·3번 등분은 차례가 오지 않아 진입이 끝나지 않습니다).
+    그래서 진입 중에는 '아직 안 산 등분 중 가장 작은 번호'를 순서대로 씁니다.
+
+    '등분정리필요'가 True면 상태가 지금 등분 수보다 잘게 쪼개져 있습니다.
+    merge_slots()로 합친 뒤에 rebalance를 부르세요 — 안 합치면 0번 등분의
+    종목만 손보고 나머지 75종목은 영구히 방치됩니다.
+    """
+    tr_e = max(1, int(entry_tranches))
+    tr_r = max(1, int(tranches))
+    st = load_state(table)
+    if st.empty:
+        return {"단계": "첫진입", "등분수": tr_e,
+                "slot": 0 if tr_e > 1 else None,
+                "미매수": 0, "등분정리필요": False}
+
+    amt = pd.to_numeric(st["기준금액"], errors="coerce")
+    slots_all = pd.to_numeric(st["등분"], errors="coerce").dropna()
+    pending = st[amt == 0.0]
+    if len(pending):
+        waiting = sorted({int(v) for v in
+                          pd.to_numeric(pending["등분"],
+                                        errors="coerce").dropna()})
+        return {"단계": "진입중", "등분수": tr_e,
+                "slot": waiting[0] if waiting else 0,
+                "미매수": int(len(pending)), "등분정리필요": False}
+
+    쪼개짐 = bool(len(slots_all)) and int(slots_all.max()) >= tr_r
+    return {"단계": "운용", "등분수": tr_r, "slot": None,
+            "미매수": 0, "등분정리필요": 쪼개짐}
+
+
+def merge_slots(table: str = STATE, *, tranches: int = 1) -> int:
+    """상태의 등분을 하나로 합칩니다. 바꾼 종목 수를 돌려줍니다.
+
+    진입 분할이 끝나 등분 수를 줄일 때 씁니다 (미국: 4 → 1). 1로 합치는
+    경우만 다룹니다 — 4를 2로 줄이는 건 어느 종목을 어느 등분에 남길지가
+    포트폴리오 구성 문제라 코드가 혼자 정하면 안 됩니다.
+    """
+    tr = max(1, int(tranches))
+    if tr != 1:
+        raise ValueError(
+            f"등분 {tr}로 합치는 건 지원하지 않습니다 — 1만 됩니다. "
+            "중간값으로 줄이려면 보유 목록으로 seed를 다시 돌리세요.")
+    st = load_state(table)
+    if st.empty:
+        return 0
+    n_changed = int((pd.to_numeric(st["등분"], errors="coerce").fillna(0)
+                     != 0).sum())
+    if not n_changed:
+        return 0
+    st = st.copy()
+    st["등분"] = 0
+    _write(table, st)
+    return n_changed
+
+
 def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
               today: date | None = None, symbol: str = "종목코드",
               name: str = "종목명", sector: str = "SEC_NM_KOR",
@@ -542,7 +619,8 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
               hold_universe=None, cash: float = 0.0,
               table: str = STATE, slot_offset: int = 0,
               weighting: str = "equal", max_weight: float = 0.0,
-              vol: str = "VOL", staged_first: bool | None = None) -> dict:
+              vol: str = "VOL", staged_first: bool | None = None,
+              slot: int | None = None) -> dict:
     """모델 순위표(picks)를 받아 이번 회차 주문을 계산하고 상태를 갱신합니다.
 
     picks는 qvm 오름차순(좋은 종목이 위)으로 정렬돼 있어야 합니다.
@@ -558,6 +636,12 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     hold_universe를 주면 순위 버퍼로 동작합니다 — 살 때는 picks 상위 n위
     안에서만 고르고, 팔 때는 hold_universe 밖으로 밀려나야 팝니다. 백테스트와
     같은 규칙이어야 하므로 반드시 같은 값을 쓰세요(model_kr_hold.parquet).
+
+    slot을 주면 이번에 손볼 등분을 그 번호로 **못 박습니다**. 안 주면
+    current_slot(ISO 주차 % 등분수)으로 고릅니다. 주 1회 실행이면 주차가
+    등분을 정확히 한 바퀴 돌리므로 그게 맞지만, 월 1회 실행에서는 달마다
+    주차가 4~5주씩 뛰어 등분이 건너뛰거나 겹칩니다 — entry_stage()가
+    그래서 진입 중에는 번호를 직접 정해 넘깁니다.
     """
     today = today or date.today()
     tranches = max(1, int(tranches))
@@ -626,7 +710,8 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         # 기본값은 분할이고, 설정으로 바꿉니다.
         staged = (config.STAGED_FIRST if staged_first is None
                   else bool(staged_first))
-        slot_used = (current_slot(tranches, today, offset=slot_offset)
+        slot_used = ((int(slot) % max(1, tranches) if slot is not None
+                      else current_slot(tranches, today, offset=slot_offset))
                      if (staged and tranches > 1) else None)
         rows = []
         for i, code in enumerate(target[:n]):
@@ -640,7 +725,8 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
                 if slot_used is None or r["등분"] == slot_used]
         sells, keeps = [], []
     else:
-        slot_used = current_slot(tranches, today, offset=slot_offset)
+        slot_used = (int(slot) % max(1, tranches) if slot is not None
+                     else current_slot(tranches, today, offset=slot_offset))
         mine = state[state["등분"] == slot_used]["종목코드"].tolist()
         others = state[state["등분"] != slot_used]["종목코드"].tolist()
         buy_set = set(target[:n])

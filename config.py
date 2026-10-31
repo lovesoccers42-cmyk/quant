@@ -148,6 +148,11 @@ MODEL_ROWS = int(os.getenv("QUANT_MODEL_ROWS", "200"))
 # 숫자가 답을 주지 않으므로, 적립식 방식에 맞춰 분할을 기본으로 둡니다.
 STAGED_FIRST = os.getenv("QUANT_STAGED_FIRST", "1") not in ("0", "false", "False")
 
+# 초기 진입을 몇 번에 나눠 담을지 — **리밸런싱 등분과 별개입니다.**
+# 100종목을 다 채우기 전까지만 쓰이고, 채운 뒤에는 각 시장의 등분 수
+# (한국 4, 미국 1)로 돌아갑니다. 1이면 진입 분할을 끕니다.
+ENTRY_TRANCHES = int(os.getenv("QUANT_ENTRY_TRANCHES", "4") or 4)
+
 # ── 실전 운용 자금 ───────────────────────────────────────────
 # 주간 주문서에 '몇 주 살지'를 적으려면 총 평가액이 필요합니다.
 # 종목당 배정액 = CAPITAL_KRW ÷ N_PORTFOLIO, 수량 = 배정액 ÷ 주가 (내림).

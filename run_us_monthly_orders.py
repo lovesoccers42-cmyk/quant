@@ -19,6 +19,14 @@ store의 테이블 가드가 섞임을 막지만, 사람이 숫자를 섞어 읽
 **주기에 대하여.** 월 1회 리밸런싱 + **1등분**이 기본입니다. 한 종목이
 한 달에 한 번 점검되고, 이게 한국(주 1회 × 4등분 = 4주마다)과 같은 리듬
 입니다. 등분을 늘리면 그만큼 느려집니다 — 4등분이면 4개월에 한 번입니다.
+
+**진입만은 나눕니다.** 위 등분을 첫 달에 그대로 적용하면 100종목을 하루에
+담습니다. 그래서 100종목을 채울 때까지만 config.ENTRY_TRANCHES(기본 4)개월
+에 걸쳐 한 등분씩 담고, 다 채우면 portfolio.merge_slots()로 등분을 합쳐
+매달 전체 점검으로 돌아갑니다. 어느 등분을 담을 차례인지는 주차가 아니라
+'아직 안 산 등분 중 가장 작은 번호'로 정합니다 — 월 1회 실행에서는 주차가
+달마다 4~5주씩 뛰어 등분이 겹치거나 건너뛰기 때문입니다(portfolio.entry_stage
+의 설명 참고). 금액 분산은 약정액 단계인상(램프)이 따로 맡습니다.
 숫자를 인자로 주면 바꿀 수 있지만(`run_us_monthly_orders.py 4`), 그러면
 백테스트로 잰 것과 다른 전략을 돌리는 것입니다.
 """
@@ -114,13 +122,32 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
     log.info("운용기준 $%.2f (약정 $%.2f / 평가 $%.2f + 예수금 $%.2f = $%.2f)",
              capital, pledged, float(cap_info.get("평가액") or 0), cash, measured)
 
-    r = portfolio.rebalance(picks, n=config.N_PORTFOLIO, tranches=tranches,
+    # 진입 단계를 먼저 봅니다. 100종목을 채우기 전까지는 진입 분할 등분
+    # (config.ENTRY_TRANCHES)으로 한 등분씩 담고, 다 채우면 tranches로
+    # 돌아갑니다 — 미국은 1이라 그 뒤부터 매달 전체를 점검합니다.
+    plan = portfolio.entry_stage(prof["state_table"],
+                                 entry_tranches=config.ENTRY_TRANCHES,
+                                 tranches=tranches)
+    if plan["등분정리필요"]:
+        # 진입이 끝난 첫 회차 — 등분을 합치지 않으면 0번 등분만 손보고
+        # 나머지는 영구히 방치됩니다.
+        n_merged = portfolio.merge_slots(prof["state_table"],
+                                         tranches=plan["등분수"])
+        log.info("진입 완료 — %d종목의 등분을 하나로 합쳤습니다. "
+                 "이제부터 매달 전체를 점검합니다.", n_merged)
+    tr = int(plan["등분수"])
+    log.info("진입 단계 %s · 이번 등분 %s / 총 %d등분%s", plan["단계"],
+             "전체" if plan["slot"] is None else plan["slot"], tr,
+             f" · 미매수 {plan['미매수']}종목" if plan["미매수"] else "")
+
+    r = portfolio.rebalance(picks, n=config.N_PORTFOLIO, tranches=tr,
                             capital=capital, cash=cash,
                             hold_universe=hold_universe,
                             table=prof["state_table"],
                             slot_offset=prof["slot_offset"],
                             weighting=prof["weighting"],
-                            max_weight=config.MAX_WEIGHT)
+                            max_weight=config.MAX_WEIGHT,
+                            slot=plan["slot"])
 
     n_logged = portfolio.log_trades(r["orders"], account=prof["key"],
                                     table=prof["trades_table"])
@@ -156,14 +183,21 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
             {"항목": "종목당 배정액", "값": _fmt(r.get("종목당배정액"))},
             {"항목": "종목별 배정액 범위",
              "값": (f"{_fmt(rng[0])} ~ {_fmt(rng[1])}" if rng else "-")},
+            {"항목": "진입 단계",
+             "값": {"첫진입": f"첫 진입 — {tr}개월에 걸쳐 나눠 담습니다",
+                   "진입중": (f"진입 중 — 아직 안 산 {plan['미매수']}종목이 "
+                            "다음 달들에 들어갑니다"),
+                   "운용": "진입 완료 — 매달 전체를 점검합니다",
+                   }[plan["단계"]]},
             {"항목": "이번에 손보는 등분",
-             "값": (("첫 실행(분할 진입) — "
+             "값": (("첫 진입(분할) — "
                     f"{r['이번등분']}번 등분부터 달마다 한 등분씩 "
-                    f"{tranches}개월에 걸쳐 채웁니다"
+                    f"{tr}개월에 걸쳐 채웁니다"
                     if r["첫실행"] and r["이번등분"] is not None
                     else "첫 실행 — 전 등분을 한 번에 채움")
                    if r["첫실행"]
-                   else f"{r['이번등분']}번 / 총 {tranches}등분")},
+                   else (f"{r['이번등분']}번 / 총 {tr}등분" if tr > 1
+                         else "전체 (1등분)"))},
             # 검증 여부를 함부로 주장하지 않습니다. 등분 수를 바꾸면
             # 주기가 바뀌고, 그러면 백테스트가 잰 것과 다른 전략입니다.
             {"항목": "한 종목의 점검 주기",
@@ -171,7 +205,9 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
                    f"(월 1회 리밸런싱 × {tranches}등분)"
                    + ("  ← 한국(4주)과 같은 리듬" if tranches == 1 else
                       f"  ← 한국은 4주마다입니다. {tranches}등분이면 "
-                      f"{tranches}배 느립니다"))},
+                      f"{tranches}배 느립니다")
+                   + ("" if plan["단계"] == "운용" else
+                      f"  (진입이 끝난 뒤부터. 진입 중에는 {tr}등분)"))},
             {"항목": "목표 종목 수", "값": r["목표종목수"]},
             {"항목": "체결 전 실제 보유 (지금 계좌)", "값": held_now},
             {"항목": "주문 뒤 보유 예정", "값": r["보유종목수"]},
@@ -226,7 +262,8 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
             "시장": "us", "통화": "USD",
             "프로필": prof["key"], "라벨": prof["라벨"],
             "기준일": f"{date.today():%Y-%m-%d}", "이번등분": r["이번등분"],
-            "등분수": tranches, "매도": r["매도"], "매수": r["매수"],
+            "등분수": tr, "진입단계": plan["단계"],
+            "매도": r["매도"], "매수": r["매수"],
             "유지": r["유지"], "보유종목수": r["보유종목수"],
             "체결전_실제보유": held_now, "주문후_보유예정": r["보유종목수"],
             "첫실행": r["첫실행"], "미매수": r.get("미매수", 0),
@@ -243,14 +280,18 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
     print(f"  미국장 월간 주문서 · {prof['라벨']} · {date.today():%Y-%m-%d}  (USD)")
     print("=" * 60)
     if r["첫실행"] and r["이번등분"] is not None:
-        print(f"  첫 실행(분할 진입) — {tranches}등분 중 {r['이번등분']}번 등분 "
+        print(f"  첫 진입(분할) — {tr}등분 중 {r['이번등분']}번 등분 "
               f"{r['매수']}종목만 담습니다. 나머지 {r.get('미매수', 0)}종목은 "
-              f"다음 달부터.")
+              f"다음 달부터 한 등분씩.")
     elif r["첫실행"]:
         print(f"  첫 실행입니다 — {r['매수']}종목을 한 번에 담습니다.")
     else:
-        print(f"  {tranches}등분 중 {r['이번등분']}번 등분 차례")
+        print(f"  {tr}등분 중 {r['이번등분']}번 등분 차례" if tr > 1
+              else "  전체 점검 (1등분)")
         print(f"  매도 {r['매도']} · 매수 {r['매수']} · 유지 {r['유지']}")
+        if plan["미매수"]:
+            print(f"  진입 중 — 아직 안 산 {plan['미매수']}종목은 "
+                  f"다음 달부터 들어갑니다.")
     print(f"  종목당 배정액 {_fmt(r.get('종목당배정액'))}"
           + (f" · 주가가 비싸 제외 {r['가격초과제외']}종목"
              if r.get("가격초과제외") else ""))
