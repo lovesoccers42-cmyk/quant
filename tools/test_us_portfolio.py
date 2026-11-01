@@ -13,6 +13,12 @@ portfolio.py는 원래 한국 전용이었습니다. 종목코드를 "앞자리 
 
 그리고 한국 경로가 한 글자도 달라지지 않았는지도 같이 봅니다 — 이 변경의
 조건입니다.
+
+**날짜를 고정하지 마세요.** 이 점검은 미국 주문서 워크플로우의 게이트입니다.
+램프(목표액 단계 인상)처럼 '오늘'을 보는 계산에 고정 날짜를 쓰면 달이
+바뀌는 순간 기대값이 깨지고, 코드가 멀쩡한데도 주문서가 아예 안 나옵니다
+(2026-11-01에 실제로 그렇게 막혔습니다). 기준일은 date.today()로 잡고,
+단계별 값은 _ramp에 날짜를 명시해 확인하세요.
 """
 import os
 import sys
@@ -193,25 +199,32 @@ print("\n[목표액 램프 — 전환을 하루에 몰지 않기]")
 pf.set_market("us")
 RT = "us_capital"
 store.write(RT, pd.DataFrame(columns=list(store.SCHEMAS[RT])))
-pf.set_capital(19_631.65, table=RT, today=date(2026, 10, 21))
-r0 = pf.set_capital(30_162.0, table=RT, today=date(2026, 10, 21), ramp=True)
+# **시작일은 오늘로 둡니다.** 날짜를 고정하면 달이 바뀌는 순간 "0개월차"
+# 기대값이 깨지고, 이 점검이 미국 주문서 워크플로우의 게이트라 주문서가
+# 아예 안 나옵니다 (2026-11-01에 실제로 그렇게 막혔습니다). 단계별 값은
+# 아래에서 _ramp에 날짜를 명시해 확인합니다.
+TODAY = date.today()
+pf.set_capital(19_631.65, table=RT, today=TODAY)
+r0 = pf.set_capital(30_162.0, table=RT, today=TODAY, ramp=True)
 check(abs(float(r0["약정액"]) - 19_631.65) < 1,
       f"0개월차는 지금 돈 그대로 (${float(r0['약정액']):,.0f})")
 check(abs(float(r0.get("목표액", 0)) - 30_162.0) < 1,
       f"목표액은 따로 기록 (${float(r0.get('목표액', 0)):,.0f})")
 
-_row = pd.Series({"램프시작일": pd.Timestamp("2026-10-21"),
+_row = pd.Series({"램프시작일": pd.Timestamp(TODAY),
                   "램프시작액": 19_631.65})
 want = {0: 19_632, 1: 23_142, 2: 26_652, 3: 30_162, 6: 30_162}
 for m, w in want.items():
-    d = pd.Timestamp("2026-10-21") + pd.DateOffset(months=m)
+    d = pd.Timestamp(TODAY) + pd.DateOffset(months=m)
     got = pf._ramp(_row, 30_162.0, today=d.date())["적용약정"]
     check(abs(got - w) < 2, f"{m}개월차 ${got:,.0f} (기대 ${w:,.0f})")
 
 print("\n[같은 달에 여러 번 돌려도 같은 값 — 날짜의 순수 함수]")
-vals = {pf._ramp(_row, 30_162.0, today=date(2026, 11, d))["적용약정"]
-        for d in (1, 10, 21, 30)}
-check(len(vals) == 1, f"11월 안에서는 항상 같은 값 ({vals})")
+_nm = pd.Timestamp(TODAY) + pd.DateOffset(months=1)
+vals = {pf._ramp(_row, 30_162.0,
+                 today=(_nm.replace(day=d)).date())["적용약정"]
+        for d in (1, 10, 28)}
+check(len(vals) == 1, f"같은 달 안에서는 항상 같은 값 ({vals})")
 
 print("\n[재동기화가 램프를 지우지 않는가 — 놓치기 쉬운 자리]")
 # load_capital이 돌려주는 '약정액'은 램프가 적용된 이번 달 값입니다.
@@ -221,13 +234,13 @@ pf.reset_state(ST)
 pf.seed(pf.parse_holdings("종목코드,평가금액,종목명\nAAPL,10000,Apple\n"),
         tranches=1, table=ST)
 pf.resync("종목코드,평가금액,종목명\nAAPL,10000,Apple\n", cash=0.0, tranches=1,
-          today=date(2026, 11, 21), table=ST, capital_table=RT)
+          today=TODAY, table=ST, capital_table=RT)
 after = store.read(RT).sort_values("기준일").iloc[-1]
 check(abs(float(after["약정액"]) - 30_162.0) < 1,
       f"저장된 약정액은 **목표액** 그대로 (${float(after['약정액']):,.0f})")
 check(pd.notna(after["램프시작일"]),
       f"램프시작일도 살아 있음 ({after['램프시작일']})")
-cap_after = pf.load_capital(RT)
+cap_after = pf.load_capital(RT, today=TODAY)
 # load_capital은 '오늘' 기준으로 램프를 적용합니다. 재동기화를 11월 날짜로
 # 돌렸어도 오늘이 10월이면 0개월차 값이 나오는 게 맞습니다 — 중요한 건
 # 저장된 목표액과 시작일이 살아남아 다음 달에 올라갈 수 있다는 것입니다.
@@ -252,27 +265,28 @@ pf.reset_state(ST2)
 pf.seed(pf.parse_holdings(
     "종목코드,평가금액,종목명\nAAPL,12000,Apple\nMSFT,7631.65,MS\n"),
     tranches=1, table=ST2)
-rr = pf.set_capital(30_162.0, table=CT2, today=date(2026, 10, 22), ramp=True,
+rr = pf.set_capital(30_162.0, table=CT2, today=TODAY, ramp=True,
                     state_table=ST2)
 check(abs(float(rr["평가액"]) - 19_631.65) < 1,
       f"보유 평가액을 실측으로 씀 (${float(rr['평가액']):,.2f}) — total로 덮지 않음")
 check(abs(float(rr["약정액"]) - 19_631.65) < 1,
       f"0개월차 적용액 = 지금 보유 (${float(rr['약정액']):,.2f})")
 check(abs(float(rr.get("목표액", 0)) - 30_162.0) < 1, "목표액은 30,162")
-_m3 = pf._ramp(pd.Series({"램프시작일": pd.Timestamp("2026-10-22"),
+_m3 = pf._ramp(pd.Series({"램프시작일": pd.Timestamp(TODAY),
                           "램프시작액": 19_631.65}), 30_162.0,
-               today=date(2027, 1, 22))["적용약정"]
+               today=(pd.Timestamp(TODAY)
+                      + pd.DateOffset(months=3)).date())["적용약정"]
 check(abs(_m3 - 30_162.0) < 1, f"3개월 뒤 목표 도달 (${_m3:,.0f})")
 
 check(abs(float(pf.set_capital(
-    9_000.0, table="us_capital_alt", today=date(2026, 10, 22),
+    9_000.0, table="us_capital_alt", today=TODAY,
     state_table="us_portfolio_alt")["평가액"]) - 9_000.0) < 1,
       "보유가 없으면 예전대로 현금 시작")
 
 print("\n[램프를 안 쓰면 예전 그대로]")
 NT = "us_capital_alt"
 store.write(NT, pd.DataFrame(columns=list(store.SCHEMAS[NT])))
-rn = pf.set_capital(6_064.0, table=NT, today=date(2026, 10, 21))
+rn = pf.set_capital(6_064.0, table=NT, today=TODAY)
 check(abs(float(rn["약정액"]) - 6_064.0) < 1,
       f"ramp 없이 설정하면 즉시 전액 (${float(rn['약정액']):,.0f})")
 check("목표액" not in rn, "목표액 항목이 안 붙음")

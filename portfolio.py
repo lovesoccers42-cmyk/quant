@@ -535,92 +535,6 @@ def current_slot(tranches: int, today: date | None = None,
     return (int(today.isocalendar()[1]) + int(offset)) % tr
 
 
-# ── 초기 진입 분할 ───────────────────────────────────────────
-# tranches 하나가 두 가지를 같이 정합니다: 한 종목을 얼마나 자주 점검하는지
-# (리밸런싱 주기)와, 처음 100종목을 몇 번에 나눠 담는지(진입 분할). 한국은
-# 주 1회 x 4등분이라 둘이 같은 값이어도 맞습니다 — 4주마다 한 바퀴.
-#
-# 미국은 월 1회 전체 점검(1등분)이 검증된 리듬입니다. 그런데 그러면 첫 달에
-# 100종목을 하루에 담습니다 — 전 재산이 그 하루의 주가에 걸립니다. 진입만
-# 쪼개고 다 채운 뒤에 원래 주기로 돌아가는 것이 이 두 함수입니다.
-def entry_stage(table: str = STATE, *, entry_tranches: int = 4,
-                tranches: int = 1, n: int = 0) -> dict:
-    """이번 회차의 등분 수와 신규 매수 상한을 정합니다.
-
-    단계
-      첫진입  상태가 비어 있음
-      진입중  미매수가 남았거나 목표 n종목을 아직 못 채웠음
-      운용    다 채웠음 — 상한 없음
-
-    **진입 중에도 등분 수는 운용값(미국 1)을 그대로 씁니다.** 그래야 매달
-    전체 보유가 점검됩니다 — 순위 버퍼 밖으로 밀려난 종목은 그 달에
-    팔리고, 목표 비중에서 ±20% 넘게 벗어난 종목은 그 달에 조절됩니다.
-    진입에서 나누는 것은 **신규 매수뿐**입니다(최대매수).
-
-    등분을 쪼개서 나누는 방법도 되지만 그러면 진입 기간 동안 한 종목이
-    entry_tranches개월에 한 번만 점검됩니다 — 월 1회 리밸런싱으로 잰
-    백테스트와 다른 전략이 되고, 진입이 끝날 때까지 몇 달간 순위에서
-    밀려난 종목을 들고 있게 됩니다. 그래서 쓰지 않습니다.
-
-    '등분정리필요'는 상태가 지금 등분 수보다 잘게 쪼개져 있다는 뜻입니다
-    — merge_slots()로 합친 뒤에 rebalance를 부르세요. 안 합치면 0번 등분의
-    종목만 손보고 나머지는 영구히 방치됩니다.
-
-    n(목표 종목 수)을 주면 '미매수 표시는 없는데 종목 수가 모자란' 계좌도
-    진입 중으로 봅니다. 그런 상태는 실제로 생깁니다 — 체결이 덜 됐거나,
-    보유 목록으로 resync를 돌려 미매수 표시가 지워졌을 때입니다. n을 안
-    보면 58종목짜리 계좌를 '진입 완료'로 읽고 남은 42종목을 한 달에
-    몰아서 사라는 주문서가 나옵니다.
-    """
-    tr_e = max(1, int(entry_tranches))
-    tr_r = max(1, int(tranches))
-    목표 = max(0, int(n))
-    # 한 회차 몫 — 올림이라 마지막 달에 몰리지 않습니다 (100/3 → 34,34,32).
-    몫 = -(-목표 // tr_e) if (목표 > 0 and tr_e > 1) else 0
-
-    st = load_state(table)
-    if st.empty:
-        return {"단계": "첫진입", "등분수": tr_r, "최대매수": 몫,
-                "미매수": 0, "보유종목수": 0, "등분정리필요": False}
-
-    amt = pd.to_numeric(st["기준금액"], errors="coerce")
-    slots_all = pd.to_numeric(st["등분"], errors="coerce").dropna()
-    쪼개짐 = bool(len(slots_all)) and int(slots_all.max()) >= tr_r
-    미매수 = int((amt == 0.0).sum())
-    보유 = len(st) - 미매수          # 자리만 잡아 둔 종목은 보유가 아닙니다
-
-    if 미매수 or (목표 > 0 and 보유 < 목표):
-        return {"단계": "진입중", "등분수": tr_r, "최대매수": 몫,
-                "미매수": 미매수, "보유종목수": 보유,
-                "등분정리필요": 쪼개짐}
-    return {"단계": "운용", "등분수": tr_r, "최대매수": 0,
-            "미매수": 0, "보유종목수": 보유, "등분정리필요": 쪼개짐}
-
-def merge_slots(table: str = STATE, *, tranches: int = 1) -> int:
-    """상태의 등분을 하나로 합칩니다. 바꾼 종목 수를 돌려줍니다.
-
-    진입 분할이 끝나 등분 수를 줄일 때 씁니다 (미국: 4 → 1). 1로 합치는
-    경우만 다룹니다 — 4를 2로 줄이는 건 어느 종목을 어느 등분에 남길지가
-    포트폴리오 구성 문제라 코드가 혼자 정하면 안 됩니다.
-    """
-    tr = max(1, int(tranches))
-    if tr != 1:
-        raise ValueError(
-            f"등분 {tr}로 합치는 건 지원하지 않습니다 — 1만 됩니다. "
-            "중간값으로 줄이려면 보유 목록으로 seed를 다시 돌리세요.")
-    st = load_state(table)
-    if st.empty:
-        return 0
-    n_changed = int((pd.to_numeric(st["등분"], errors="coerce").fillna(0)
-                     != 0).sum())
-    if not n_changed:
-        return 0
-    st = st.copy()
-    st["등분"] = 0
-    _write(table, st)
-    return n_changed
-
-
 def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
               today: date | None = None, symbol: str = "종목코드",
               name: str = "종목명", sector: str = "SEC_NM_KOR",
@@ -628,8 +542,7 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
               hold_universe=None, cash: float = 0.0,
               table: str = STATE, slot_offset: int = 0,
               weighting: str = "equal", max_weight: float = 0.0,
-              vol: str = "VOL", staged_first: bool | None = None,
-              slot: int | None = None, max_buys: int = 0) -> dict:
+              vol: str = "VOL", staged_first: bool | None = None) -> dict:
     """모델 순위표(picks)를 받아 이번 회차 주문을 계산하고 상태를 갱신합니다.
 
     picks는 qvm 오름차순(좋은 종목이 위)으로 정렬돼 있어야 합니다.
@@ -645,16 +558,6 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
     hold_universe를 주면 순위 버퍼로 동작합니다 — 살 때는 picks 상위 n위
     안에서만 고르고, 팔 때는 hold_universe 밖으로 밀려나야 팝니다. 백테스트와
     같은 규칙이어야 하므로 반드시 같은 값을 쓰세요(model_kr_hold.parquet).
-
-    slot을 주면 이번에 손볼 등분을 그 번호로 **못 박습니다**. 안 주면
-    current_slot(ISO 주차 % 등분수)으로 고릅니다. 주 1회 실행이면 주차가
-    등분을 정확히 한 바퀴 돌리므로 그게 맞지만, 월 1회 실행에서는 달마다
-    주차가 4~5주씩 뛰어 등분이 건너뛰거나 겹칩니다.
-
-    max_buys > 0 이면 이번 회차 **신규 매수를 그 종목 수까지만** 냅니다.
-    매도·비중조절은 제한하지 않습니다 — 초기 진입을 여러 달에 나눠
-    들어가면서도 리밸런싱은 매달 전체에 돌게 하는 장치입니다. 자리가
-    남으면 다음 회차에 순위대로 채웁니다.
     """
     today = today or date.today()
     tranches = max(1, int(tranches))
@@ -723,27 +626,21 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
         # 기본값은 분할이고, 설정으로 바꿉니다.
         staged = (config.STAGED_FIRST if staged_first is None
                   else bool(staged_first))
-        slot_used = ((int(slot) % max(1, tranches) if slot is not None
-                      else current_slot(tranches, today, offset=slot_offset))
+        slot_used = (current_slot(tranches, today, offset=slot_offset)
                      if (staged and tranches > 1) else None)
-        rows, buys = [], []
+        rows = []
         for i, code in enumerate(target[:n]):
             j = i % tranches
             now = slot_used is None or j == slot_used
-            # 신규 매수 상한 — 순위 상위부터 이번 회차 몫만 담고 나머지는
-            # 자리만 잡아 둡니다(기준금액 0 = 아직 안 산 종목).
-            if now and max_buys and max_buys > 0:
-                now = len(buys) < int(max_buys)
             rows.append({"종목코드": code, "등분": j, "편입일": today,
                          "기준금액": (amount_of(code) if (now and unit > 0)
                                    else (0.0 if not now else np.nan))})
-            if now:
-                buys.append(code)
         new_state = pd.DataFrame(rows)
+        buys = [r["종목코드"] for r in rows
+                if slot_used is None or r["등분"] == slot_used]
         sells, keeps = [], []
     else:
-        slot_used = (int(slot) % max(1, tranches) if slot is not None
-                     else current_slot(tranches, today, offset=slot_offset))
+        slot_used = current_slot(tranches, today, offset=slot_offset)
         mine = state[state["등분"] == slot_used]["종목코드"].tolist()
         others = state[state["등분"] != slot_used]["종목코드"].tolist()
         buy_set = set(target[:n])
@@ -848,10 +745,6 @@ def rebalance(picks: pd.DataFrame, *, n: int = 100, tranches: int = 4,
 
         blocked = set(keeps) | set(others)
         need = sizes[slot_used] - len(keeps)
-        # 진입 중에는 매수만 묶습니다 — 위의 매도·비중조절은 이미 이번
-        # 회차에서 전부 계산됐습니다.
-        if max_buys and max_buys > 0:
-            need = min(need, int(max_buys))
         buys = [c for c in target[:n] if c not in blocked][:max(need, 0)]
         if len(buys) < max(need, 0):   # 상위 n위가 모자라면 그 밖에서 보충
             buys += [c for c in target if c not in blocked
@@ -1313,8 +1206,12 @@ def _ramp(r, 약정: float, today: date | None = None) -> dict:
     return out
 
 
-def load_capital(table: str = CAPITAL) -> dict:
+def load_capital(table: str = CAPITAL, *, today: date | None = None) -> dict:
     """마지막 자금 기록. 없으면 빈 dict.
+
+    today는 램프(목표액 단계 인상) 계산 기준일입니다. 안 주면 오늘입니다 —
+    점검에서 날짜를 못 박으려고 받습니다. 이걸 못 받아서 "0개월차" 기대값이
+    달이 바뀌자마자 깨졌습니다(2026-11-01, 미국 주문서 게이트가 막혔습니다).
 
     운용기준 = max(약정액, 평가액 + 예수금)
 
@@ -1344,7 +1241,7 @@ def load_capital(table: str = CAPITAL) -> dict:
     # **날짜의 순수 함수로 만든 이유**: 돌릴 때마다 약정액을 조금씩 올리는
     # 방식이면 한 달에 두 번 돌리면 두 번 올라갑니다. 여기서는 '시작일로부터
     # 몇 달 지났나'로만 계산하므로 몇 번을 돌려도 같은 값이 나옵니다.
-    램프 = _ramp(r, 약정)
+    램프 = _ramp(r, 약정, today=today)
     약정_적용 = 램프["적용약정"]
     out = {"기준일": r["기준일"], "평가액": 평가액, "현금": 현금,
            "총자본": 총자본, "약정액": 약정_적용,
