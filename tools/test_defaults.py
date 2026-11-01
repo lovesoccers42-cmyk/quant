@@ -140,6 +140,21 @@ try:
     rb.main("us")                      # 안 주면 확정값
 except SystemExit:
     pass
+
+# 두 시장의 '한 종목 점검 주기'가 한 달로 맞는가.
+#   한국  주 1회(W-FRI) × 4등분 = 4주
+#   미국  월 1회(ME)    × 1등분 = 1개월
+# 여기가 어긋나면 두 시장이 다른 전략이 되는데, 요약만 봐서는 안 보입니다.
+_cyc = {"W-FRI": 7, "ME": 30, "QE": 91, "B": 1}
+for _m, _CK in (("한국", config.CONFIRMED_KR), ("미국", config.CONFIRMED_US)):
+    _d = _cyc.get(_CK["rebalance"], 0) * int(_CK["tranches"])
+    _ok2 = 25 <= _d <= 35
+    print(("[OK ] " if _ok2 else "[FAIL] ")
+          + f"{_m} 한 종목 점검 주기 {_d}일 "
+            f"({_CK['rebalance']} × {_CK['tranches']}등분)")
+    if not _ok2:
+        fails.append(f"cycle-{_m}")
+
 _ok = int(captured.get("tranches", -1)) == config.CONFIRMED_US["tranches"]
 print(("[OK ] " if _ok else "[FAIL] ")
       + f"안 주면 확정값 {config.CONFIRMED_US['tranches']}등분 "
@@ -245,4 +260,12 @@ if not blocked:
 
 print("\n전체 통과 — 인자 없이 돌려도 확정 설정이 들어갑니다." if not fails
       else "\n실패: " + ", ".join(fails))
-sys.exit(1 if fails else 0)
+
+# DuckDB가 인터프리터 종료 중에 SIGABRT를 내는 일이 있습니다 (2026-11-01
+# Actions 러너 실측: 모든 점검이 통과한 뒤 exit 134). 워크플로우가 그걸
+# '점검 실패'로 읽어 주문서를 막습니다 — 결과를 확정한 뒤 네이티브 종료를
+# 건너뜁니다. 종료 코드는 점검 결과만 반영합니다.
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(1 if fails else 0)
+

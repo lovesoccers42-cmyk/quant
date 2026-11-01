@@ -177,3 +177,18 @@ if FAIL:
     print(f"실패 {FAIL}건 — 고치기 전에는 미국 백테스트를 믿지 마세요.")
     sys.exit(1)
 print("전체 통과 — 값이 빈 분기에 종목이 사라지지 않고, 덜 찬 회차를 신고합니다.")
+
+# 점검은 여기서 끝났습니다. 아래는 종료 처리입니다.
+#
+# DuckDB가 **인터프리터 종료 중에** SIGABRT를 내는 일이 있습니다 (2026-11-01
+# Actions 러너 실측: 모든 점검이 통과하고 "전체 통과"까지 찍힌 뒤
+# "terminate called without an active exception" · exit 134). 커넥션은
+# 제대로 닫고 있고(read_sql이 finally로 close), 터지는 건 네이티브 스레드
+# 정리 단계입니다. 워크플로우는 그 134를 '점검 실패'로 읽어 주문서를
+# 막습니다 — 멀쩡한 코드로 거래를 못 하게 되는 쪽이 훨씬 나쁩니다.
+#
+# 그래서 결과를 확정한 뒤 os._exit로 바로 끝냅니다. 종료 코드는 점검
+# 결과만 반영합니다(0=통과, 1=실패).
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(1 if FAIL else 0)

@@ -1120,5 +1120,14 @@ shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:
     print("\n실패:", *fails, sep="\n  ")
-    sys.exit(1)
-print("\n전체 통과 — 실전이 백테스트와 같은 규칙으로 사고팝니다.")
+else:
+    print("\n전체 통과 — 실전이 백테스트와 같은 규칙으로 사고팝니다.")
+
+# DuckDB가 인터프리터 종료 중에 SIGABRT를 내는 일이 있습니다 (2026-11-01
+# Actions 러너 실측: 모든 점검이 통과한 뒤 exit 134). 워크플로우가 그걸
+# '점검 실패'로 읽어 주문서를 막습니다 — 결과를 확정한 뒤 네이티브 종료를
+# 건너뜁니다. 종료 코드는 점검 결과만 반영합니다.
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(1 if fails else 0)
+
