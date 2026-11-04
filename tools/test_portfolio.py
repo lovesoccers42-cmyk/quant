@@ -1116,6 +1116,100 @@ r7b = portfolio.resync("종목코드,평가금액,종목명\n005930,520000,삼�
 check(r7b["수량있는종목"] == 0 and r7b["보유종목수"] == 2,
       "수량 칸이 없어도 금액만으로 정상 동작")
 
+# ── 목표 종목 수 초과 (2026-11-04 실측: 한국 main 103종목) ───────
+#
+# 등분별로만 목표를 보던 탓에 전체가 103종목인 채로 안 줄었습니다.
+# 등분 1은 28종목이라 need=-3으로 안 사지만, 등분 0에서 2종목이 빠지면
+# need=2로 다시 채워 103으로 돌아갑니다 — 한 방향으로만 쌓입니다.
+#
+# 고친 방식: **넘친 종목은 팔지 않습니다.** 순위 버퍼 안이면 들고 있어도
+# 된다는 판단이 이미 내려진 것이고, 초과라는 이유로 팔면 거래비용만
+# 나갑니다. 대신 초과인 동안 신규 매수를 쉬고, 리밸런싱으로 빠지는
+# 만큼만 채웁니다.
+print("\n[목표 종목 수 초과 — 팔지 않고, 빠지는 만큼만 채운다]")
+ST8 = "kor_portfolio_over"
+CT8 = "kor_capital_alt"   # 자본 테이블은 등록된 이름만 씁니다 (store.SCHEMAS)
+OVER = [f"{i:06d}" for i in range(1, 104)]            # 103종목
+SIZES = {0: 25, 1: 28, 2: 25, 3: 25}                  # 실측 등분 분포
+
+
+def put_over(codes_by_slot, amount=100_000.0):
+    rows = []
+    for j, codes in codes_by_slot.items():
+        for c in codes:
+            rows.append({"종목코드": c, "등분": j,
+                         "편입일": date(2026, 10, 1), "기준금액": amount,
+                         "종목명": f"종목{c}", "섹터": "S0"})
+    store.write(ST8, pd.DataFrame(rows))
+
+
+def slots_now():
+    st = store.read(ST8)
+    out = {}
+    for j, g in st.groupby(pd.to_numeric(st["등분"])):
+        out[int(j)] = sorted(g["종목코드"].astype(str))
+    return out
+
+
+_i = 0
+by_slot = {}
+for j, k in SIZES.items():
+    by_slot[j] = OVER[_i:_i + k]
+    _i += k
+put_over(by_slot)
+portfolio.set_capital(10_300_000, table=CT8, today=date(2026, 10, 1))
+check(sum(len(v) for v in by_slot.values()) == 103, "출발 103종목 (목표 100)")
+
+# 등분 0 차례에 2종목이 순위 밖으로 밀려남 → 팔리지만 **채우지 않는다**
+dropped = by_slot[0][:2]
+alive = [c for c in OVER if c not in dropped]
+spare = [f"{i:06d}" for i in range(900, 960)]     # 새로 들어올 수 있는 종목들
+picks = model(alive + spare, prices={c: 10_000 for c in alive + spare})
+cap = portfolio.load_capital(CT8)
+res8 = portfolio.rebalance(picks, n=100, tranches=4, slot=0,
+                           today=date(2026, 10, 8), table=ST8,
+                           capital=float(cap["운용기준"]),
+                           hold_universe=alive)
+check(res8["매도"] == 2, f"순위 밖 2종목은 팔림 ({res8['매도']})")
+check(res8["매수"] == 0,
+      f"초과 중이라 신규 매수를 쉼 ({res8['매수']}) — 예전엔 2종목을 "
+      f"다시 채워 103으로 돌아갔습니다")
+check(len(store.read(ST8)) == 101, f"보유 101종목 ({len(store.read(ST8))})")
+check(not (set(dropped) & set(store.read(ST8)["종목코드"].astype(str))),
+      "팔린 종목이 상태에서 빠짐")
+
+# 초과분을 **강제로 팔지는 않는다** — 넘친 등분 1은 그대로 28종목
+check(len(slots_now().get(1, [])) == 28,
+      f"넘친 등분 1은 손대지 않음 ({len(slots_now().get(1, []))}종목) — "
+      f"조건에 맞으면 들고 있습니다")
+
+# 다음 회차에 1종목 더 빠지면 100종목으로 수렴하고, 거기서 멈춘다
+d2 = slots_now()[2][0]
+alive2 = [c for c in store.read(ST8)["종목코드"].astype(str) if c != d2]
+picks2 = model(alive2 + spare, prices={c: 10_000 for c in alive2 + spare})
+res9 = portfolio.rebalance(picks2, n=100, tranches=4, slot=2,
+                           today=date(2026, 10, 15), table=ST8,
+                           capital=float(cap["운용기준"]),
+                           hold_universe=alive2)
+check(res9["매수"] == 0, f"아직 초과(101)라 또 쉼 ({res9['매수']})")
+check(len(store.read(ST8)) == 100, f"100종목에 수렴 ({len(store.read(ST8))})")
+
+# ── 100종목이면 평소처럼 빠진 만큼 즉시 채운다 (회귀) ──────────
+print("\n[목표에 맞으면 평소처럼 즉시 채운다 — 위 수정이 정상 운용을 막지 않는가]")
+held = sorted(store.read(ST8)["종목코드"].astype(str))
+slot3 = slots_now()
+_t = next(j for j in (0, 1, 2, 3) if len(slot3.get(j, [])) > 0)
+d3 = slot3[_t][0]
+alive3 = [c for c in held if c != d3]
+picks3 = model(alive3 + spare, prices={c: 10_000 for c in alive3 + spare})
+res10 = portfolio.rebalance(picks3, n=100, tranches=4, slot=_t,
+                            today=date(2026, 10, 22), table=ST8,
+                            capital=float(cap["운용기준"]),
+                            hold_universe=alive3)
+check(res10["매도"] == 1 and res10["매수"] == 1,
+      f"1종목 빠지면 1종목 채움 (매도 {res10['매도']}/매수 {res10['매수']})")
+check(len(store.read(ST8)) == 100, f"100종목 유지 ({len(store.read(ST8))})")
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if fails:
