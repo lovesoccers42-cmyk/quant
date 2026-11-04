@@ -55,6 +55,28 @@ MARKETS = {
     },
 }
 
+# 성과 탭의 시장별 차이를 **한 곳에** 모아 둡니다. 예전에는 성과 계산이
+# kor_* 테이블과 원화 표기에 박혀 있었고, 미국 계좌를 그리려면 같은 코드를
+# 복사해야 했습니다 — 그러면 앞으로 한쪽만 고치는 사고가 납니다.
+PERF_MARKETS = {
+    "kr": {
+        "라벨": "한국", "prefix": "kor_", "통화": "원",
+        "price_asset": "kor_price.parquet",
+        "price_cols": ("날짜", "종목코드", "종가"),
+        "backtest": "backtest_kr_latest.json",
+        "지수라벨": "지수 (시총상위200)", "지수": "지수",
+        "price_hint": "공개 릴리스의 kor_price.parquet을 확인하세요.",
+    },
+    "us": {
+        "라벨": "미국", "prefix": "us_", "통화": "$",
+        "price_asset": "global_price.parquet",
+        "price_cols": ("Date", "Symbol", "Close"),
+        "backtest": "backtest_us_latest.json",
+        "지수라벨": "S&P 500 (SPY, 배당 재투자)", "지수": "SPY",
+        "price_hint": "공개 릴리스의 global_price.parquet을 확인하세요.",
+    },
+}
+
 st.set_page_config(page_title="퀀트 에이전트", page_icon="📈",
                    layout="centered", initial_sidebar_state="collapsed")
 
@@ -376,6 +398,34 @@ def bench_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
                                 start=start, end=pd.Timestamp(end_iso))
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def spy_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
+    """S&P 500 (SPY) 누적 수익률 — **수정종가**(배당 재투자)로 잡습니다.
+
+    왜 수정종가인가: 실제 계좌 수익률에는 받은 배당이 들어 있습니다(예수금
+    으로 들어와 총자본에 잡힙니다). 단순 종가로 비교하면 SPY 배당(연 1.2~
+    1.5%)만큼 매년 공짜로 이기는 것처럼 보입니다.
+
+    테이블이 global_price와 갈라져 있는 이유는 global_bench.py 주석 참고 —
+    유니버스에 넣으면 모델이 SPY를 매수 후보로 집어 올립니다.
+    """
+    start, end = pd.Timestamp(start_iso), pd.Timestamp(end_iso)
+    b = parquet_slice("global_bench.parquet",
+                      ("Date", "Symbol", "AdjClose"),
+                      (("Symbol", "=", "SPY"),
+                       ("Date", ">=", start - pd.Timedelta(days=10))))
+    if b.empty:
+        return pd.DataFrame()
+    b["Date"] = pd.to_datetime(b["Date"])
+    b = (b[(b["Date"] >= start) & (b["Date"] <= end)]
+         .dropna(subset=["AdjClose"]).sort_values("Date"))
+    if len(b) < 2:
+        return pd.DataFrame()
+    px = pd.to_numeric(b["AdjClose"], errors="coerce").to_numpy()
+    return pd.DataFrame({"누적": px / px[0]},
+                        index=pd.DatetimeIndex(b["Date"], name="날짜"))
+
+
 ACCOUNTS = {"상수 (main)": "main", "배우자 (alt)": "alt"}
 
 
@@ -383,33 +433,42 @@ def _suffix(acct: str) -> str:
     return "" if acct == "main" else f"_{acct}"
 
 
-def account_perf(acct: str) -> dict:
+def account_perf(acct: str, market: str = "kr") -> dict:
     """한 계좌의 성과 한 묶음.
 
     맨 위 요약과 성과 탭이 **같은 함수**를 씁니다 — 두 곳에서 따로 계산하면
     같은 화면에 다른 수익률이 뜨고, 어느 쪽이 맞는지 알 수 없게 됩니다.
     무거운 읽기는 모두 캐시되어 있어 여러 번 불러도 비용은 계산뿐입니다.
+
+    market으로 한국/미국을 가릅니다. **테이블과 통화를 섞으면 안 됩니다** —
+    달러 평가액이 원화 곡선에 한 점이라도 들어가면 수익률이 통째로 거짓이
+    되고 되돌릴 방법이 없습니다. 그래서 테이블 이름도, 주가 자산도, 지수도
+    PERF_MARKETS 한 곳에서만 정해집니다.
     """
     perf = fresh_perf()
-    out: dict = {"계좌": acct, "가능": False, "이유": "설정없음"}
+    P = PERF_MARKETS[market]
+    pre = P["prefix"]
+    out: dict = {"계좌": acct, "시장": market, "가능": False, "이유": "설정없음"}
     if not (STATE_REPO and STATE_TOKEN):
         return out
 
     sfx = _suffix(acct)
-    trades = state_parquet("kor_trades.parquet")
-    hlog = state_parquet("kor_holdings_log.parquet")
+    trades = state_parquet(f"{pre}trades.parquet")
+    hlog = state_parquet(f"{pre}holdings_log.parquet")
     out.update({"trades": trades, "hlog": hlog,
-                "pstate": state_parquet(f"kor_portfolio{sfx}.parquet"),
-                "cap": state_parquet(f"kor_capital{sfx}.parquet")})
+                "pstate": state_parquet(f"{pre}portfolio{sfx}.parquet"),
+                "cap": state_parquet(f"{pre}capital{sfx}.parquet")})
     if hlog.empty and trades.empty:
         out["이유"] = "기록없음"
         return out
 
+    # 종목코드 정규화는 perf._code6에 맡깁니다 — 숫자 코드만 0을 채우므로
+    # 'AAPL'이 '00AAPL'로 망가지지 않습니다.
     codes = set()
     if not hlog.empty:
-        codes |= set(hlog["종목코드"].astype(str).str.zfill(6))
+        codes |= set(perf._code6(hlog["종목코드"]))
     if not trades.empty:
-        codes |= set(trades["종목코드"].astype(str).str.zfill(6))
+        codes |= set(perf._code6(trades["종목코드"]))
 
     # 측정 시작보다 10일 앞에서부터만 읽습니다 — 주가를 통째로 읽으면
     # 327MB가 올라와 앱이 죽습니다(실측).
@@ -418,11 +477,17 @@ def account_perf(acct: str) -> dict:
         first = pd.to_datetime(hlog["기준일"]).min()
     elif not trades.empty:
         first = pd.to_datetime(trades["기준일"]).min()
-    price = parquet_slice("kor_price.parquet", ("날짜", "종목코드", "종가"),
-                          (("날짜", ">=", first - pd.Timedelta(days=10)),))
+    d_col, c_col, p_col = P["price_cols"]
+    price = parquet_slice(P["price_asset"], P["price_cols"],
+                          ((d_col, ">=", first - pd.Timedelta(days=10)),))
     if price.empty:
         out["이유"] = "주가없음"
         return out
+    # 아래 계산은 전부 한국식 칸 이름을 씁니다. 미국 주가는 Date/Symbol/
+    # Close로 오니 여기서 한 번만 맞춰 두고, 그 뒤 코드는 시장을 모릅니다.
+    if (d_col, c_col, p_col) != ("날짜", "종목코드", "종가"):
+        price = price.rename(columns={d_col: "날짜", c_col: "종목코드",
+                                      p_col: "종가"})
     out["주가기준일"] = pd.to_datetime(price["날짜"]).max()
 
     px = perf.price_pivot(price, codes)
@@ -472,7 +537,8 @@ def account_perf(acct: str) -> dict:
     out["수익률"] = float(tw["누적"].iloc[-1] - 1)
     out["시작"], out["끝"] = tw.index[0], tw.index[-1]
     out["일수"] = int((tw.index[-1] - tw.index[0]).days)
-    b = bench_curve(f"{tw.index[0]:%Y-%m-%d}", f"{tw.index[-1]:%Y-%m-%d}")
+    _curve = bench_curve if market == "kr" else spy_curve
+    b = _curve(f"{tw.index[0]:%Y-%m-%d}", f"{tw.index[-1]:%Y-%m-%d}")
     out["bench"] = b
     out["지수"] = float(b["누적"].iloc[-1] - 1) if not b.empty else None
     return out
@@ -487,35 +553,54 @@ _WHY = {"설정없음": "설정 전", "기록없음": "기록 전",
 
 
 def perf_strip() -> None:
-    """화면 맨 위 — 두 계좌 수익률. 제일 먼저 보고 싶은 숫자입니다."""
+    """화면 맨 위 — 계좌 수익률. 제일 먼저 보고 싶은 숫자입니다.
+
+    시장을 **줄로 갈라** 놓습니다. 네 칸을 한 줄에 넣으면 폰에서 글자가
+    뭉개지고, 더 나쁜 건 원화 수익률과 달러 수익률이 나란히 붙어 한 계좌의
+    숫자처럼 읽힌다는 점입니다. 기록이 아예 없는 시장은 줄째로 빠집니다.
+    """
     if not (STATE_REPO and STATE_TOKEN):
         return
-    rows = [(lab, account_perf(a)) for lab, a in ACCOUNTS.items()]
-    if all(r["이유"] == "기록없음" for _, r in rows):
+
+    per_market = []
+    for mk in ("kr", "us"):
+        rows = [(lab, account_perf(a, mk)) for lab, a in ACCOUNTS.items()]
+        if not all(r["이유"] == "기록없음" for _, r in rows):
+            per_market.append((mk, rows))
+    if not per_market:
         return
 
-    cols = st.columns(len(rows))
     asof = None
-    for col, (lab, r) in zip(cols, rows):
-        name = lab.split(" (")[0]
-        cb = r.get("평단") or {}
-        if r["가능"]:
-            delta = (f"{(r['수익률'] - r['지수']) * 100:+.2f}%p vs 지수"
-                     if r.get("지수") is not None else f"{r['일수']}일")
-            col.metric(name, f"{r['수익률'] * 100:+.2f}%", delta=delta)
-        elif cb:
-            # 시간가중수익률은 아직 못 내지만 평단 기준은 낼 수 있습니다.
-            # 어느 측정인지 반드시 밝혀 적습니다 — 섞으면 안 됩니다.
-            col.metric(name, f"{cb['수익률'] * 100:+.2f}%",
-                       delta="평단 기준", delta_color="off")
-        else:
-            col.metric(name, "–", delta=_WHY.get(r["이유"], "측정 전"),
-                       delta_color="off")
-        asof = r.get("주가기준일") or asof
+    rows = [r for _, rs in per_market for _, r in rs]
+    for mk, mrows in per_market:
+        P = PERF_MARKETS[mk]
+        if len(per_market) > 1:
+            st.caption(f"**{P['라벨']}**")
+        cols = st.columns(len(mrows))
+        for col, (lab, r) in zip(cols, mrows):
+            name = lab.split(" (")[0]
+            cb = r.get("평단") or {}
+            if r["가능"]:
+                delta = (f"{(r['수익률'] - r['지수']) * 100:+.2f}%p "
+                         f"vs {P['지수']}"
+                         if r.get("지수") is not None else f"{r['일수']}일")
+                col.metric(name, f"{r['수익률'] * 100:+.2f}%", delta=delta)
+            elif cb:
+                # 시간가중수익률은 아직 못 내지만 평단 기준은 낼 수 있습니다.
+                # 어느 측정인지 반드시 밝혀 적습니다 — 섞으면 안 됩니다.
+                col.metric(name, f"{cb['수익률'] * 100:+.2f}%",
+                           delta="평단 기준", delta_color="off")
+            else:
+                col.metric(name, "–", delta=_WHY.get(r["이유"], "측정 전"),
+                           delta_color="off")
+            if mk == "kr":
+                # 안내문의 '마지막 종가'는 한국 기준으로 씁니다 — 두 시장의
+                # 휴장일이 달라 한 날짜로 뭉치면 둘 다 틀립니다.
+                asof = r.get("주가기준일") or asof
 
     # 입출금이 빠져 TWR을 못 믿는 계좌가 있으면 그 사실을 먼저 알립니다.
-    bad = [(lab.split(" (")[0], r) for lab, r in rows
-           if r["이유"] == "입출금누락"]
+    bad = [(f"{r['계좌']}·{PERF_MARKETS[r['시장']]['라벨']}", r)
+           for r in rows if r["이유"] == "입출금누락"]
     if bad:
         st.warning(
             "**시간가중수익률을 띄우지 않았습니다** — "
@@ -524,16 +609,16 @@ def perf_strip() -> None:
               "복구됩니다. 위에 보이는 수익률은 **평단 기준**이고 그건 맞는 "
               "숫자입니다.")
 
-    done = [r for _, r in rows if r["가능"]]
+    done = [r for r in rows if r["가능"]]
     bits = []
     if asof is not None:
         bits.append(f"**주가 {asof:%m/%d} 종가** 기준")
     if done:
         bits.append(f"측정 {min(r['시작'] for r in done):%m/%d} 시작")
         bits.append("입금을 걷어낸 시간가중수익률")
-    elif any(r.get("평단") for _, r in rows):
+    elif any(r.get("평단") for r in rows):
         bits.append("평단 기준 (시간가중수익률은 거래일 2개부터)")
-    bits.append("자세한 내용은 아래 **성과** 탭")
+    bits.append("자세한 내용은 아래 **성과** 탭 (시장별로 따로 있습니다)")
     st.caption(" · ".join(bits))
     # 왜 오늘 숫자가 안 바뀌었는지를 화면에서 바로 알 수 있게 — 일간 실행은
     # GitHub가 예약을 6~9시간 미뤄서(실측) 밤 11시~자정에 끝납니다.
@@ -575,8 +660,12 @@ else:
             "아래 **실행** 탭에서 월간 실행을 먼저 한 번 돌려주세요.")
 
 top_label = "🔔 매수 신호" if M["has_signals"] else "🔔 상위 종목"
-tab_perf, tab_top, tab_run, tab_model, tab_bt, tab_log = st.tabs(
-    ["💰 성과", top_label, "▶️ 실행", "📊 모델", "🧪 백테스트", "📜 기록"])
+# 성과만 시장 탭을 따로 둡니다 — 위의 '시장' 라디오는 모델·실행·백테스트를
+# 가르는 것이고, 성과는 두 계좌·두 시장을 **나란히 보고 싶은** 화면입니다.
+(tab_perf_kr, tab_perf_us, tab_top, tab_run, tab_model, tab_bt,
+ tab_log) = st.tabs(
+    ["💰 성과(한국)", "💰 성과(미국)", top_label, "▶️ 실행", "📊 모델",
+     "🧪 백테스트", "📜 기록"])
 
 SYM, NAME, SEC = M["symbol"], M["name"], M["sector"]
 
@@ -808,11 +897,31 @@ def _won(v) -> str:
     return f"{v:,.0f}원" if v is not None and pd.notna(v) else "–"
 
 
+def _money(v, market: str = "kr") -> str:
+    """금액 표기 — 원은 정수, 달러는 소수 둘째 자리까지.
+
+    달러를 '19,632원'처럼 쓰면 자릿수가 원화와 같아 보여서 두 시장을 한
+    화면에서 볼 때 섞여 읽힙니다. 통화 기호를 **항상** 붙입니다.
+    """
+    if v is None or not pd.notna(v):
+        return "–"
+    return f"{v:,.0f}원" if market == "kr" else f"${v:,.2f}"
+
+
 def _pct(v, p: int = 2) -> str:
     return f"{v * 100:+.{p}f}%" if v is not None and pd.notna(v) else "–"
 
 
-with tab_perf:
+def render_perf(market: str) -> None:
+    """성과 화면 한 벌. 한국·미국 탭이 **이 함수 하나**를 각각 호출합니다.
+
+    복사해 두 벌을 두면 앞으로 한쪽만 고치는 사고가 납니다. 화면 요소에
+    key를 붙이는 이유도 그것입니다 — 같은 위젯이 두 탭에 생기면 Streamlit
+    이 DuplicateWidgetID로 멈춥니다.
+    """
+    P = PERF_MARKETS[market]
+    MK = P["라벨"]
+    _m = lambda v: _money(v, market)                              # noqa: E731
     if not (STATE_REPO and STATE_TOKEN):
         st.warning("비공개 상태 레포 설정이 없습니다. Streamlit → Settings → "
                    "Secrets 에 아래 두 줄을 넣어주세요.")
@@ -825,25 +934,35 @@ with tab_perf:
         perf = fresh_perf()
 
         LBL = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
-        RS = {a: account_perf(a) for a in ACCOUNTS.values()}
+        RS = {a: account_perf(a, market) for a in ACCOUNTS.values()}
 
         if all(r["이유"] == "기록없음" for r in RS.values()):
-            st.info("아직 측정할 기록이 없습니다. 금요일 저녁에 체결내역과 "
-                    "보유목록 CSV를 올려 **데이터 관리**를 한 번 돌리면 "
-                    "여기에 쌓입니다.")
+            _when = "금요일 저녁에" if market == "kr" else "월초 거래 뒤에"
+            st.info(f"아직 {MK} 계좌의 측정할 기록이 없습니다. {_when} "
+                    "체결내역과 보유목록 CSV를 올려 **데이터 관리**를 한 번 "
+                    "돌리면 여기에 쌓입니다.")
         else:
             for a, r in RS.items():
                 if r["이유"] == "주가없음":
-                    st.error(f"{LBL[a]} — 주가 데이터를 받지 못했습니다. "
-                             "공개 릴리스의 kor_price.parquet을 확인하세요.")
+                    st.error(f"{LBL[a]}({MK}) — 주가 데이터를 받지 "
+                             f"못했습니다. {P['price_hint']}")
 
             # 종목별 손익·규칙 준수를 미리 계산해 요약 표에 같이 올립니다
             PNL, RC = {}, {}
-            sector = latest_rows("kor_sector.parquet",
-                                 ("CMP_CD", "SEC_NM_KOR", "기준일"))
-            smap = ({} if sector.empty else
-                    dict(zip(sector["CMP_CD"].astype(str).str.zfill(6),
-                             sector["SEC_NM_KOR"].astype(str))))
+            if market == "kr":
+                sector = latest_rows("kor_sector.parquet",
+                                     ("CMP_CD", "SEC_NM_KOR", "기준일"))
+                smap = ({} if sector.empty else
+                        dict(zip(perf._code6(sector["CMP_CD"]),
+                                 sector["SEC_NM_KOR"].astype(str))))
+            else:
+                # 미국 섹터는 종목표에 같이 들어 있습니다 (Sector 칸).
+                sector = latest_rows("global_ticker.parquet",
+                                     ("Symbol", "Sector", "date"),
+                                     asof_col="date")
+                smap = ({} if sector.empty else
+                        dict(zip(sector["Symbol"].astype(str).str.strip(),
+                                 sector["Sector"].astype(str))))
             for a, r in RS.items():
                 PNL[a] = r.get("pnl", pd.DataFrame())
                 RC[a] = perf.rule_check(r.get("pstate", pd.DataFrame()),
@@ -869,10 +988,10 @@ with tab_perf:
             row("수익률 (시간가중)", lambda a: _pct(RS[a].get("수익률")))
             row("수익률 (평단 기준)",
                 lambda a: _pct((RS[a].get("평단") or {}).get("수익률")))
-            row("지수 대비", lambda a: (
+            row(f"{P['지수']} 대비", lambda a: (
                 f"{(RS[a]['수익률'] - RS[a]['지수']) * 100:+.2f}%p"
                 if RS[a]["가능"] and RS[a].get("지수") is not None else "–"))
-            row("지수 (시총상위200)", lambda a: _pct(RS[a].get("지수")))
+            row(P["지수라벨"], lambda a: _pct(RS[a].get("지수")))
             row("측정 기간", lambda a: (f"{RS[a]['일수']}일 "
                                    f"({RS[a]['시작']:%m/%d}~)"
                                    if RS[a]["가능"] else "–"))
@@ -883,7 +1002,7 @@ with tab_perf:
             row("최대 섹터 비중", lambda a: (
                 f"{RC[a]['최대섹터비중'] * 100:.1f}%"
                 if RC[a].get("최대섹터비중") else "–"))
-            row("합계 손익", lambda a: _won(
+            row("합계 손익", lambda a: _m(
                 PNL[a]["손익"].sum() if (len(PNL[a])
                                        and PNL[a]["손익"].notna().any())
                 else None))
@@ -932,14 +1051,17 @@ with tab_perf:
                                                     pd.DataFrame()).empty), None)
             if bench is not None:
                 parts.append(pd.DataFrame({
-                    "날짜": bench.index, "구분": "지수",
+                    "날짜": bench.index, "구분": P["지수"],
                     "수익률": (bench["누적"] - 1) * 100}))
 
             if parts and max(len(p) for p in parts) >= 2:
                 import altair as alt
                 trio = series_trio()
+                # 색은 검증된 3색 그대로 쓰고, 세 번째 계열의 **이름만**
+                # 시장에 맞춰 바꿉니다 (한국 '지수' / 미국 'SPY').
+                trio[P["지수"]] = trio["지수"]
                 long = pd.concat(parts)
-                order = [c for c in ("상수", "배우자", "지수")
+                order = [c for c in ("상수", "배우자", P["지수"])
                          if c in set(long["구분"])]
                 ch = (alt.Chart(long)
                       .mark_line(strokeWidth=2)
@@ -957,14 +1079,15 @@ with tab_perf:
                 st.altair_chart(ch, use_container_width=True)
                 st.download_button(
                     "곡선 데이터 CSV", to_csv(long, excel_safe=False),
-                    file_name=f"curve_{tag}.csv", mime="text/csv")
+                    file_name=f"curve_{market}_{tag}.csv", mime="text/csv",
+                    key=f"dl_curve_{market}")
             else:
                 st.info("수익률은 두 시점 사이의 변화이니 재동기화가 두 번은 "
                         "있어야 곡선이 그려집니다. 다음 주 갱신부터 나옵니다.")
 
             # ── 3. 백테스트 대비 ──────────────────────────────
             st.subheader("백테스트 대비")
-            btj = load_run("backtest_kr_latest.json")
+            btj = load_run(P["backtest"])
             bt_cum = pd.Series((btj or {}).get("curve", {}).get("portfolio")
                                or [], dtype="float64")
             gaps = {}
@@ -1021,20 +1144,24 @@ with tab_perf:
                         f"{unknown}종목은 **원가미상**입니다 — 원장이 생기기 "
                         "전부터 들고 계신 종목이라 매입단가를 모릅니다. "
                         "손익을 추정해 채우지 않고 비워 둡니다. "
-                        "`holdings_main.csv`에 **매입단가** 칸을 하나 추가해 "
-                        "올리시면 전부 계산됩니다.")
-                only = st.checkbox("손익이 계산된 종목만", value=bool(unknown))
+                        f"`{'holdings_main.csv' if market == 'kr' else 'holdings_us_main.csv'}`"
+                        "에 **매입단가** 칸을 하나 추가해 올리시면 전부 "
+                        "계산됩니다.")
+                only = st.checkbox("손익이 계산된 종목만", value=bool(unknown),
+                                   key=f"pnl_only_{market}")
                 view = allp[allp["손익"].notna()] if only else allp
                 show = view.sort_values("손익", ascending=False,
                                         na_position="last").copy()
+                _dp = 0 if market == "kr" else 2
                 for c in ("평단", "현재가", "평가금액", "손익"):
                     show[c] = show[c].map(
-                        lambda v: f"{v:,.0f}" if pd.notna(v) else "–")
+                        lambda v: f"{v:,.{_dp}f}" if pd.notna(v) else "–")
                 show["수익률"] = show["수익률"].map(
                     lambda v: f"{v * 100:+.1f}%" if pd.notna(v) else "–")
                 st.dataframe(show, use_container_width=True, hide_index=True)
                 st.download_button("종목별 손익 CSV", to_csv(allp),
-                                   file_name=f"pnl_{tag}.csv", mime="text/csv")
+                                   file_name=f"pnl_{market}_{tag}.csv",
+                                   mime="text/csv", key=f"dl_pnl_{market}")
 
             # ── 5. 규칙 준수 ──────────────────────────────────
             st.subheader("규칙 준수")
@@ -1062,6 +1189,14 @@ with tab_perf:
                             pd.Series(rc["섹터비중"]).mul(100).round(1)
                             .rename("비중(%)").to_frame(),
                             use_container_width=True, height=260)
+
+
+
+with tab_perf_kr:
+    render_perf("kr")
+
+with tab_perf_us:
+    render_perf("us")
 
 
 # ── 백테스트 ─────────────────────────────────────────────────

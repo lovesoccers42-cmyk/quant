@@ -153,6 +153,7 @@ jobs:
           python tools/test_us_orders.py
           python tools/test_us_entry.py
           python tools/test_perf.py
+          python tools/test_dashboard.py
           python tools/test_ttm.py
 
       - name: 월간 주문서 만들기

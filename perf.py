@@ -33,6 +33,27 @@ SELL_WORDS = ("매도", "비중축소")
 
 
 # ── 준비 ────────────────────────────────────────────────────────────
+def _c6(x) -> str:
+    """스칼라 하나 — 숫자로만 된 코드에만 앞자리 0을 채웁니다."""
+    t = str(x).strip()
+    return t.zfill(6) if t.isdigit() else t
+
+
+def _code6(s) -> pd.Series:
+    """종목코드 정규화 — **숫자로만 된 코드에만** 앞자리 0을 채웁니다.
+
+    왜 조건을 붙였나: 예전에는 무조건 `zfill(6)`이었습니다. 한국 종목코드는
+    전부 숫자라 문제가 없었지만, 대시보드가 미국 계좌까지 그리게 되면서
+    같은 함수에 티커가 들어옵니다. `'AAPL'.zfill(6)`은 `'00AAPL'`이고
+    `'KO'`는 `'0000KO'`입니다 — 주가와 종목코드가 안 맞아 평가액 곡선과
+    종목별 손익이 **조용히 비어 버립니다**. store._normalize에서 똑같은
+    사고를 이미 한 번 냈습니다(2026-10-21, 미국 상태에 '0000KO'가 저장).
+    """
+    v = pd.Series(s).astype(str).str.strip()
+    digits = v.str.fullmatch(r"\d+").fillna(False)
+    return v.where(~digits, v.str.zfill(6))
+
+
 def price_pivot(price: pd.DataFrame, codes=None, *,
                 date_col: str = "날짜", code_col: str = "종목코드",
                 close_col: str = "종가") -> pd.DataFrame:
@@ -45,9 +66,9 @@ def price_pivot(price: pd.DataFrame, codes=None, *,
             date_col, code_col, close_col} <= set(price.columns):
         return pd.DataFrame()
     df = price[[date_col, code_col, close_col]].copy()
-    df[code_col] = df[code_col].astype(str).str.zfill(6)
+    df[code_col] = _code6(df[code_col])
     if codes is not None:
-        want = {str(c).zfill(6) for c in codes}
+        want = {_c6(c) for c in codes}
         df = df[df[code_col].isin(want)]
     df[date_col] = pd.to_datetime(df[date_col])
     out = (df.pivot_table(index=date_col, columns=code_col,
@@ -69,7 +90,7 @@ def shares_outstanding(ticker: pd.DataFrame, *, code_col: str = "종목코드",
     t = ticker
     if asof_col in t.columns:
         t = t[t[asof_col] == t[asof_col].max()]
-    code = t[code_col].astype(str).str.zfill(6)
+    code = _code6(t[code_col])
     mcap = pd.to_numeric(t[mcap_col], errors="coerce")
     close = pd.to_numeric(t[close_col], errors="coerce")
     sh = (mcap / close).replace([np.inf, -np.inf], np.nan)
@@ -92,7 +113,7 @@ def positions_timeline(holdings_log: pd.DataFrame, account: str,
     if h.empty:
         return pd.DataFrame()
     h["기준일"] = pd.to_datetime(h["기준일"])
-    h["종목코드"] = h["종목코드"].astype(str).str.zfill(6)
+    h["종목코드"] = _code6(h["종목코드"])
     h["수량"] = pd.to_numeric(h.get("수량"), errors="coerce")
     h["평가금액"] = pd.to_numeric(h["평가금액"], errors="coerce")
 
@@ -335,7 +356,7 @@ def position_pnl(trades: pd.DataFrame, holdings_log: pd.DataFrame,
                & kind.str.contains("|".join(BUY_WORDS), na=False))
         b = t[buy].copy()
         if len(b):
-            b["_코드"] = b["종목코드"].astype(str).str.zfill(6)
+            b["_코드"] = _code6(b["종목코드"])
             b["_금액"] = p[buy].to_numpy() * q[buy].to_numpy()
             b["_수량"] = q[buy].to_numpy()
             g = b.groupby("_코드")[["_금액", "_수량"]].sum()
@@ -345,7 +366,7 @@ def position_pnl(trades: pd.DataFrame, holdings_log: pd.DataFrame,
     names = {}
     if not holdings_log.empty and "종목명" in holdings_log.columns:
         hl = holdings_log[holdings_log["계좌"].astype(str) == str(account)]
-        names = dict(zip(hl["종목코드"].astype(str).str.zfill(6),
+        names = dict(zip(_code6(hl["종목코드"]),
                          hl["종목명"].astype(str)))
 
     rows = []
@@ -424,7 +445,7 @@ def rule_check(state: pd.DataFrame, trades: pd.DataFrame, account: str, *,
                           if exp > 0 else 0.0)
 
     if sector_map and len(state):
-        sec = state["종목코드"].astype(str).str.zfill(6).map(
+        sec = _code6(state["종목코드"]).map(
             lambda c: sector_map.get(c, "기타"))
         amt = pd.to_numeric(state["기준금액"], errors="coerce").fillna(0.0)
         tot = float(amt.sum())

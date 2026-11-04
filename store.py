@@ -47,6 +47,10 @@ PRIMARY_KEYS: dict[str, list[str]] = {
     "global_price": ["Date", "Symbol"],
     "global_fs": ["Symbol", "date", "account", "freq"],
     "global_value": ["Symbol", "date", "지표"],
+    # 벤치마크(S&P 500 = SPY). 종목 유니버스와 **일부러 갈라 둡니다** —
+    # global_ticker/global_price에 넣으면 QVM 모델이 ETF를 종목으로
+    # 보고 순위에 올려, 어느 달엔 주문서에 "SPY 매수"가 섞여 나옵니다.
+    "global_bench": ["Date", "Symbol"],
 }
 
 KOR_TABLES = [t for t in PRIMARY_KEYS if t.startswith("kor_")]
@@ -170,6 +174,8 @@ SCHEMAS: dict[str, dict[str, str]] = {
                   "value": "DOUBLE", "freq": "VARCHAR", "filed": "TIMESTAMP"},
     "global_value": {"Symbol": "VARCHAR", "date": "TIMESTAMP", "지표": "VARCHAR",
                      "값": "DOUBLE"},
+    "global_bench": {"Date": "TIMESTAMP", "Symbol": "VARCHAR",
+                     "Close": "DOUBLE", "AdjClose": "DOUBLE"},
 }
 
 # 날짜로 취급할 컬럼 (parquet 왕복 시 타입 고정)

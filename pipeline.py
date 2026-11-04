@@ -11,6 +11,7 @@ import config
 import factor_global
 import factor_kor
 import global_fs
+import global_bench
 import global_price
 import global_ticker
 import global_value
@@ -197,6 +198,8 @@ def us_daily_steps() -> list[Step]:
         Step(f"주가 수집(최근 {config.US_DAILY_PRICE_DAYS}일)", global_price.collect,
              {"days": config.US_DAILY_PRICE_DAYS}, critical=True,
              validator=check_us_crawl),
+        Step("벤치마크 수집(SPY)", global_bench.collect,
+             {"years": config.US_MONTHLY_PRICE_YEARS}),
         Step("밸류 지표 계산", global_value.build),
         Step("QVM 팩터 모델", factor_global.run, critical=True, validator=check_factor),
     ]
@@ -213,6 +216,8 @@ def us_monthly_steps() -> list[Step]:
              validator=check_us_crawl),
         Step("재무제표 수집(yahooquery)", global_fs.collect, critical=True,
              validator=check_us_crawl),
+        Step("벤치마크 수집(SPY)", global_bench.collect,
+             {"years": config.US_MONTHLY_PRICE_YEARS}),
         Step("밸류 지표 계산", global_value.build),
         Step("QVM 팩터 모델", factor_global.run, validator=check_factor),
     ]
