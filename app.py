@@ -963,11 +963,16 @@ def render_perf(market: str) -> None:
                 smap = ({} if sector.empty else
                         dict(zip(sector["Symbol"].astype(str).str.strip(),
                                  sector["Sector"].astype(str))))
+            LP = {}
             for a, r in RS.items():
                 PNL[a] = r.get("pnl", pd.DataFrame())
                 RC[a] = perf.rule_check(r.get("pstate", pd.DataFrame()),
                                         r.get("trades", pd.DataFrame()), a,
                                         sector_map=smap)
+                # 원장 기준 손익 — 예수금을 몰라도, 보유목록이 늦게 올라와도
+                # 흔들리지 않습니다. 팔아서 끝난 종목의 실현손익까지 셉니다.
+                LP[a] = perf.ledger_pnl(r.get("trades", pd.DataFrame()), a,
+                                        r.get("px", pd.DataFrame()))
 
             # ── 1. 요약 — 한 표에 두 계좌 ─────────────────────
             st.subheader("한눈에")
@@ -1002,10 +1007,24 @@ def render_perf(market: str) -> None:
             row("최대 섹터 비중", lambda a: (
                 f"{RC[a]['최대섹터비중'] * 100:.1f}%"
                 if RC[a].get("최대섹터비중") else "–"))
-            row("합계 손익", lambda a: _m(
+            row("합계 손익 (보유분)", lambda a: _m(
                 PNL[a]["손익"].sum() if (len(PNL[a])
                                        and PNL[a]["손익"].notna().any())
                 else None))
+            # ── 원장 기준 ─────────────────────────────────────
+            # 예수금을 기록하지 않기로 했으므로(config.TRACK_CASH) 금액은
+            # 원장의 매입가·매도가로 셉니다. 비율은 위의 시간가중수익률을
+            # 그대로 쓰고, 여기서 새 분모를 지어내지 않습니다.
+            row("실현손익 (원장)", lambda a: (_m(LP[a]["실현손익"])
+                                        if LP[a]["실현손익"] else "–"))
+            row("미실현손익 (원장)", lambda a: (_m(LP[a]["미실현손익"])
+                                          if LP[a]["미실현손익"] else "–"))
+            row("손익 합계 (원장)", lambda a: (_m(LP[a]["손익"])
+                                        if LP[a]["손익"] else "–"))
+            row("원가미상 매도", lambda a: (
+                f"{LP[a]['원가미상_매도종목']}종목 "
+                f"({_m(LP[a]['원가미상_매도금액'])})"
+                if LP[a]["원가미상_매도종목"] else "없음"))
             row("이긴 종목", lambda a: (
                 f"{int((PNL[a]['손익'] > 0).sum())} / "
                 f"{int(PNL[a]['손익'].notna().sum())}"
@@ -1162,6 +1181,57 @@ def render_perf(market: str) -> None:
                 st.download_button("종목별 손익 CSV", to_csv(allp),
                                    file_name=f"pnl_{market}_{tag}.csv",
                                    mime="text/csv", key=f"dl_pnl_{market}")
+
+            # ── 4.5 원장 기준 손익 — 팔아서 끝난 종목까지 ─────
+            # 위 표는 **지금 들고 있는** 종목만입니다. 팔고 나간 종목의
+            # 실현손익은 거기 안 들어갑니다. 예수금을 기록하지 않기로 했으니
+            # (config.TRACK_CASH) 그 부분은 원장의 매입가·매도가로만 셀 수
+            # 있고, 이 표가 그걸 보여줍니다.
+            st.subheader("원장 기준 손익 (팔린 종목 포함)")
+            lframes = []
+            for a in RS:
+                d = LP[a].get("종목별", pd.DataFrame())
+                if len(d):
+                    d = d.copy()
+                    d.insert(0, "계좌", LBL[a])
+                    lframes.append(d)
+            if not lframes:
+                st.caption("원장에 체결 기록이 아직 없습니다.")
+            else:
+                alll = pd.concat(lframes, ignore_index=True)
+                _unk = sum(LP[a]["원가미상_매도종목"] for a in RS)
+                _unka = sum(LP[a]["원가미상_매도금액"] for a in RS)
+                if _unk:
+                    st.info(
+                        f"판 종목 중 {_unk}종목({_m(_unka)})은 **원장이 생기기 "
+                        "전부터 들고 계셨던 것**입니다. 매도가는 알지만 "
+                        "매입단가가 원장에 없어 실현손익을 계산하지 않고 "
+                        "빼 두었습니다 — 추정해서 채우면 전체 손익이 조용히 "
+                        "틀립니다. 이후에 모델이 산 종목은 매입가가 원장에 "
+                        "있으니 팔 때 정확히 계산됩니다.")
+                _lonly = st.checkbox("손익이 계산된 종목만", value=True,
+                                     key=f"lpnl_only_{market}")
+                lview = alll[alll["손익"].notna()] if _lonly else alll
+                lshow = lview[["계좌", "종목코드", "종목명", "상태", "보유수량",
+                               "평단", "현재가", "실현손익", "미실현손익",
+                               "손익", "매도금액"]].copy()
+                _ldp = 0 if market == "kr" else 2
+                for c in ("평단", "현재가", "실현손익", "미실현손익", "손익",
+                          "매도금액"):
+                    lshow[c] = lshow[c].map(
+                        lambda v: f"{v:,.{_ldp}f}" if pd.notna(v) else "–")
+                lshow["보유수량"] = lshow["보유수량"].map(
+                    lambda v: f"{v:,.0f}" if pd.notna(v) else "–")
+                st.dataframe(lshow, use_container_width=True, hide_index=True)
+                st.download_button("원장 기준 손익 CSV", to_csv(alll),
+                                   file_name=f"ledger_pnl_{market}_{tag}.csv",
+                                   mime="text/csv",
+                                   key=f"dl_lpnl_{market}")
+                st.caption("실현손익은 (매도가 − 평단) × 매도수량, 미실현손익은 "
+                           "(현재가 − 평단) × 보유수량입니다. 평단은 원장의 "
+                           "체결가만으로 계산하므로 예수금 기록이 필요 없고, "
+                           "보유목록이 늦게 올라와도 흔들리지 않습니다. "
+                           "수수료·거래세는 체결가에 들어 있지 않아 빠집니다.")
 
             # ── 5. 규칙 준수 ──────────────────────────────────
             st.subheader("규칙 준수")

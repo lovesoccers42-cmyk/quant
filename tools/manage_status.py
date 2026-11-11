@@ -122,7 +122,10 @@ def _checks(key: str, a: dict, today: date, market: str = "kr") -> list:
                    f"{a['원장_미체결'] - a['원장_미체결표시']}건에 표시가 "
                    f"없습니다 — 수익률 계산이 그 건을 계획가에 거래한 것으로 "
                    f"읽습니다. 체결내역을 다시 적용하세요")
-    if a.get("순매도비율", 0.0) >= 0.05 and not a.get("현금기록"):
+    # 예수금을 안 쓰기로 했으면(config.TRACK_CASH=False) 순매도 뒤 현금이
+    # 기록에 없는 것이 **정상**입니다 — 매달 헛경보가 됩니다.
+    if (config.TRACK_CASH and a.get("순매도비율", 0.0) >= 0.05
+            and not a.get("현금기록")):
         out.append(f"{key}: 마지막 주문에서 보유 평가액의 "
                    f"{a['순매도비율'] * 100:.0f}%만큼 순매도했는데 예수금이 "
                    f"0으로 기록됐습니다 — 판 돈이 기록 어디에도 없습니다. "

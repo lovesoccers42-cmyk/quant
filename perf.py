@@ -413,6 +413,127 @@ def position_pnl(trades: pd.DataFrame, holdings_log: pd.DataFrame,
     return out.sort_values("손익", ascending=False, na_position="last")
 
 
+def ledger_pnl(trades: pd.DataFrame, account: str, px: pd.DataFrame, *,
+               cost_basis: pd.Series | None = None) -> dict:
+    """원장만으로 실현·미실현 손익을 셉니다 — **예수금을 몰라도 계산됩니다.**
+
+    종목별로 체결 기록을 시간순으로 걸으며 평단과 수량을 유지하고, 팔 때마다
+    (매도가 - 평단) × 수량을 실현손익으로 적립합니다. 남은 수량은 마지막
+    종가로 미실현손익을 냅니다. 평가액 스냅샷도, 현금흐름 정렬도 필요 없어서
+    (보유목록이 늦게 올라오거나 예수금 줄이 없어도) 흔들리지 않습니다.
+
+    **원가미상은 추정하지 않습니다.** 원장에 매입 기록이 없는 종목을 판
+    경우(원장이 생기기 전부터 들고 있던 종목)는 분자·분모 모두에서 빼고,
+    몇 종목·얼마를 팔았는지만 돌려줍니다. 모르는 매입가를 0이나 매도가로
+    채우면 전체 손익이 조용히 틀립니다. cost_basis(종목코드 → 매입단가)를
+    주면 그걸 씁니다.
+
+    돌려주는 것
+        실현손익 / 미실현손익 / 손익 (= 둘의 합)
+        원가미상_매도종목 · 원가미상_매도금액 · 원가미상_보유종목
+        종목별: 종목코드·종목명·상태(보유/정리)·실현손익·미실현손익·손익…
+    """
+    out = {"실현손익": 0.0, "미실현손익": 0.0, "손익": 0.0,
+           "원가미상_매도종목": 0, "원가미상_매도금액": 0.0,
+           "원가미상_보유종목": 0, "종목별": pd.DataFrame()}
+    if trades is None or trades.empty:
+        return out
+    t = trades[trades["계좌"].astype(str) == str(account)].copy()
+    if t.empty:
+        return out
+    p = pd.to_numeric(t.get("체결가"), errors="coerce")
+    q = pd.to_numeric(t.get("체결수량"), errors="coerce")
+    ok = p.notna() & q.notna() & (q > 0)
+    t, p, q = t[ok], p[ok], q[ok]
+    if t.empty:
+        return out
+    t["_가"] = p.to_numpy()
+    t["_수"] = q.to_numpy()
+    t["_코드"] = _code6(t["종목코드"])
+    t["_일"] = pd.to_datetime(t.get("체결일"), errors="coerce")
+    kind = t["구분"].astype(str)
+    t["_매도"] = kind.str.contains("|".join(SELL_WORDS), na=False)
+    t["_매수"] = kind.str.contains("|".join(BUY_WORDS), na=False)
+    t = t[t["_매도"] | t["_매수"]]
+    if t.empty:
+        return out
+    # 같은 날 매도와 매수가 섞여 있으면 **매도를 먼저** 봅니다. 리밸런싱은
+    # 판 돈으로 사는 것이고, 매수를 먼저 보면 그날 평단이 희석된 채로
+    # 실현손익이 계산됩니다.
+    t = t.sort_values(["_일", "_매도"], ascending=[True, False],
+                      kind="stable")
+
+    last = (px.ffill().iloc[-1] if px is not None and len(px)
+            else pd.Series(dtype="float64"))
+    cb = (cost_basis if cost_basis is not None else pd.Series(dtype="float64"))
+    names = {}
+    for c, n in zip(t["_코드"], t["종목명"].astype(str)):
+        if n and n != "nan":
+            names.setdefault(c, n)
+
+    rows = []
+    for code, g in t.groupby("_코드", sort=True):
+        qty = 0.0
+        cost = 0.0          # 보유분의 매입원가 합
+        real = 0.0
+        sold_amt = 0.0
+        unk_qty = 0.0
+        unk_amt = 0.0
+        for _, r in g.iterrows():
+            px_, n_ = float(r["_가"]), float(r["_수"])
+            if r["_매도"]:
+                if qty <= 0 and code in cb.index and pd.notna(cb.get(code)):
+                    # 매입단가를 따로 주셨으면 그걸로 원가를 세웁니다
+                    qty, cost = n_, float(cb[code]) * n_
+                avail = min(n_, qty)
+                if avail > 0:
+                    avg = cost / qty
+                    real += (px_ - avg) * avail
+                    cost -= avg * avail
+                    qty -= avail
+                    sold_amt += px_ * avail
+                if n_ - avail > 1e-9:
+                    unk_qty += n_ - avail
+                    unk_amt += px_ * (n_ - avail)
+            else:
+                qty += n_
+                cost += px_ * n_
+        cur = last.get(code)
+        avg = (cost / qty) if qty > 0 else float("nan")
+        unreal = ((float(cur) - avg) * qty
+                  if qty > 0 and cur is not None and pd.notna(cur)
+                  and pd.notna(avg) else float("nan"))
+        rows.append({
+            "종목코드": code, "종목명": names.get(code, ""),
+            "상태": "보유" if qty > 0 else "정리",
+            "보유수량": qty, "평단": avg,
+            "현재가": float(cur) if cur is not None and pd.notna(cur) else float("nan"),
+            "실현손익": real if (real or sold_amt) else float("nan"),
+            "미실현손익": unreal,
+            "손익": (0.0 if pd.isna(real) else real)
+                  + (0.0 if pd.isna(unreal) else unreal),
+            "매도금액": sold_amt,
+            "원가미상_매도수량": unk_qty, "원가미상_매도금액": unk_amt,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return out
+    # 원가미상 매도만 있는 종목은 손익을 0으로 두지 않고 비웁니다
+    only_unk = (df["원가미상_매도수량"] > 0) & (df["매도금액"] <= 0) & \
+               (df["보유수량"] <= 0)
+    df.loc[only_unk, "손익"] = float("nan")
+    out["실현손익"] = float(df["실현손익"].sum(skipna=True))
+    out["미실현손익"] = float(df["미실현손익"].sum(skipna=True))
+    out["손익"] = out["실현손익"] + out["미실현손익"]
+    out["원가미상_매도종목"] = int((df["원가미상_매도수량"] > 0).sum())
+    out["원가미상_매도금액"] = float(df["원가미상_매도금액"].sum())
+    out["원가미상_보유종목"] = int(((df["보유수량"] > 0)
+                              & df["평단"].isna()).sum())
+    out["종목별"] = df.sort_values("손익", ascending=False,
+                                na_position="last").reset_index(drop=True)
+    return out
+
+
 def cost_basis_return(pnl: pd.DataFrame) -> dict:
     """평단 기준 수익률 = 합계 손익 ÷ 합계 투자원금.
 
