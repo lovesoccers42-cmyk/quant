@@ -29,10 +29,12 @@ def _acct(key: str, market: str = "kr") -> dict:
     pending = int((base == 0).sum())
     cap = store.read(prof["capital_table"])
     cap_date, cap_pledged, ramp = None, 0.0, ""
+    cap_cash = 0.0
     if not cap.empty:
         cap_date = f"{pd.to_datetime(cap['기준일']).max():%Y-%m-%d}"
         ci = portfolio.load_capital(prof["capital_table"])
         cap_pledged = float(ci.get("약정액") or 0.0)
+        cap_cash = float(ci.get("현금") or 0.0)
         # 램프 진행도는 **금액 없이** 적습니다 — 이 파일은 공개 릴리스에
         # 올라갑니다. 켜졌는지/몇 달째인지만 알면 충분하고, 그걸 모르면
         # "단계 인상 칸을 체크했던가?"를 확인할 방법이 없습니다.
@@ -42,6 +44,7 @@ def _acct(key: str, market: str = "kr") -> dict:
 
     log = portfolio.trade_log(table=prof["trades_table"], account=key)
     last_order, filled, unfilled, marked, weeks = None, 0, 0, 0, 0
+    net_sell_ratio = 0.0
     if not log.empty:
         weeks = int(log["기준일"].nunique())
         last = log[log["기준일"] == log["기준일"].max()]
@@ -54,6 +57,28 @@ def _acct(key: str, market: str = "kr") -> dict:
         # 같은 JSON으로 세 번 묻게 됐습니다.
         memo = last["메모"].astype(str) if "메모" in last.columns else pd.Series(dtype=str)
         marked = int(memo.str.contains("미체결", na=False).sum())
+
+        # 마지막 주문의 순현금흐름 비율 (+매수 / -매도). 매매는 주식과 현금
+        # 사이의 이동이라 **총자본(주식+현금)을 바꾸지 않습니다.** 크게 순매도
+        # 했는데 예수금이 0으로 기록돼 있으면 그 돈이 기록 어디에도 없다는
+        # 뜻입니다 (2026-11-11 실측: 미국 두 계좌에서 판 돈이 평가액의 60%·
+        # 195%였는데 보유목록에 예수금 줄이 없어 현금 0으로 들어갔고, 요약은
+        # '이상 없음'을 찍었습니다).
+        #
+        # 금액은 적지 않습니다 — 이 파일은 공개 릴리스에 올라갑니다.
+        _fp = pd.to_numeric(last.get("체결가"), errors="coerce")
+        _fq = pd.to_numeric(last.get("체결수량"), errors="coerce")
+        _fok = _fp.notna() & _fq.notna() & (_fq > 0)
+        if _fok.any():
+            _amt = (_fp * _fq).where(_fok, 0.0)
+            _sell = last["구분"].astype(str).str.contains("매도|축소", na=False)
+            _net = float(_amt.where(~_sell, -_amt).sum())
+            _held = float(pd.to_numeric(st["평가금액"], errors="coerce").sum()
+                          if "평가금액" in st.columns else 0.0) or None
+            _base = _held or float(pd.to_numeric(
+                st["기준금액"], errors="coerce").sum() or 0.0)
+            if _net < 0 and _base > 0:
+                net_sell_ratio = round(min(9.99, -_net / _base), 3)
 
     return {
         "보유종목수": int(len(st) - pending),
@@ -71,6 +96,9 @@ def _acct(key: str, market: str = "kr") -> dict:
         "원장_기록주차수": weeks,
         "약정액설정": bool(cap_pledged), # 금액은 적지 않습니다 — 설정 여부만
         "약정액단계인상": ramp,           # "1/3개월차" 또는 빈 문자열
+        # 마지막 주문에서 '판 돈 ÷ 보유 평가액'. 금액이 아니라 비율입니다.
+        "순매도비율": net_sell_ratio,
+        "현금기록": bool(float(cap_cash or 0.0) > 0),
     }
 
 
@@ -94,6 +122,12 @@ def _checks(key: str, a: dict, today: date, market: str = "kr") -> list:
                    f"{a['원장_미체결'] - a['원장_미체결표시']}건에 표시가 "
                    f"없습니다 — 수익률 계산이 그 건을 계획가에 거래한 것으로 "
                    f"읽습니다. 체결내역을 다시 적용하세요")
+    if a.get("순매도비율", 0.0) >= 0.05 and not a.get("현금기록"):
+        out.append(f"{key}: 마지막 주문에서 보유 평가액의 "
+                   f"{a['순매도비율'] * 100:.0f}%만큼 순매도했는데 예수금이 "
+                   f"0으로 기록됐습니다 — 판 돈이 기록 어디에도 없습니다. "
+                   f"보유목록 CSV 맨 아래에 `예수금,<달러>,,` 한 줄을 넣어 "
+                   f"다시 올리세요 (직접 출금하셨다면 무시해도 됩니다)")
     if not a["약정액설정"]:
         out.append(f"{key}: 약정 운용금액이 설정되지 않았습니다 — "
                    f"예수금이 0이면 배정액이 쪼그라듭니다")
