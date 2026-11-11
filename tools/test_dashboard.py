@@ -155,6 +155,74 @@ check(float(uval.max()) < 1e5 and float(kval.min()) > 1e6,
 check(set(upnl["종목코드"]).isdisjoint(set(kpnl["종목코드"])),
       "두 시장의 종목이 겹치지 않음")
 
+# ── 3.5 팔린 종목이 평가액에 남지 않는가 (2026-11-11 실측) ──
+# 재동기화 스냅샷은 그 날 보유의 **전체**입니다. 어떤 종목이 스냅샷에 없다는
+# 것은 '모른다'가 아니라 '팔아서 없다'는 뜻입니다. 예전에는 비워 뒀고,
+# daily_value의 ffill이 직전 수량을 끌고 와서 팔린 종목이 평가액에 계속
+# 남았습니다. 미국 main이 실제 $12,165인데 $22,832로 계산돼 7일 수익률이
+# +53%로 찍혔습니다(실제 -0.8%).
+print("\n[팔린 종목이 평가액에 남지 않는가 — +53%의 원인]")
+D0, D1 = pd.Timestamp("2026-10-31"), pd.Timestamp("2026-11-04")
+PRICE = {"AAA": 100.0, "BBB": 50.0, "CCC": 20.0, "DDD": 10.0, "EEE": 25.0}
+BEFORE = {"AAA": 10, "BBB": 10, "CCC": 10}          # $1,000+$500+$200 = 1,700
+AFTER = {"AAA": 10, "DDD": 20, "EEE": 8}            # $1,000+$200+$200 = 1,400
+rows = []
+for d, hold in ((D0, BEFORE), (D1, AFTER)):
+    for c, q in hold.items():
+        rows.append({"기준일": d, "계좌": "main", "종목코드": c,
+                     "종목명": c, "평가금액": q * PRICE[c], "수량": q})
+hl = pd.DataFrame(rows)
+DD = pd.bdate_range("2026-10-29", "2026-11-10")
+pr = pd.DataFrame([{"날짜": d, "종목코드": c, "종가": p}
+                   for d in DD for c, p in PRICE.items()])
+spx = perf.price_pivot(pr, set(PRICE))
+spos = perf.positions_timeline(hl, "main", spx)
+check(float(spos.loc[D1, "BBB"]) == 0.0 and float(spos.loc[D1, "CCC"]) == 0.0,
+      f"스냅샷에서 빠진 종목은 0주 (BBB {spos.loc[D1, 'BBB']:.0f} · "
+      f"CCC {spos.loc[D1, 'CCC']:.0f})")
+sval = perf.daily_value(spos, spx)
+check(abs(float(sval.loc[D0_ := DD[DD >= D0][0]]) - 1700.0) < 1e-6,
+      f"첫 스냅샷 평가액 ${float(sval.loc[D0_]):,.2f} (기대 $1,700)")
+check(abs(float(sval.loc[D1]) - 1400.0) < 1e-6,
+      f"둘째 스냅샷 평가액 ${float(sval.loc[D1]):,.2f} (기대 $1,400 — "
+      f"예전에는 팔린 BBB·CCC $700이 남아 $2,100이었습니다)")
+
+# 판 돈으로 산 리밸런싱 — 수익률은 0에 가까워야 합니다
+tr_rows = [{"기준일": D0, "계좌": "main", "구분": "매도", "종목코드": c,
+            "체결가": PRICE[c], "체결수량": BEFORE[c], "체결일": D1}
+           for c in ("BBB", "CCC")]
+tr_rows += [{"기준일": D0, "계좌": "main", "구분": "매수", "종목코드": c,
+             "체결가": PRICE[c], "체결수량": AFTER[c], "체결일": D1}
+            for c in ("DDD", "EEE")]
+st_tr = pd.DataFrame(tr_rows)
+sfl = perf.align_flows(perf.net_flows(st_tr, "main"), sval.index, spos.index)
+stw = perf.twr(sval, sfl)
+check(abs(float(sfl.get(D1, 0.0)) - (-300.0)) < 1e-6,
+      f"순현금흐름 ${float(sfl.get(D1, 0.0)):,.2f} (매수 400 - 매도 700)")
+check(abs(float(stw['누적'].iloc[-1]) - 1.0) < 1e-9,
+      f"판 돈으로 사면 수익률 0 ({(float(stw['누적'].iloc[-1]) - 1) * 100:+.2f}%)")
+strust = perf.twr_trust(stw)
+check(strust["신뢰"], f"정상 리밸런싱은 믿을 수 있다고 판정 ({strust['사유'][:40]})")
+
+print("\n[흐름과 평가액이 어긋나면 막는가 — 예전 판정이 통과시킨 모양]")
+# 평가액은 +3,236인데 흐름은 -7,311 → 잔차 +10,547. 예전 판정은 '흐름이
+# 크니 설명됨'으로 통과시켰습니다. 실제 11/04 숫자를 그대로 씁니다.
+bad = pd.DataFrame({"평가액": [19631.65, 22867.25], "순입출금": [0.0, -7311.5]},
+                   index=pd.to_datetime(["2026-11-02", "2026-11-04"]))
+bad["일수익률"] = [0.0, 0.5372]
+bad["누적"] = [1.0, 1.5372]
+bt = perf.twr_trust(bad)
+check(not bt["신뢰"], "막음 (예전 판정은 흐름이 커서 통과시켰습니다)")
+check("설명되지 않는" in bt["사유"], f"사유를 남김: {bt['사유'][:50]}…")
+
+# 반대로 흐름이 평가액 변화를 제대로 설명하면 통과해야 합니다 (오탐 방지)
+ok_t = pd.DataFrame({"평가액": [19631.65, 12165.47], "순입출금": [0.0, -7311.5]},
+                    index=pd.to_datetime(["2026-11-02", "2026-11-04"]))
+ok_t["일수익률"] = [0.0, -0.0079]
+ok_t["누적"] = [1.0, 0.9921]
+check(perf.twr_trust(ok_t)["신뢰"],
+      "같은 날 실제 평가액($12,165)이면 통과 — 오탐이 아님")
+
 # ── 4. app.py 실제 렌더 (streamlit이 있으면) ─────────────────
 print("\n[app.py 렌더 — 두 성과 탭이 예외 없이 그려지는가]")
 try:

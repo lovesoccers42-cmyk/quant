@@ -136,7 +136,18 @@ def positions_timeline(holdings_log: pd.DataFrame, account: str,
            .pivot_table(index="기준일", columns="종목코드", values="수량",
                         aggfunc="last")
            .sort_index())
-    return out
+    # **스냅샷에 없는 종목은 0주입니다.** 재동기화는 그 날 보유의 전체를
+    # 적으므로, 어떤 종목이 그 스냅샷에 없다는 것은 '모른다'가 아니라
+    # '팔아서 없다'는 뜻입니다.
+    #
+    # 왜 이 한 줄이 중요한가 (2026-11-11 실측): 비워 두면 daily_value의
+    # ffill이 **직전 스냅샷의 수량을 그대로 끌고 옵니다.** 그러면 팔아서
+    # 없어진 종목이 평가액에 계속 남습니다. 미국 main이 10/31 58종목에서
+    # 11/04 54종목으로 바뀔 때 팔린 30종목($10,667)이 11/04 평가액에
+    # 그대로 남아, 실제 $12,165인 계좌가 $22,832로 계산됐고 7일 수익률이
+    # **+53%** 로 찍혔습니다(실제는 -0.8%). 한국도 같은 코드라 매주 팔린
+    # 종목이 조금씩 쌓여 수익률을 부풀리고 있었습니다.
+    return out.fillna(0.0)
 
 
 def daily_value(positions: pd.DataFrame, px: pd.DataFrame,
@@ -275,20 +286,30 @@ def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
     v = pd.to_numeric(t["평가액"], errors="coerce")
     f = pd.to_numeric(t["순입출금"], errors="coerce").fillna(0.0)
     prev = v.shift(1)
-    chg = (v - prev).abs()
-    unexplained = (chg > prev.abs() * band) & (f.abs() < chg * 0.5)
-    unexplained = unexplained.fillna(False)
+
+    # **잔차로 판정합니다.** 평가액 변화에서 그날 현금흐름을 걷어낸 나머지가
+    # 그날의 진짜 수익입니다. 그게 하루 band(기본 8%)를 넘으면 설명이 안 되는
+    # 것입니다 — 100종목 포트폴리오가 주가만으로 하루 8%를 움직이기는
+    # 어렵습니다.
+    #
+    # 예전에는 `(점프가 큰데) 흐름이 작으면` 의심했습니다. 그래서 **흐름이
+    # 크면 무조건 통과**시켰는데, 흐름이 큰 것 자체가 거짓 수익의 재료였습니다
+    # (2026-11-11 실측: 11/04에 평가액 +3,236인데 흐름 -7,311 → 잔차
+    # +10,547 = 직전 평가액의 54%. 예전 판정은 "흐름이 크니 설명됨"으로
+    # 통과시켜 +53%를 그대로 내보냈습니다). 방향과 크기를 같이 봐야 합니다.
+    resid = (v - prev - f)
+    unexplained = (resid.abs() > prev.abs() * band).fillna(False)
     n = int(unexplained.sum())
     out["점프일수"] = n
-    out["점프합"] = float(chg[unexplained].sum())
+    out["점프합"] = float(resid[unexplained].abs().sum())
     if n:
         out["신뢰"] = False
         days = ", ".join(f"{d:%m/%d}" for d in t.index[unexplained][:4])
         out["사유"] = (
-            f"입출금으로 설명되지 않는 평가액 점프 {n}일 ({days}"
+            f"현금흐름으로 설명되지 않는 평가액 변화 {n}일 ({days}"
             f"{' …' if n > 4 else ''}, 합 {out['점프합']:,.0f}). "
-            f"체결내역이 원장에 안 들어왔거나 체결일이 틀렸을 때 생깁니다 "
-            f"— 그 매수가 수익으로 계산됩니다.")
+            f"체결내역이 원장에 안 들어왔거나, 체결일이 틀렸거나, 보유목록이 "
+            f"일부만 올라왔을 때 생깁니다 — 그만큼이 수익으로 계산됩니다.")
     return out
 
 
