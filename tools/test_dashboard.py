@@ -214,6 +214,10 @@ bad["누적"] = [1.0, 1.5372]
 bt = perf.twr_trust(bad)
 check(not bt["신뢰"], "막음 (예전 판정은 흐름이 커서 통과시켰습니다)")
 check("설명되지 않는" in bt["사유"], f"사유를 남김: {bt['사유'][:50]}…")
+brief = perf.trust_brief(bt)
+check("11/04" in brief and len(brief) < 60,
+      f"요약 표용 짧은 사유에 날짜가 남음: {brief!r}")
+check(perf.trust_brief({"신뢰": True}) == "", "믿을 수 있으면 짧은 사유는 빈칸")
 
 # 반대로 흐름이 평가액 변화를 제대로 설명하면 통과해야 합니다 (오탐 방지)
 ok_t = pd.DataFrame({"평가액": [19631.65, 12165.47], "순입출금": [0.0, -7311.5]},
@@ -315,6 +319,136 @@ else:
     infos = " ".join(i.value for i in at.info)
     check("한국 계좌" in infos and "미국 계좌" in infos,
           "두 시장 모두 안내문을 냄 (한쪽만 렌더되는 사고 방지)")
+
+    # ── 4b. 신뢰 점검이 숨긴 계좌가 요약 표에 '측정 전'으로 숨지 않는가 ──
+    # 2026-11-13 실측: 배우자 계좌 10/18 보유목록에 KT가 2주인데 체결내역은
+    # 1주뿐이라, 10/19 평가액 점프가 설명되지 않아 TWR이 숨겨졌습니다.
+    # 맨 위 노란 상자에는 사유가 떴는데 성과 탭 요약 표는 '측정 전'이었습니다.
+    # 같은 모양의 데이터를 가짜 GitHub 응답으로 흘려 넣고 렌더해 봅니다.
+    print("\n[요약 표 — 입출금누락 계좌의 상태와 사유가 보이는가]")
+    import io as _io
+    import json as _json
+    import requests as _rq
+    import streamlit as _st
+
+    def _pq(df: pd.DataFrame) -> bytes:
+        buf = _io.BytesIO()
+        df.to_parquet(buf, index=False)
+        return buf.getvalue()
+
+    PD = pd.bdate_range("2026-10-05", "2026-10-30")
+    CODES = {"000001": 10000.0, "000002": 10000.0, "030200": 50000.0}
+    _r = np.random.default_rng(7)
+    _px = [{"날짜": d, "종목코드": c,
+            "종가": round(p * (1 + 0.003 * _r.standard_normal()), 0)}
+           for d in PD for c, p in CODES.items()]
+    _price = pd.DataFrame(_px)
+
+    def _t(d):
+        return pd.Timestamp(d)
+
+    _trades = pd.DataFrame([
+        # 상수: 깨끗한 계좌 — 한 번 사고 그대로
+        {"기준일": _t("2026-10-07"), "계좌": "main", "구분": "매수",
+         "종목코드": "000001", "종목명": "에이", "체결가": 10000.0,
+         "체결수량": 100.0, "체결일": _t("2026-10-07")},
+        # 배우자: 10/07에 둘, 10/16에 KT 1주
+        {"기준일": _t("2026-10-07"), "계좌": "alt", "구분": "매수",
+         "종목코드": "000001", "종목명": "에이", "체결가": 10000.0,
+         "체결수량": 20.0, "체결일": _t("2026-10-07")},
+        {"기준일": _t("2026-10-07"), "계좌": "alt", "구분": "매수",
+         "종목코드": "000002", "종목명": "비", "체결가": 10000.0,
+         "체결수량": 10.0, "체결일": _t("2026-10-07")},
+        {"기준일": _t("2026-10-16"), "계좌": "alt", "구분": "매수",
+         "종목코드": "030200", "종목명": "KT", "체결가": 50000.0,
+         "체결수량": 1.0, "체결일": _t("2026-10-16")},
+    ])
+    _hl = []
+    for snap in ("2026-10-10", "2026-10-18"):
+        _hl.append({"기준일": _t(snap), "계좌": "main", "종목코드": "000001",
+                    "종목명": "에이", "평가금액": 1_000_000.0, "수량": 100.0})
+        _hl.append({"기준일": _t(snap), "계좌": "alt", "종목코드": "000001",
+                    "종목명": "에이", "평가금액": 200_000.0, "수량": 20.0})
+        _hl.append({"기준일": _t(snap), "계좌": "alt", "종목코드": "000002",
+                    "종목명": "비", "평가금액": 100_000.0, "수량": 10.0})
+    # 체결은 1주인데 보유목록은 2주 — 1주(약 5만원)가 수익으로 잡힙니다
+    _hl.append({"기준일": _t("2026-10-18"), "계좌": "alt", "종목코드": "030200",
+                "종목명": "KT", "평가금액": 100_000.0, "수량": 2.0})
+    STATE = {"kor_trades.parquet": _pq(_trades),
+             "kor_holdings_log.parquet": _pq(pd.DataFrame(_hl))}
+    _last = PD.max()
+    ASSETS = {
+        "kor_price.parquet": _pq(_price),
+        "kor_ticker.parquet": _pq(pd.DataFrame(
+            [{"종목코드": c, "시가총액": p * 1e6, "종가": p, "기준일": _last}
+             for c, p in CODES.items()])),
+        "kor_sector.parquet": _pq(pd.DataFrame(
+            [{"CMP_CD": c, "SEC_NM_KOR": "산업재", "기준일": _last}
+             for c in CODES])),
+    }
+
+    class _Resp:
+        def __init__(self, code=404, content=b"", payload=None):
+            self.status_code, self.content = code, content
+            self._payload = payload
+            self.ok = code < 400
+            self.text = content.decode("latin-1") if content else ""
+
+        def json(self):
+            return self._payload if self._payload is not None else {}
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise _rq.HTTPError(str(self.status_code))
+
+    def _fake_get(url, *a, **k):
+        url = str(url)
+        if url.endswith("/repos/nobody/nothing/releases/tags/data-store"):
+            return _Resp(200, b"{}", {"assets": [
+                {"name": n, "url": f"fake://asset/{n}", "size": len(b),
+                 "updated_at": "2026-10-30T12:00:00Z"} for n, b in ASSETS.items()]})
+        if url.startswith("fake://asset/"):
+            n = url.rsplit("/", 1)[-1]
+            return _Resp(200, ASSETS[n]) if n in ASSETS else _Resp()
+        if "/repos/nobody/state/contents/state/" in url:
+            n = url.rsplit("/", 1)[-1]
+            return _Resp(200, STATE[n]) if n in STATE else _Resp()
+        return _Resp()
+
+    _orig_get = _rq.get
+    _rq.get = _fake_get
+    try:
+        _st.cache_data.clear()
+        at2 = AppTest.from_file(_app, default_timeout=300)
+        for k, v in (("GH_TOKEN", "fake"), ("GH_REPO", "nobody/nothing"),
+                     ("STATE_REPO", "nobody/state"), ("STATE_TOKEN", "fake")):
+            at2.secrets[k] = v
+        at2.run()
+    finally:
+        _rq.get = _orig_get
+        _st.cache_data.clear()
+    check(not at2.exception,
+          f"예외 없음 ({[str(e.value)[:80] for e in at2.exception]})")
+    summ = next((d.value for d in at2.dataframe
+                 if getattr(d.value, "index", None) is not None
+                 and d.value.index.name == "항목"
+                 and "상태" in d.value.index), None)
+    check(summ is not None, "성과(한국) 요약 표가 그려짐")
+    if summ is not None:
+        st_alt = str(summ.loc["상태", "배우자"])
+        st_main = str(summ.loc["상태", "상수"])
+        check(st_alt == "체결내역 필요",
+              f"배우자 상태 = {st_alt!r} ('측정 전'이면 사고 재발)")
+        check(st_main == "측정 중", f"상수 상태 = {st_main!r} (깨끗한 계좌는 그대로)")
+        why = str(summ.loc["숨긴 사유", "배우자"]) if "숨긴 사유" in summ.index else ""
+        check("10/19" in why, f"숨긴 사유에 날짜가 보임 — {why!r}")
+        check(str(summ.loc["수익률 (시간가중)", "배우자"]) == "숨김",
+              "시간가중 칸은 '–'가 아니라 '숨김'")
+    warns = " ".join(w.value for w in at2.warning)
+    check("배우자" in warns and "alt·" not in warns,
+          "경고문이 'alt'가 아니라 '배우자'로 적힘")
+    check(warns.count("10/19") >= 2,
+          "맨 위 상자와 성과 탭 경고 모두 날짜를 보여 줌")
 
 print()
 if FAIL:

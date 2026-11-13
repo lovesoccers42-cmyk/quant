@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import time
+import traceback
 
 import requests as rq
 from requests.adapters import HTTPAdapter
@@ -25,28 +26,77 @@ _SECRET = re.compile(
     re.IGNORECASE)
 
 
+def redact(text):
+    """문자열 안의 인증키를 ***로 바꿉니다. 문자열이 아니면 그대로 돌려줍니다.
+
+    로그 말고도 비밀값이 새는 길이 있습니다 — 실행 요약 JSON(공개 릴리스에
+    올라갑니다), 메일·텔레그램 리포트, LLM 리포트 입력. 거기 들어가는
+    오류 문자열(traceback)은 이 함수를 거쳐야 합니다.
+    """
+    if isinstance(text, str) and "=" in text:
+        return _SECRET.sub(r"\1***", text)
+    return text
+
+
+def _redact_record(record: logging.LogRecord) -> None:
+    """한 로그 기록을 **완성된 문장 기준으로** 가립니다.
+
+    예전 필터는 msg와 '문자열' 인자만 봤습니다. 그래서
+        log.warning("실패: %s", e)          # e = requests 예외 객체
+        log.exception("...")                 # traceback
+    처럼 예외 객체나 traceback에 실린 URL(…?crtfc_key=…)은 그대로
+    통과했습니다. requests의 ConnectionError 메시지에는 요청 URL이 통째로
+    들어 있습니다. 완성된 메시지와 traceback 문자열을 가리면 모양과 상관없이
+    막힙니다.
+    """
+    try:
+        msg = record.getMessage()
+        red = redact(msg)
+        if red != msg:
+            record.msg, record.args = red, None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = "".join(
+                traceback.format_exception(*record.exc_info)).rstrip("\n")
+        if record.exc_text:
+            record.exc_text = redact(record.exc_text)
+    except Exception:
+        pass
+
+
 class RedactSecrets(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            if isinstance(record.msg, str) and "=" in record.msg:
-                record.msg = _SECRET.sub(r"\1***", record.msg)
-            if record.args:
-                args = tuple(_SECRET.sub(r"\1***", a) if isinstance(a, str) else a
-                             for a in (record.args if isinstance(record.args, tuple)
-                                       else (record.args,)))
-                record.args = args if isinstance(record.args, tuple) else args[0]
-        except Exception:
-            pass
+        _redact_record(record)
         return True
 
 
+_FACTORY_INSTALLED = False
+
+
 def install_log_redaction():
-    """루트 핸들러와 urllib3에 비밀값 마스킹을 겁니다. 로깅 설정 뒤에 부르세요."""
+    """비밀값 마스킹을 겁니다. 로깅 설정 뒤에 부르세요.
+
+    핸들러 필터만으로는 부족합니다 — 뒤에서 `logging.basicConfig(force=True)`
+    를 다시 부르면(run_weekly·run_us_monthly_orders의 하위 명령들이 그렇게
+    합니다) 핸들러가 새로 만들어지면서 필터가 사라집니다. 그래서 **기록이
+    만들어지는 순간**(LogRecordFactory)에도 가립니다. 핸들러를 몇 번
+    갈아 끼워도 유지됩니다.
+    """
+    global _FACTORY_INSTALLED
     f = RedactSecrets()
     for h in logging.getLogger().handlers:
         h.addFilter(f)
     for name in ("urllib3", "urllib3.connectionpool", "requests"):
         logging.getLogger(name).addFilter(f)
+    if not _FACTORY_INSTALLED:
+        base = logging.getLogRecordFactory()
+
+        def factory(*args, **kwargs):
+            rec = base(*args, **kwargs)
+            _redact_record(rec)
+            return rec
+
+        logging.setLogRecordFactory(factory)
+        _FACTORY_INSTALLED = True
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")

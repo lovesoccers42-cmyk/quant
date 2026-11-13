@@ -599,7 +599,10 @@ def perf_strip() -> None:
                 asof = r.get("주가기준일") or asof
 
     # 입출금이 빠져 TWR을 못 믿는 계좌가 있으면 그 사실을 먼저 알립니다.
-    bad = [(f"{r['계좌']}·{PERF_MARKETS[r['시장']]['라벨']}", r)
+    # 'alt'가 아니라 화면의 계좌 이름(배우자)으로 적습니다.
+    names = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
+    bad = [(f"{names.get(r['계좌'], r['계좌'])}·"
+            f"{PERF_MARKETS[r['시장']]['라벨']}", r)
            for r in rows if r["이유"] == "입출금누락"]
     if bad:
         st.warning(
@@ -983,14 +986,24 @@ def render_perf(market: str) -> None:
 
             def _state(a):
                 r = RS[a]
+                # 여기 없는 이유는 '측정 전'으로 떨어집니다. 입출금누락이
+                # 빠져 있어서 신뢰 점검이 숨긴 계좌가 '측정 전'으로만
+                # 보였습니다(2026-11-13) — 이유를 늘리면 여기도 같이.
                 return ("측정 중" if r["가능"] else
                         {"한점": f"재동기화 1회 — 다음 주부터",
                          "계좌기록없음": "보유 기록 없음",
                          "기록없음": "기록 없음",
-                         "주가없음": "주가 없음"}.get(r["이유"], "측정 전"))
+                         "주가없음": "주가 없음",
+                         "설정없음": "설정 전",
+                         "입출금누락": _WHY["입출금누락"]}.get(r["이유"], "측정 전"))
 
+            hidden = {a: r for a, r in RS.items() if r["이유"] == "입출금누락"}
             row("상태", _state)
-            row("수익률 (시간가중)", lambda a: _pct(RS[a].get("수익률")))
+            if hidden:
+                row("숨긴 사유", lambda a: (perf.trust_brief(RS[a].get("신뢰"))
+                                        if a in hidden else "–"))
+            row("수익률 (시간가중)", lambda a: ("숨김" if a in hidden
+                                          else _pct(RS[a].get("수익률"))))
             row("수익률 (평단 기준)",
                 lambda a: _pct((RS[a].get("평단") or {}).get("수익률")))
             row(f"{P['지수']} 대비", lambda a: (
@@ -1042,6 +1055,14 @@ def render_perf(market: str) -> None:
                 items, columns=["항목"] + [LBL[a] for a in RS]
             ).set_index("항목")
             st.dataframe(summary, use_container_width=True)
+
+            if hidden:
+                st.warning(
+                    "**시간가중수익률을 숨긴 계좌가 있습니다** — "
+                    + " / ".join(f"{LBL[a]}: {r.get('신뢰사유', '')}"
+                                 for a, r in hidden.items())
+                    + "\n\n그 날짜 앞뒤의 체결내역(체결가·체결수량·체결일)과 "
+                      "보유목록이 서로 맞는지 확인해 inbox에 올리면 복구됩니다.")
 
             asof = next((r["주가기준일"] for r in RS.values()
                          if r.get("주가기준일") is not None), None)

@@ -58,7 +58,10 @@ def _run_step(step: Step) -> StepResult:
             return res
         except Exception:
             res.duration_sec = round(time.time() - t0, 1)
-            res.error = traceback.format_exc(limit=3)
+            # traceback에는 요청 URL이 실립니다(DART는 인증키가 쿼리에 있음).
+            # 이 문자열은 로그 말고도 공개 릴리스의 실행 요약 JSON, 메일,
+            # LLM 리포트로 나가므로 여기서 가립니다.
+            res.error = http_util.redact(traceback.format_exc(limit=3))
             log.warning("[%s] %d차 시도 실패:\n%s", step.name, attempt, res.error)
             if attempt <= config.MAX_RETRIES:
                 time.sleep(config.RETRY_WAIT)
@@ -149,7 +152,7 @@ def run(mode: str = "daily", market: str = "kr") -> int:
     try:
         steps = build_steps(market, mode)
     except Exception:
-        tb = traceback.format_exc(limit=3)
+        tb = http_util.redact(traceback.format_exc(limit=3))
         log.error("파이프라인 구성 실패:\n%s", tb)
         notify.send_report(f"[퀀트 에이전트] {label} 실패 — {datetime.now():%m/%d}",
                            f"파이프라인 구성 단계에서 오류 발생:\n{tb}")
@@ -181,6 +184,7 @@ def run(mode: str = "daily", market: str = "kr") -> int:
         log.warning("LLM 리포트 생성 실패(%s) → 기본 리포트 사용", e)
         report = _fallback_report(label, results)
 
+    report = http_util.redact(report)
     log.info("리포트:\n%s", report)
 
     has_fail = any(r.status == "fail" for r in results)
@@ -200,8 +204,10 @@ def run(mode: str = "daily", market: str = "kr") -> int:
         "steps": [asdict(r) for r in results],
         "store": store.summary(MARKET_TABLES.get(market)),
     }
+    # 이 파일은 공개 릴리스에 올라갑니다 — 통째로 한 번 더 가립니다.
     (config.OUTPUT_DIR / f"run_{market}_latest.json").write_text(
-        json.dumps(summary, ensure_ascii=False, default=str, indent=2), encoding="utf-8")
+        http_util.redact(json.dumps(summary, ensure_ascii=False, default=str,
+                                    indent=2)), encoding="utf-8")
 
     # 엑셀 첨부해서 메일 발송
     attachments = []

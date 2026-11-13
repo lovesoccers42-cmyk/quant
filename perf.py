@@ -276,9 +276,10 @@ def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
     크게 움직였는데 그날 입출금이 0이면, 설명되지 않은 점프입니다. 하루에
     8%는 100종목 포트폴리오가 주가만으로 움직이기 어려운 폭입니다.
 
-    돌려주는 것: {"신뢰": bool, "점프일수": n, "점프합": 금액, "사유": str}
+    돌려주는 것: {"신뢰": bool, "점프일수": n, "점프합": 금액, "날짜": [Timestamp],
+                 "사유": str}
     """
-    out = {"신뢰": True, "점프일수": 0, "점프합": 0.0, "사유": ""}
+    out = {"신뢰": True, "점프일수": 0, "점프합": 0.0, "날짜": [], "사유": ""}
     if t is None or t.empty or len(t) < 2:
         out["신뢰"] = False
         out["사유"] = "거래일이 2일 미만 — 아직 재질 수 없습니다"
@@ -302,6 +303,7 @@ def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
     n = int(unexplained.sum())
     out["점프일수"] = n
     out["점프합"] = float(resid[unexplained].abs().sum())
+    out["날짜"] = list(t.index[unexplained])
     if n:
         out["신뢰"] = False
         days = ", ".join(f"{d:%m/%d}" for d in t.index[unexplained][:4])
@@ -311,6 +313,25 @@ def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
             f"체결내역이 원장에 안 들어왔거나, 체결일이 틀렸거나, 보유목록이 "
             f"일부만 올라왔을 때 생깁니다 — 그만큼이 수익으로 계산됩니다.")
     return out
+
+
+def trust_brief(trust: dict | None) -> str:
+    """twr_trust 결과를 표 한 칸에 들어갈 길이로 줄입니다.
+
+    요약 표의 칸은 좁아서 twr_trust의 '사유' 전문이 들어가지 않습니다.
+    그렇다고 사유를 빼면 '측정 전'과 구분이 안 됩니다(2026-11-13 실측:
+    배우자 계좌가 입출금누락으로 숨겨졌는데 표에는 '측정 전'으로만
+    보였습니다). 날짜와 금액만 남깁니다 — 무엇을 고칠지는 그걸로 압니다.
+    """
+    if not trust or trust.get("신뢰", True):
+        return ""
+    days = trust.get("날짜") or []
+    if not days:
+        return str(trust.get("사유") or "")[:40]
+    shown = ", ".join(f"{pd.Timestamp(d):%m/%d}" for d in days[:3])
+    more = f" 외 {len(days) - 3}일" if len(days) > 3 else ""
+    return (f"설명 안 되는 평가액 변화 {shown}{more} "
+            f"(합 {float(trust.get('점프합') or 0):,.0f})")
 
 
 def index_benchmark(px: pd.DataFrame, shares: pd.Series, *,
