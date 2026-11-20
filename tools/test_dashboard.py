@@ -450,6 +450,29 @@ else:
     check(warns.count("10/19") >= 2,
           "맨 위 상자와 성과 탭 경고 모두 날짜를 보여 줌")
 
+    # ── 4c. 수익률 배틀 — 측정이 다르면 섞어서 승패를 가리지 않는가 ──
+    # 위 상황(상수는 시간가중, 배우자는 숨김)에서 상수 시간가중 vs 배우자
+    # 평단을 맞대면 승패가 거짓입니다. 둘 다 평단으로 겨루고 그렇게 밝혀야 합니다.
+    print("\n[수익률 배틀 — 같은 측정끼리만 겨루는가]")
+    md = " ".join(m.value for m in at2.markdown)
+    check("qb-panel" in md and "수익률 배틀" in " ".join(
+        h.value for h in at2.subheader), "스코어보드가 그려짐")
+    check("두 계좌 모두 평단 기준으로 비교" in md,
+          "한쪽 시간가중이 숨겨지면 둘 다 평단 기준으로 겨루고 밝힘")
+    check("지수보다" not in md,
+          "평단끼리 겨룰 때는 '지수보다'(시간가중 전용 비교)를 띄우지 않음")
+    check("주간 라운드" not in md, "라운드는 둘 다 시간가중일 때만")
+
+# 배틀 계산(앞선 날·역전·라운드)은 따로 점검합니다 — 워크플로 파일을 고치지
+# 않아도 이 점검을 돌리는 곳이면 같이 돌도록 여기서 부릅니다.
+import subprocess as _sp  # noqa: E402
+_r = _sp.run([sys.executable, os.path.join(os.path.dirname(__file__),
+                                           "test_battle.py")],
+             capture_output=True, text=True)
+check(_r.returncode == 0,
+      "배틀 계산 점검 (tools/test_battle.py)"
+      + ("" if _r.returncode == 0 else "\n" + _r.stdout[-1500:]))
+
 print()
 if FAIL:
     print(f"실패 {FAIL}건 — 고치기 전에는 대시보드를 배포하지 마세요.")

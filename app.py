@@ -552,6 +552,597 @@ _WHY = {"설정없음": "설정 전", "기록없음": "기록 전",
         "입출금누락": "체결내역 필요"}
 
 
+# ── 선 색 — 상수 / 배우자 / 지수 ─────────────────────────────
+#
+# 2026-11-20 바꿈 — 상승 빨강 ▲ / 하락 파랑 ▼ (한국 증시 관례)를 들이면서
+# 상수 파랑이 '손실' 색과 겹쳤습니다. 그래서 두 사람을 팀 색으로 다시
+# 정했습니다: 상수 보라 / 배우자 민트 / 지수 회색 점선(심판 — 색으로 다투지
+# 않고 선 모양으로 구분). 두 테마에서 **같은 값**을 씁니다 — 차트는 CSS를
+# 못 쓰고, 파이썬 쪽 테마 감지(st.context.theme)는 첫 실행에 '밝음'으로
+# 잘못 나옵니다(2026-11-20 실측). validate_palette.js: 밝은(#fff)·어두운
+# (#171614) 배경 모두 CVD ΔE 20.7, 일반시야 27.1, 명암비 3:1 이상 통과.
+def series_trio() -> dict:
+    return {"상수": "#7a6ae0", "배우자": "#169d6c", "지수": "#8f8e88"}
+
+
+# ── 수익률 배틀 — 두 계좌 맞대결 화면 ─────────────────────────
+# 숫자는 전부 account_perf()가 이미 계산한 것만 씁니다. 여기서 새로 재는
+# 것은 '누가 앞섰나'뿐이고, 그 계산은 perf.head_to_head / weekly_rounds
+# (tools/test_battle.py로 검증)에 있습니다.
+#
+# 공정성 규칙: 두 계좌를 **같은 측정**으로 잴 수 있을 때만 승자를 가립니다.
+#   둘 다 시간가중 → 시간가중으로 승부 (입금액·입금 시점이 달라도 공정)
+#   한쪽이라도 시간가중이 숨겨졌고 둘 다 평단 기준이 있으면 → 평단으로 승부
+#   그것도 안 되면 → 판정 보류. 시간가중과 평단을 맞대면 승패가 거짓입니다.
+import html as _html  # noqa: E402
+
+_BATTLE_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Black+Han+Sans&display=swap');
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css');
+.qb {
+  /* 팀 색은 두 테마에서 같은 값 — 밝은·어두운 배경 모두 3:1 이상, 색맹 검사 통과.
+     상승/하락과 보조 글씨는 .stApp의 color-scheme을 따라 light-dark()로 고릅니다
+     (파이썬 쪽 테마 감지는 첫 실행에 '밝음'으로 잘못 나와서 쓰지 않습니다). */
+  --a:#7a6ae0; --b:#169d6c; --idx:#8f8e88;
+  --up:#d03b3b; --dn:#256abf;
+  --up:light-dark(#d03b3b,#ef6b6b); --dn:light-dark(#256abf,#5b9cf0);
+  --muted:rgba(110,110,110,.95);
+  --muted:color-mix(in srgb,currentColor 64%,transparent);
+  --line:rgba(128,128,128,.25);
+  --line:color-mix(in srgb,currentColor 14%,transparent);
+  --panel:rgba(122,106,224,.05);
+  font-family:'Pretendard Variable',Pretendard,-apple-system,'Apple SD Gothic Neo',
+              'Malgun Gothic',sans-serif;
+  font-variant-numeric:tabular-nums; line-height:1.45;
+}
+.qb .up {color:var(--up);} .qb .dn {color:var(--dn);}
+.qb-panel {border:1px solid var(--line); border-radius:16px;
+           padding:1rem 1.05rem .85rem; background:var(--panel); margin-bottom:.6rem;}
+.qb-mkt {font-size:.8rem; font-weight:700; color:var(--muted); margin-bottom:.15rem;}
+.qb-board {display:grid; grid-template-columns:1fr auto 1fr; align-items:end; column-gap:.5rem;}
+.qb-side.b {text-align:right;}
+.qb-who {display:flex; align-items:center; gap:.35rem; font-weight:700; font-size:.95rem;}
+.qb-side.b .qb-who {justify-content:flex-end;}
+.qb-dot {width:.7rem; height:.7rem; border-radius:50%; display:inline-block; flex:none;}
+.qb-dot.a {background:var(--a);} .qb-dot.b {background:var(--b);}
+.qb-dash {display:inline-block; width:1.05rem; height:0; border-top:2.5px dashed var(--idx);
+           vertical-align:.22em; margin-right:.15rem;}
+.qb-score {font-family:'Black Han Sans','Pretendard Variable',sans-serif; font-weight:400;
+           font-size:clamp(2rem,9.5vw,3.1rem); line-height:1.02; margin:.2rem 0 .15rem;
+           letter-spacing:-.01em;}
+.qb-score small {font-size:.48em; margin-left:.06em;}
+.qb-score.na {color:var(--muted);}
+.qb-sub {font-size:.8rem; color:var(--muted);}
+.qb-sub b {font-weight:700;}
+.qb-vs {font-family:'Black Han Sans',sans-serif; font-size:1.05rem; color:var(--muted);
+        padding-bottom:1.55rem;}
+.qb-rope {position:relative; display:flex; gap:2px; height:.62rem; margin:.95rem 0 .55rem;}
+.qb-rope > span {display:block; height:100%;}
+.qb-rope .ra {background:var(--a); border-radius:.31rem 0 0 .31rem;}
+.qb-rope .rb {background:var(--b); border-radius:0 .31rem .31rem 0; flex:1;}
+.qb-rope .mid {position:absolute; left:50%; top:-.28rem; bottom:-.28rem; width:2px;
+               margin-left:-1px; background:var(--muted); opacity:.55;}
+.qb-rope .knot {position:absolute; top:50%; width:1.1rem; height:1.1rem; border-radius:50%;
+                background:Canvas; border:3px solid currentColor;
+                transform:translate(-50%,-50%);}
+.qb-verdict {text-align:center; font-weight:800; font-size:1.02rem;}
+.qb-ref {text-align:center; font-size:.82rem; color:var(--muted); margin-top:.1rem;}
+.qb.mini .qb-panel {padding:.7rem .85rem .6rem;}
+.qb.mini .qb-score {font-size:clamp(1.45rem,6.4vw,2rem);}
+.qb.mini .qb-vs {font-size:.85rem; padding-bottom:.55rem;}
+.qb.mini .qb-rope {height:.42rem; margin:.6rem 0 .4rem;}
+.qb.mini .qb-rope .knot {width:.85rem; height:.85rem; border-width:2.5px;}
+.qb.mini .qb-verdict {font-size:.9rem;}
+.qb-stats {margin-top:.85rem; border-top:1px solid var(--line); padding-top:.35rem;}
+.qb-row {display:grid; grid-template-columns:5.2rem 1fr 5.2rem; align-items:center;
+         row-gap:.28rem; padding:.42rem 0;}
+.qb-row + .qb-row {border-top:1px dashed var(--line);}
+.qb-row .v {font-weight:600; color:var(--muted); font-size:.95rem;}
+.qb-row .v.r {text-align:right;}
+.qb-row .v.win {color:inherit; font-weight:800;}
+.qb-row .v.win.up {color:var(--up);} .qb-row .v.win.dn {color:var(--dn);}
+.qb-row .lab {text-align:center; font-size:.8rem; color:var(--muted);}
+.qb-split {grid-column:1/-1; display:flex; gap:2px; height:5px;}
+.qb-split span {display:block; height:100%;}
+.qb-split .sa {background:var(--a); border-radius:3px 0 0 3px;}
+.qb-split .sb {background:var(--b); border-radius:0 3px 3px 0; flex:1;}
+.qb .qb-rounds {width:100%; border-collapse:collapse; font-size:.88rem; border:none; margin:0;}
+.qb .qb-rounds th, .qb .qb-rounds td {border-left:none; border-right:none; border-top:none;}
+.qb-rounds th {font-weight:600; font-size:.78rem; color:var(--muted); text-align:right;
+               padding:.25rem .3rem; border-bottom:1px solid var(--line);}
+.qb-rounds th:first-child, .qb-rounds td:first-child {text-align:left;}
+.qb-rounds td {text-align:right; padding:.42rem .3rem; border-bottom:1px solid var(--line);}
+.qb-rounds td.wk b {font-weight:800;}
+.qb-rounds td.wk small {display:block; color:var(--muted); font-size:.74rem;}
+.qb-rounds td.win {font-weight:800;}
+.qb-rounds td.win::after {content:''; display:inline-block; width:.5rem; height:.5rem;
+                          border-radius:50%; margin-left:.3rem; vertical-align:.08em;}
+.qb-rounds td.win.a::after {background:var(--a);} .qb-rounds td.win.b::after {background:var(--b);}
+.qb-rounds td.idx {color:var(--muted);}
+.qb-rounds tr.live td {border-bottom-style:dashed;}
+.qb-tally {font-size:.85rem; color:var(--muted); margin:.1rem 0 .5rem;}
+.qb-tally b {color:inherit;}
+.qb-duo {display:grid; grid-template-columns:1fr 1fr; column-gap:1.1rem;}
+.qb-duo .hd {display:flex; align-items:center; gap:.35rem; font-weight:800; margin-bottom:.2rem;}
+.qb-duo .grp {font-size:.78rem; color:var(--muted); margin:.55rem 0 .15rem; font-weight:600;}
+.qb-it {display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:.4rem;
+        padding:.32rem 0; border-bottom:1px solid var(--line);}
+.qb-it .nm {overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600;}
+.qb-it .pc {font-weight:800;}
+.qb-it .am {grid-column:1/-1; font-size:.74rem; color:var(--muted);}
+.qb-it .who {display:inline-flex; gap:2px; margin-right:.3rem; vertical-align:.05em;}
+.qb-it .who .qb-dot {width:.55rem; height:.55rem;}
+.qb-empty {font-size:.82rem; color:var(--muted); padding:.3rem 0;}
+.qb-legend {display:flex; flex-wrap:wrap; gap:.3rem 1rem; font-size:.85rem; font-weight:600;}
+.qb-legend > span {display:inline-flex; align-items:center; gap:.3rem; white-space:nowrap;}
+.qb-legend .qb-dash {margin-right:0;}
+@media (max-width:380px) {
+  .qb-duo {grid-template-columns:1fr;} .qb-duo > div + div {margin-top:.9rem;}
+  .qb-row {grid-template-columns:4.4rem 1fr 4.4rem;}
+}
+@media (prefers-reduced-motion:no-preference) {
+  .qb-rope .knot {animation:qb-pull .7s cubic-bezier(.3,1.4,.5,1) both;}
+  @keyframes qb-pull {from {left:50%;}}
+}
+</style>
+"""
+
+
+def _qb(html_body: str, *, mini: bool = False) -> None:
+    cls = "qb" + (" mini" if mini else "")
+    st.markdown(f'<div class="{cls}">{html_body}</div>', unsafe_allow_html=True)
+
+
+def _ga(name: str) -> str:
+    """이름 + 주격 조사 (상수가 / 은진이)."""
+    if not name:
+        return name
+    ch = name[-1]
+    if "가" <= ch <= "힣":
+        return name + ("이" if (ord(ch) - 0xAC00) % 28 else "가")
+    return name + "가"
+
+
+def _sgn(v, p: int = 2, unit: str = "%", scale: float = 100.0) -> str:
+    """부호 붙은 숫자 — 마이너스는 진짜 빼기표(−)."""
+    if v is None or not pd.notna(v):
+        return "–"
+    x = v * scale
+    s = f"{abs(x):,.{p}f}{unit}"
+    return ("+" if x > 0 else "−" if x < 0 else "") + s
+
+
+def _cls(v) -> str:
+    if v is None or not pd.notna(v) or v == 0:
+        return ""
+    return "up" if v > 0 else "dn"
+
+
+def _arrow(v, p: int = 1) -> str:
+    if v is None or not pd.notna(v):
+        return "–"
+    return ("▲" if v > 0 else "▼" if v < 0 else "") + f"{abs(v) * 100:.{p}f}%"
+
+
+def duel(RS: dict, market: str) -> dict:
+    """두 계좌를 같은 측정으로 맞댈 수 있는지 정하고, 맞대 봅니다."""
+    perf = fresh_perf()
+    keys = list(ACCOUNTS.values())
+    names = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
+    d = {"mode": None, "keys": keys, "names": names, "market": market}
+    if len(keys) != 2:
+        return d
+    ka, kb = keys
+    ra, rb = RS[ka], RS[kb]
+    cba, cbb = (ra.get("평단") or {}), (rb.get("평단") or {})
+    if ra["가능"] and rb["가능"]:
+        d.update(mode="twr", va=ra["수익률"], vb=rb["수익률"])
+        d["idx"] = next((r["지수"] for r in (ra, rb)
+                         if r.get("지수") is not None), None)
+        d["h2h"] = perf.head_to_head(ra["tw"]["누적"], rb["tw"]["누적"])
+        curves = {ka: ra["tw"]["누적"], kb: rb["tw"]["누적"]}
+        bench = next((r["bench"] for r in (ra, rb)
+                      if not r.get("bench", pd.DataFrame()).empty), None)
+        if bench is not None:
+            curves["지수"] = bench["누적"]
+        d["rounds"] = perf.weekly_rounds(curves, accounts=(ka, kb))
+        d["today"] = (float(ra["tw"]["일수익률"].iloc[-1]),
+                      float(rb["tw"]["일수익률"].iloc[-1]))
+        d["asof"] = max(ra["tw"].index[-1], rb["tw"].index[-1])
+    elif (cba.get("수익률") is not None and cbb.get("수익률") is not None):
+        d.update(mode="평단", va=cba["수익률"], vb=cbb["수익률"])
+    if d["mode"]:
+        gap = d["va"] - d["vb"]
+        d["gap"] = gap
+        d["leader"] = ka if gap > 1e-12 else kb if gap < -1e-12 else None
+    return d
+
+
+def _side_html(d: dict, RS: dict, k: str, side: str, *, mini: bool) -> str:
+    n = _html.escape(d["names"][k])
+    crown = " 👑" if d.get("leader") == k else ""
+    r = RS[k]
+    if d["mode"]:
+        v = d["va"] if side == "a" else d["vb"]
+        score = (f'<div class="qb-score {_cls(v)}">{_sgn(v)[:-1]}'
+                 f'<small>%</small></div>')
+    else:
+        cb = (r.get("평단") or {}).get("수익률")
+        v = r["수익률"] if r["가능"] else cb
+        score = (f'<div class="qb-score {_cls(v)}">{_sgn(v)[:-1]}<small>%</small></div>'
+                 if v is not None else '<div class="qb-score na">–</div>')
+    sub = ""
+    if not mini:
+        if d["mode"] == "twr" and d.get("idx") is not None:
+            ex = v - d["idx"]
+            sub = (f'<div class="qb-sub">{PERF_MARKETS[d["market"]]["지수"]}보다 '
+                   f'<b class="{_cls(ex)}">{_sgn(ex, unit="%p")}</b></div>')
+        elif d["mode"] == "평단":
+            sub = '<div class="qb-sub">평단 기준</div>'
+        elif not d["mode"]:
+            why = ("평단 기준" if (not r["가능"] and (r.get("평단") or {})
+                                 .get("수익률") is not None)
+                   else _WHY.get(r["이유"], "측정 전") if not r["가능"] else "")
+            sub = f'<div class="qb-sub">{_html.escape(why)}</div>' if why else ""
+    dot = f'<span class="qb-dot {side}"></span>'
+    who = (f'{dot}{n}{crown}' if side == "a" else f'{crown.strip()} {n}{dot}')
+    return f'<div class="qb-side {side}"><div class="qb-who">{who}</div>{score}{sub}</div>'
+
+
+def scoreboard_html(d: dict, RS: dict, *, mini: bool = False,
+                    label: str = "", stats: str = "") -> str:
+    ka, kb = d["keys"]
+    head = f'<div class="qb-mkt">{_html.escape(label)}</div>' if label else ""
+    board = (f'<div class="qb-board">{_side_html(d, RS, ka, "a", mini=mini)}'
+             f'<div class="qb-vs">VS</div>'
+             f'{_side_html(d, RS, kb, "b", mini=mini)}</div>')
+    rope = verdict = ref = ""
+    if d["mode"]:
+        # 줄다리기 — 앞선 쪽 색이 더 넓게. ±4%p에서 끝까지 갑니다(고정 눈금:
+        # 작은 격차를 크게 부풀려 보이지 않게).
+        share = 50 + max(-1.0, min(1.0, d["gap"] * 100 / 4.0)) * 45
+        rope = (f'<div class="qb-rope" role="img" aria-label="격차 '
+                f'{abs(d["gap"]) * 100:.2f}%p"><span class="ra" '
+                f'style="width:{share:.1f}%"></span><span class="rb"></span>'
+                f'<span class="mid"></span><span class="knot" '
+                f'style="left:{share:.1f}%"></span></div>')
+        if d["leader"]:
+            ln = d["names"][d["leader"]]
+            bits = [f'{_html.escape(_ga(ln))} {abs(d["gap"]) * 100:.2f}%p 앞서는 중']
+            h = d.get("h2h") or {}
+            st_ = h.get("연속", {})
+            if not mini and st_.get("일수", 0) >= 2:
+                bits.append(f'{st_["일수"]}거래일째 리드')
+            verdict = f'<div class="qb-verdict">{", ".join(bits)}</div>'
+        else:
+            verdict = '<div class="qb-verdict">동점</div>'
+        if d["mode"] == "twr" and d.get("idx") is not None:
+            beat = [d["names"][k] for k, v in ((ka, d["va"]), (kb, d["vb"]))
+                    if v > d["idx"]]
+            ix = PERF_MARKETS[d["market"]]["지수"]
+            if len(beat) == 2:
+                tail = f"두 사람 모두 {ix}를 이기는 중"
+            elif beat:
+                tail = f'{_ga(beat[0])} {ix}를 이기는 중'
+            else:
+                tail = f"둘 다 {ix}에 밀리는 중"
+            ref = (f'<div class="qb-ref"><span class="qb-dash"></span>{ix} '
+                   f'<b class="{_cls(d["idx"])}">{_sgn(d["idx"])}</b>, '
+                   f'{_html.escape(tail)}</div>')
+        elif d["mode"] == "평단":
+            ref = '<div class="qb-ref">두 계좌 모두 평단 기준으로 비교했습니다</div>'
+    else:
+        stuck = [d["names"][k] for k in (ka, kb) if not RS[k]["가능"]]
+        verdict = (f'<div class="qb-ref">판정 보류: '
+                   f'{_html.escape(", ".join(stuck))} 계좌를 같은 기준으로 잴 수 '
+                   f'없습니다</div>' if stuck else "")
+    return f'<div class="qb-panel">{head}{board}{rope}{verdict}{ref}{stats}</div>'
+
+
+def _stat_row(label: str, a_txt: str, b_txt: str, a_val, b_val, *,
+              split: bool = False, color: bool = False) -> str:
+    """중계 화면식 한 줄 — 가운데 항목, 좌우 값, 이긴 쪽이 진하게."""
+    wa = wb = ""
+    if a_val is not None and b_val is not None and pd.notna(a_val) and pd.notna(b_val):
+        if a_val > b_val:
+            wa = " win"
+        elif b_val > a_val:
+            wb = " win"
+    ca = f" {_cls(a_val)}" if color else ""
+    cb = f" {_cls(b_val)}" if color else ""
+    bar = ""
+    tot = (a_val or 0) + (b_val or 0) if split else 0
+    if split and tot > 0:
+        sa = 100 * (a_val or 0) / tot
+        bar = (f'<div class="qb-split"><span class="sa" style="width:{sa:.1f}%">'
+               f'</span><span class="sb"></span></div>')
+    return (f'<div class="qb-row"><div class="v{wa}{ca}">{a_txt}</div>'
+            f'<div class="lab">{_html.escape(label)}</div>'
+            f'<div class="v r{wb}{cb}">{b_txt}</div>{bar}</div>')
+
+
+def stats_html(d: dict, RS: dict) -> str:
+    perf = fresh_perf()
+    ka, kb = d["keys"]
+    rows = []
+    rd = d.get("rounds")
+    if rd is not None and len(rd):
+        wa, wb = int((rd["승자"] == ka).sum()), int((rd["승자"] == kb).sum())
+        rows.append(_stat_row("주간 라운드 승", f"{wa}승", f"{wb}승", wa, wb,
+                              split=True))
+    h = d.get("h2h")
+    if h and (h["앞선날"]["a"] or h["앞선날"]["b"]):
+        la, lb = h["앞선날"]["a"], h["앞선날"]["b"]
+        rows.append(_stat_row("앞선 날", f"{la}일", f"{lb}일", la, lb, split=True))
+    if d.get("today"):
+        ta, tb = d["today"]
+        rows.append(_stat_row(f"{d['asof']:%m/%d} 하루", _sgn(ta), _sgn(tb),
+                              ta, tb, color=True))
+    hl = {k: perf.pnl_highlights(RS[k].get("pnl", pd.DataFrame())) for k in (ka, kb)}
+    if all(hl[k]["계산됨"] for k in (ka, kb)):
+        ra_ = hl[ka]["플러스"] / hl[ka]["계산됨"]
+        rb_ = hl[kb]["플러스"] / hl[kb]["계산됨"]
+        rows.append(_stat_row("수익 중인 종목",
+                              f'{hl[ka]["플러스"]}/{hl[ka]["계산됨"]}',
+                              f'{hl[kb]["플러스"]}/{hl[kb]["계산됨"]}', ra_, rb_))
+    if h and h.get("역전"):
+        rows.append(f'<div class="qb-row"><div></div><div class="lab">역전 '
+                    f'<b>{h["역전"]}번</b></div><div></div></div>')
+    return f'<div class="qb-stats">{"".join(rows)}</div>' if rows else ""
+
+
+def _chart_race(d: dict, RS: dict, market: str):
+    """누적 수익률 레이스 — 두 사람 + 지수(점선), 선 끝에 이름과 값."""
+    import altair as alt
+    P = PERF_MARKETS[market]
+    trio = series_trio()
+    ka, kb = d["keys"]
+    parts = []
+    for k in (ka, kb):
+        tw = RS[k]["tw"]
+        parts.append(pd.DataFrame({"날짜": tw.index, "구분": d["names"][k],
+                                   "수익률": (tw["누적"] - 1) * 100}))
+    bench = next((RS[k]["bench"] for k in (ka, kb)
+                  if not RS[k].get("bench", pd.DataFrame()).empty), None)
+    if bench is not None:
+        parts.append(pd.DataFrame({"날짜": bench.index, "구분": P["지수"],
+                                   "수익률": (bench["누적"] - 1) * 100}))
+    long = pd.concat(parts, ignore_index=True)
+    order = [d["names"][ka], d["names"][kb]] + ([P["지수"]] if bench is not None else [])
+    colors = [trio["상수"], trio["배우자"], trio["지수"]][:len(order)]
+    t0, t1 = long["날짜"].min(), long["날짜"].max()
+    # 끝점이 잘리지 않을 만큼만 여백. 눈금은 데이터가 있는 날까지만 찍습니다
+    # — 빈 칸에 미래 날짜가 찍히면 예측처럼 읽힙니다.
+    pad = (t1 - t0) * 0.03 + pd.Timedelta(days=1)
+    ticks = [alt.DateTime(year=t.year, month=t.month, date=t.day)
+             for t in pd.date_range(t0, t1, freq="W-MON")]
+    x = alt.X("날짜:T", title=None, scale=alt.Scale(domain=[t0, t1 + pad]),
+              axis=alt.Axis(grid=False, values=ticks, format="%m/%d",
+                            labelOverlap=True))
+    base = alt.Chart(long).encode(
+        x=x, y=alt.Y("수익률:Q", title="누적 수익률 (%)",
+                     axis=alt.Axis(gridOpacity=0.35)),
+        color=alt.Color("구분:N", sort=order, title=None,
+                        scale=alt.Scale(domain=order, range=colors),
+                        legend=None),
+        strokeDash=alt.StrokeDash("구분:N", sort=order, legend=None,
+                                  scale=alt.Scale(domain=order,
+                                                  range=[[1, 0], [1, 0], [5, 4]][:len(order)])))
+    lines = base.mark_line(strokeWidth=2.4, interpolate="monotone")
+    zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+        strokeWidth=1, opacity=0.4).encode(y="y:Q")
+    last = long.sort_values("날짜").groupby("구분").tail(1).copy()
+    ends = alt.Chart(last).mark_circle(size=60, opacity=1).encode(
+        x="날짜:T", y="수익률:Q",
+        color=alt.Color("구분:N", sort=order, legend=None,
+                        scale=alt.Scale(domain=order, range=colors)))
+    hover = alt.selection_point(fields=["날짜"], nearest=True, on="pointerover",
+                                empty=False, clear="pointerout")
+    wide = long.pivot_table(index="날짜", columns="구분", values="수익률").reset_index()
+    tips = [alt.Tooltip("날짜:T", format="%m/%d")] + [
+        alt.Tooltip(f"{c}:Q", format="+.2f") for c in order if c in wide.columns]
+    rule = alt.Chart(wide).mark_rule(opacity=0.35).encode(
+        x="날짜:T",
+        opacity=alt.condition(hover, alt.value(0.45), alt.value(0)),
+        tooltip=tips).add_params(hover)
+    return (zero + lines + rule + ends).properties(height=270), long
+
+
+def _chart_gap(d: dict):
+    """격차 — 0 위는 상수 리드, 아래는 배우자 리드."""
+    import altair as alt
+    trio = series_trio()
+    g = d["h2h"]["격차"]
+    df = pd.DataFrame({"날짜": g.index, "격차": g.values})
+    df["위"] = df["격차"].clip(lower=0)
+    df["아래"] = df["격차"].clip(upper=0)
+    na, nb = d["names"][d["keys"][0]], d["names"][d["keys"][1]]
+    ticks = [alt.DateTime(year=t.year, month=t.month, date=t.day)
+             for t in pd.date_range(df["날짜"].min(), df["날짜"].max(), freq="W-MON")]
+    x = alt.X("날짜:T", title=None, axis=alt.Axis(grid=False, values=ticks,
+                                                 format="%m/%d", labelOverlap=True))
+    top = alt.Chart(df).mark_area(opacity=0.55, interpolate="monotone",
+                                  color=trio["상수"]).encode(x=x, y=alt.Y(
+                                      "위:Q", title="격차 (%p)"))
+    bot = alt.Chart(df).mark_area(opacity=0.55, interpolate="monotone",
+                                  color=trio["배우자"]).encode(x=x, y="아래:Q")
+    zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(opacity=0.5).encode(y="y:Q")
+    pts = alt.Chart(df).mark_circle(size=90, opacity=0).encode(
+        x=x, y="격차:Q",
+        tooltip=[alt.Tooltip("날짜:T", format="%m/%d"),
+                 alt.Tooltip("격차:Q", format="+.2f", title=f"{na} − {nb} (%p)")])
+    return (top + bot + zero + pts).properties(height=150)
+
+
+def rounds_html(d: dict) -> str:
+    rd = d.get("rounds")
+    if rd is None or rd.empty:
+        return ""
+    ka, kb = d["keys"]
+    na, nb = (_html.escape(d["names"][ka]), _html.escape(d["names"][kb]))
+    has_idx = "지수" in rd.columns
+    head = (f'<tr><th>라운드</th><th>{na}</th><th>{nb}</th>'
+            + ('<th>지수</th>' if has_idx else "") + '</tr>')
+    body = []
+    rd = rd.reset_index(drop=True)
+    for i in range(len(rd) - 1, max(-1, len(rd) - 9), -1):
+        r = rd.iloc[i]
+        live = bool(r["진행중"])
+        tag = "진행 중" if live else f'{r["시작"]:%m/%d}~{r["끝"]:%m/%d}'
+        win = r["승자"]
+        ca = f'win a' if (win == ka and not live) else ""
+        cb = f'win b' if (win == kb and not live) else ""
+        cells = (f'<td class="wk"><b>{i + 1}R</b><small>{tag}</small></td>'
+                 f'<td class="{ca} {_cls(r[ka])}">{_sgn(r[ka])}</td>'
+                 f'<td class="{cb} {_cls(r[kb])}">{_sgn(r[kb])}</td>')
+        if has_idx:
+            cells += f'<td class="idx">{_sgn(r["지수"])}</td>'
+        body.append(f'<tr class="{"live" if live else ""}">{cells}</tr>')
+    done = rd[~rd["진행중"].astype(bool)]
+    wa, wb = int((done["승자"] == ka).sum()), int((done["승자"] == kb).sum())
+    tally = (f'<div class="qb-tally">끝난 라운드 전적 <b>{na} {wa}승</b> : '
+             f'<b>{nb} {wb}승</b>')
+    if has_idx and len(done):
+        both = int(((done[ka] > done["지수"]) & (done[kb] > done["지수"])).sum())
+        tally += f', 둘 다 지수를 이긴 주 {both}번'
+    tally += '</div>'
+    return f'{tally}<table class="qb-rounds">{head}{"".join(body)}</table>'
+
+
+def _nm(r) -> str:
+    n = r.get("종목명")
+    return str(n) if n is not None and pd.notna(n) and str(n).strip() else str(r["종목코드"])
+
+
+def highlights_html(d: dict, RS: dict, market: str) -> str:
+    perf = fresh_perf()
+    ka, kb = d["keys"]
+    _dp = 0 if market == "kr" else 2
+    unit = "원" if market == "kr" else ""
+    pre = "" if market == "kr" else "$"
+
+    def money(v):
+        if v is None or not pd.notna(v):
+            return ""
+        s = f"{pre}{abs(v):,.{_dp}f}{unit}"
+        return ("+" if v > 0 else "−" if v < 0 else "") + s
+
+    def items(df):
+        if df is None or df.empty:
+            return '<div class="qb-empty">없음</div>'
+        out = []
+        for _, r in df.iterrows():
+            out.append(f'<div class="qb-it"><span class="nm">'
+                       f'{_html.escape(_nm(r))}</span>'
+                       f'<span class="pc {_cls(r["수익률"])}">{_arrow(r["수익률"])}</span>'
+                       f'<span class="am">{money(r["손익"])}</span></div>')
+        return "".join(out)
+
+    cols = []
+    for k, side in ((ka, "a"), (kb, "b")):
+        hl = perf.pnl_highlights(RS[k].get("pnl", pd.DataFrame()))
+        cols.append(f'<div><div class="hd"><span class="qb-dot {side}"></span>'
+                    f'{_html.escape(d["names"][k])}</div>'
+                    f'<div class="grp">🔥 효자 종목</div>{items(hl["효자"])}'
+                    f'<div class="grp">🧊 아픈 손가락</div>{items(hl["아픈"])}</div>')
+    return f'<div class="qb-duo">{"".join(cols)}</div>'
+
+
+def movers_html(d: dict, RS: dict) -> tuple[str, str]:
+    """두 계좌 보유 종목 전체에서 최근 거래일 급등·급락 (누가 들고 있는지 점으로)."""
+    perf = fresh_perf()
+    ka, kb = d["keys"]
+    own, names, px, asof = {}, {}, None, None
+    for k in (ka, kb):
+        pnl = RS[k].get("pnl", pd.DataFrame())
+        if pnl is None or pnl.empty:
+            continue
+        for c, (_, r) in zip(perf._code6(pnl["종목코드"]), pnl.iterrows()):
+            own.setdefault(c, set()).add(k)
+            names[c] = _nm(r)
+        kp = RS[k].get("px", pd.DataFrame())
+        if kp is not None and not kp.empty:
+            px = kp if px is None else px.combine_first(kp)
+    if px is None or not own:
+        return "", ""
+    mv = perf.last_day_moves(px, own.keys())
+    if mv.empty:
+        return "", ""
+    asof = px.index.max()
+
+    def row(c, v):
+        dots = "".join(f'<span class="qb-dot {s}"></span>'
+                       for k, s in ((ka, "a"), (kb, "b")) if k in own.get(c, ()))
+        return (f'<div class="qb-it"><span class="nm"><span class="who">{dots}</span>'
+                f'{_html.escape(names.get(c, c))}</span>'
+                f'<span class="pc {_cls(v)}">{_arrow(v)}</span></div>')
+
+    ups = mv[mv > 0].sort_values(ascending=False).head(3)
+    dns = mv[mv < 0].sort_values().head(3)
+    body = (f'<div class="qb-duo"><div><div class="grp">🚀 오늘 많이 오른 종목</div>'
+            + ("".join(row(c, v) for c, v in ups.items()) or '<div class="qb-empty">없음</div>')
+            + '</div><div><div class="grp">💥 오늘 많이 내린 종목</div>'
+            + ("".join(row(c, v) for c, v in dns.items()) or '<div class="qb-empty">없음</div>')
+            + '</div></div>')
+    return body, f"{asof:%m/%d}"
+
+
+def render_battle(RS: dict, market: str) -> None:
+    """성과 탭 맨 위 — 스코어보드, 매치 스탯, 레이스, 라운드, 하이라이트."""
+    d = duel(RS, market)
+    if len(d["keys"]) != 2:
+        return
+    st.subheader("⚔️ 수익률 배틀")
+    _qb(scoreboard_html(d, RS, stats=stats_html(d, RS) if d["mode"] else ""))
+    if d["mode"] == "twr":
+        st.caption("입금을 걷어낸 시간가중수익률로 겨루니 입금액이 달라도 "
+                   "공정합니다. 주간 라운드는 금요일 마감입니다.")
+
+        ch, long = _chart_race(d, RS, market)
+        st.markdown("**레이스**")
+        final = long.sort_values("날짜").groupby("구분")["수익률"].last()
+        ka, kb = d["keys"]
+        keys = [(d["names"][ka], '<span class="qb-dot a"></span>'),
+                (d["names"][kb], '<span class="qb-dot b"></span>'),
+                (PERF_MARKETS[market]["지수"], '<span class="qb-dash"></span>')]
+        _qb('<div class="qb-legend">' + "".join(
+            f'<span>{mark}{_html.escape(n)} <b class="{_cls(final[n])}">'
+            f'{_sgn(final[n] / 100, 1)}</b></span>'
+            for n, mark in keys if n in final.index) + '</div>')
+        st.altair_chart(ch, use_container_width=True)
+        if len(d["h2h"]["격차"]) >= 2:
+            st.markdown("**누가 앞섰나**")
+            ka, kb = d["keys"]
+            _qb(f'<div class="qb-sub"><span class="qb-dot a"></span> 위는 '
+                f'{_html.escape(_ga(d["names"][ka]))} 앞선 날, '
+                f'<span class="qb-dot b"></span> 아래는 '
+                f'{_html.escape(_ga(d["names"][kb]))} 앞선 날</div>')
+            st.altair_chart(_chart_gap(d), use_container_width=True)
+        st.download_button(
+            "곡선 데이터 CSV", to_csv(long, excel_safe=False),
+            file_name=f"curve_{market}_{tag}.csv", mime="text/csv",
+            key=f"dl_curve_{market}")
+        rh = rounds_html(d)
+        if rh:
+            st.markdown("**주간 라운드**")
+            _qb(rh)
+    elif d["mode"] == "평단":
+        st.caption("한쪽이라도 시간가중수익률을 쓸 수 없어서 평단 기준으로 "
+                   "겨룹니다. 레이스와 라운드는 두 계좌 모두 시간가중이 잡히면 "
+                   "나옵니다.")
+
+    st.markdown("**종목 하이라이트**")
+    _qb(highlights_html(d, RS, market))
+    mv, day = movers_html(d, RS)
+    if mv:
+        st.markdown(f"**{day} 급등·급락**")
+        _qb(mv)
+        st.caption("두 사람이 들고 있는 종목 중에서 골랐습니다. 앞의 점이 누구 "
+                   "종목인지 보여 줍니다.")
+    st.divider()
+
+
 def perf_strip() -> None:
     """화면 맨 위 — 계좌 수익률. 제일 먼저 보고 싶은 숫자입니다.
 
@@ -574,25 +1165,13 @@ def perf_strip() -> None:
     rows = [r for _, rs in per_market for _, r in rs]
     for mk, mrows in per_market:
         P = PERF_MARKETS[mk]
-        if len(per_market) > 1:
-            st.caption(f"**{P['라벨']}**")
-        cols = st.columns(len(mrows))
-        for col, (lab, r) in zip(cols, mrows):
-            name = lab.split(" (")[0]
-            cb = r.get("평단") or {}
-            if r["가능"]:
-                delta = (f"{(r['수익률'] - r['지수']) * 100:+.2f}%p "
-                         f"vs {P['지수']}"
-                         if r.get("지수") is not None else f"{r['일수']}일")
-                col.metric(name, f"{r['수익률'] * 100:+.2f}%", delta=delta)
-            elif cb:
-                # 시간가중수익률은 아직 못 내지만 평단 기준은 낼 수 있습니다.
-                # 어느 측정인지 반드시 밝혀 적습니다 — 섞으면 안 됩니다.
-                col.metric(name, f"{cb['수익률'] * 100:+.2f}%",
-                           delta="평단 기준", delta_color="off")
-            else:
-                col.metric(name, "–", delta=_WHY.get(r["이유"], "측정 전"),
-                           delta_color="off")
+        RSm = {r["계좌"]: r for _, r in mrows}
+        flag = "🇰🇷 " if mk == "kr" else "🇺🇸 "
+        # 같은 측정으로 잴 수 있을 때만 승자를 띄웁니다 (duel 참고).
+        # 시간가중과 평단을 맞대지 않습니다 — 섞으면 승패가 거짓입니다.
+        _qb(scoreboard_html(duel(RSm, mk), RSm, mini=True,
+                            label=flag + P["라벨"]), mini=True)
+        for lab, r in mrows:
             if mk == "kr":
                 # 안내문의 '마지막 종가'는 한국 기준으로 씁니다 — 두 시장의
                 # 휴장일이 달라 한 날짜로 뭉치면 둘 다 틀립니다.
@@ -635,6 +1214,7 @@ def perf_strip() -> None:
                 "6~9시간 미루기 때문입니다. 주말·휴장일은 갱신이 없습니다.")
 
 
+st.markdown(_BATTLE_CSS, unsafe_allow_html=True)
 st.title("📈 퀀트 에이전트")
 
 perf_strip()
@@ -881,19 +1461,7 @@ def series_colors() -> tuple[str, str]:
 # 계좌를 라디오로 전환하면 두 계좌를 나란히 못 봅니다. 비교가 목적이니
 # 한 화면에 같이 올리고, 금액이 큰 표만 계좌 열로 묶습니다.
 #
-# 선 색 — 검증된 3색(이 레포의 series_colors와 같은 팔레트의 1·2·3번 슬롯):
-#   상수 파랑 / 배우자 청록 / 지수 주황.
-# validate_palette.js 로 밝은·어두운 테마 모두 전 조합 통과(최악 CVD ΔE 9.2
-# 밝은 / 9.4 어두운, 일반시야 24.0 / 20.9). 밝은 테마에서 청록의 명암비가
-# 2.74:1로 3:1 아래라 **범례와 숫자 표를 반드시 함께** 둡니다(색만으로
-# 구분되지 않게) — 아래 요약 표가 그 역할을 합니다.
-def series_trio() -> dict:
-    try:
-        dark = st.get_option("theme.base") == "dark"
-    except Exception:
-        dark = False
-    return ({"상수": "#3987e5", "배우자": "#199e70", "지수": "#d95926"} if dark
-            else {"상수": "#2a78d6", "배우자": "#1baf7a", "지수": "#eb6834"})
+# 선 색은 위의 series_trio (상수 보라 / 배우자 민트 / 지수 회색 점선).
 
 
 def _won(v) -> str:
@@ -913,6 +1481,8 @@ def _money(v, market: str = "kr") -> str:
 
 def _pct(v, p: int = 2) -> str:
     return f"{v * 100:+.{p}f}%" if v is not None and pd.notna(v) else "–"
+
+
 
 
 def render_perf(market: str) -> None:
@@ -976,6 +1546,9 @@ def render_perf(market: str) -> None:
                 # 흔들리지 않습니다. 팔아서 끝난 종목의 실현손익까지 셉니다.
                 LP[a] = perf.ledger_pnl(r.get("trades", pd.DataFrame()), a,
                                         r.get("px", pd.DataFrame()))
+
+            # ── 0. 수익률 배틀 — 스코어보드·레이스·라운드·하이라이트 ──
+            render_battle(RS, market)
 
             # ── 1. 요약 — 한 표에 두 계좌 ─────────────────────
             st.subheader("한눈에")
@@ -1078,52 +1651,7 @@ def render_perf(market: str) -> None:
                            "이 기간의 수익률은 거의 전부 운입니다 — 전략 판단은 "
                            "아래 **규칙 준수**를 보세요.")
 
-            # ── 2. 곡선 — 두 계좌 + 지수를 한 그래프에 ────────
-            parts = []
-            for a, r in RS.items():
-                if r["가능"]:
-                    tw = r["tw"]
-                    parts.append(pd.DataFrame({
-                        "날짜": tw.index, "구분": LBL[a],
-                        "수익률": (tw["누적"] - 1) * 100}))
-            bench = next((r["bench"] for r in RS.values()
-                          if r["가능"] and not r.get("bench",
-                                                    pd.DataFrame()).empty), None)
-            if bench is not None:
-                parts.append(pd.DataFrame({
-                    "날짜": bench.index, "구분": P["지수"],
-                    "수익률": (bench["누적"] - 1) * 100}))
-
-            if parts and max(len(p) for p in parts) >= 2:
-                import altair as alt
-                trio = series_trio()
-                # 색은 검증된 3색 그대로 쓰고, 세 번째 계열의 **이름만**
-                # 시장에 맞춰 바꿉니다 (한국 '지수' / 미국 'SPY').
-                trio[P["지수"]] = trio["지수"]
-                long = pd.concat(parts)
-                order = [c for c in ("상수", "배우자", P["지수"])
-                         if c in set(long["구분"])]
-                ch = (alt.Chart(long)
-                      .mark_line(strokeWidth=2)
-                      .encode(x=alt.X("날짜:T", title=None,
-                                      axis=alt.Axis(grid=False, tickCount=5)),
-                              y=alt.Y("수익률:Q", title="누적 수익률 (%)"),
-                              color=alt.Color("구분:N", title=None,
-                                              sort=order,
-                                              scale=alt.Scale(
-                                                  domain=order,
-                                                  range=[trio[c] for c in order])),
-                              tooltip=["날짜:T", "구분:N",
-                                       alt.Tooltip("수익률:Q", format=".2f")])
-                      .properties(height=260))
-                st.altair_chart(ch, use_container_width=True)
-                st.download_button(
-                    "곡선 데이터 CSV", to_csv(long, excel_safe=False),
-                    file_name=f"curve_{market}_{tag}.csv", mime="text/csv",
-                    key=f"dl_curve_{market}")
-            else:
-                st.info("수익률은 두 시점 사이의 변화이니 재동기화가 두 번은 "
-                        "있어야 곡선이 그려집니다. 다음 주 갱신부터 나옵니다.")
+            # (곡선은 맨 위 '수익률 배틀'의 레이스 차트로 옮겼습니다.)
 
             # ── 3. 백테스트 대비 ──────────────────────────────
             st.subheader("백테스트 대비")
@@ -1333,7 +1861,7 @@ with tab_bt:
                 color=alt.Color("구분:N", title=None,
                                 scale=alt.Scale(domain=["포트폴리오", "벤치마크"],
                                                 range=[port_c, bench_c]),
-                                legend=alt.Legend(orient="top", direction="horizontal")),
+                                legend=None),
             )
             chart = (base.mark_line(strokeWidth=2)
                      + base.mark_point(size=60, filled=True)

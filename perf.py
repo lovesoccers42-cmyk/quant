@@ -687,3 +687,126 @@ def backtest_percentile(live_return: float, bt_returns: pd.Series,
             "판정": ("정상 범위" if 0.05 <= pct <= 0.95
                    else ("백테스트 하위 5% 밖 — 확인 필요" if pct < 0.05
                          else "백테스트 상위 5% 밖 — 운이 좋았습니다"))}
+
+
+# ── 배틀 — 두 계좌 맞대결 ────────────────────────────────────
+# 대시보드의 '수익률 배틀' 화면이 쓰는 계산입니다. 화면 코드(app.py)에 두지
+# 않는 이유: 여기 있어야 오프라인 점검(tools/test_battle.py)으로 숫자를
+# 검증할 수 있고, fresh_perf()의 다시 읽기 덕에 배포 뒤 옛 코드가 남지
+# 않습니다. 입력은 모두 twr()['누적'] 같은 **1.0에서 시작하는 누적 배수**
+# 입니다 — 평단 기준 수익률과 섞어 넣으면 비교 자체가 거짓이 됩니다.
+
+def head_to_head(a: pd.Series, b: pd.Series, *, eps: float = 1e-9) -> dict:
+    """누적 곡선 두 개를 날짜별로 맞대 봅니다 (공통 거래일만).
+
+    돌려주는 것:
+      격차      Series — (a - b) × 100, 단위 %p. 양수면 a가 앞섬
+      앞선날    {"a": n, "b": n} — 동률인 날은 어느 쪽에도 안 셉니다
+      역전      리드가 넘어간 횟수 (동률을 지나간 경우도 한 번)
+      연속      {"누구": "a" | "b" | None, "일수": n} — 지금 리드가 며칠째인지
+    """
+    out = {"격차": pd.Series(dtype="float64"), "앞선날": {"a": 0, "b": 0},
+           "역전": 0, "연속": {"누구": None, "일수": 0}}
+    if a is None or b is None or len(a) == 0 or len(b) == 0:
+        return out
+    idx = a.dropna().index.intersection(b.dropna().index).sort_values()
+    if len(idx) == 0:
+        return out
+    gap = (a.reindex(idx) - b.reindex(idx)) * 100.0
+    out["격차"] = gap
+    side = pd.Series(np.where(gap > eps * 100, 1,
+                              np.where(gap < -eps * 100, -1, 0)), index=idx)
+    out["앞선날"] = {"a": int((side == 1).sum()), "b": int((side == -1).sum())}
+    led = side[side != 0]
+    out["역전"] = int((led != led.shift(1)).sum() - 1) if len(led) else 0
+    if len(side) and side.iloc[-1] != 0:
+        last = side.iloc[-1]
+        n = 0
+        for v in side.iloc[::-1]:
+            if v != last:
+                break
+            n += 1
+        out["연속"] = {"누구": "a" if last == 1 else "b", "일수": n}
+    return out
+
+
+def weekly_rounds(curves: dict, *, accounts: tuple = ("a", "b")) -> pd.DataFrame:
+    """주 단위(금요일 마감) 라운드 — 각 곡선의 그 주 수익률과 승자.
+
+    curves: {키: 누적 배수 Series}. accounts에 든 두 키끼리만 승부를 가리고,
+    나머지(지수 등)는 참고로 같은 주 수익률만 붙입니다.
+    첫 주는 측정 시작일 값(1.0)을 기준으로 잽니다. 마지막 주가 금요일 전에
+    끝났으면 '진행중'으로 표시합니다 — 아직 결판나지 않은 라운드입니다.
+    """
+    ka, kb = accounts
+    if ka not in curves or kb not in curves:
+        return pd.DataFrame()
+    idx = (curves[ka].dropna().index
+           .intersection(curves[kb].dropna().index).sort_values())
+    if len(idx) < 2:
+        return pd.DataFrame()
+    cols = {}
+    for k, s in curves.items():
+        s = s.dropna().sort_index()
+        if k not in (ka, kb):
+            s = s.reindex(idx).ffill()
+        else:
+            s = s.reindex(idx)
+        if s.dropna().empty:
+            continue
+        wk = s.resample("W-FRI").last()
+        prev = wk.shift(1)
+        prev.iloc[0] = s.dropna().iloc[0]
+        cols[k] = wk / prev - 1.0
+    df = pd.DataFrame(cols)
+    df.index.name = "주말"
+    starts = pd.Series(idx, index=idx).resample("W-FRI").first()
+    ends = pd.Series(idx, index=idx).resample("W-FRI").last()
+    df["시작"], df["끝"] = starts, ends
+    df = df.dropna(subset=["끝"])
+    diff = df[ka] - df[kb]
+    df["승자"] = np.where(diff > 1e-12, ka, np.where(diff < -1e-12, kb, ""))
+    df["진행중"] = df.index > idx.max()
+    return df
+
+
+def last_day_moves(px: pd.DataFrame, codes=None) -> pd.Series:
+    """종목별 최근 거래일 등락률 (그 종목의 마지막 두 종가).
+
+    가장 최근 날짜에 종가가 없는 종목(거래정지·상장폐지)은 뺍니다 — 며칠
+    전 등락을 '오늘'로 띄우면 안 됩니다.
+    """
+    if px is None or px.empty:
+        return pd.Series(dtype="float64")
+    p = px.sort_index()
+    if codes is not None:
+        keep = [c for c in _code6(pd.Series(list(codes))) if c in p.columns]
+        p = p[keep]
+    last_day = p.index.max()
+    out = {}
+    for c in p.columns:
+        s = p[c].dropna()
+        if len(s) >= 2 and s.index[-1] == last_day and s.iloc[-2] > 0:
+            out[c] = float(s.iloc[-1] / s.iloc[-2] - 1.0)
+    return pd.Series(out, dtype="float64")
+
+
+def pnl_highlights(pnl: pd.DataFrame, n: int = 3) -> dict:
+    """보유 종목 중 많이 오른 것·많이 빠진 것.
+
+    원가를 모르는 종목(원가미상)은 수익률이 없으니 순위에서 빠집니다 —
+    추정해서 넣으면 1등이 거짓이 될 수 있습니다.
+    """
+    out = {"효자": pd.DataFrame(), "아픈": pd.DataFrame(),
+           "플러스": 0, "계산됨": 0, "보유": 0}
+    if pnl is None or pnl.empty or "수익률" not in pnl.columns:
+        return out
+    known = pnl[pnl["수익률"].notna()]
+    out["보유"] = int(len(pnl))
+    out["계산됨"] = int(len(known))
+    out["플러스"] = int((known["손익"] > 0).sum())
+    out["효자"] = (known[known["수익률"] > 0]
+                 .sort_values("수익률", ascending=False).head(n))
+    out["아픈"] = (known[known["수익률"] < 0]
+                 .sort_values("수익률", ascending=True).head(n))
+    return out
