@@ -433,7 +433,20 @@ def _suffix(acct: str) -> str:
     return "" if acct == "main" else f"_{acct}"
 
 
+_AP_MEMO: dict = {}
+
+
 def account_perf(acct: str, market: str = "kr") -> dict:
+    """_account_perf를 한 번 실행에 한 번만. 화면이 다시 그려질 때마다
+    (Streamlit은 스크립트 전체를 다시 돕니다) 비워지므로 옛 결과가 남지
+    않습니다. 맨 위 띠·시장 탭·종합 탭이 같은 숫자를 보게 됩니다."""
+    key = (acct, market)
+    if key not in _AP_MEMO:
+        _AP_MEMO[key] = _account_perf(acct, market)
+    return _AP_MEMO[key]
+
+
+def _account_perf(acct: str, market: str = "kr") -> dict:
     """한 계좌의 성과 한 묶음.
 
     맨 위 요약과 성과 탭이 **같은 함수**를 씁니다 — 두 곳에서 따로 계산하면
@@ -642,12 +655,15 @@ _BATTLE_CSS = """
 .qb-row .v.r {text-align:right;}
 .qb-row .v.win {color:inherit; font-weight:800;}
 .qb-row .v.win.up {color:var(--up);} .qb-row .v.win.dn {color:var(--dn);}
+.qb-row .v.even {color:inherit; font-weight:600;}
+.qb-row .v.even.up {color:var(--up);} .qb-row .v.even.dn {color:var(--dn);}
 .qb-row .lab {text-align:center; font-size:.8rem; color:var(--muted);}
 .qb-split {grid-column:1/-1; display:flex; gap:2px; height:5px;}
 .qb-split span {display:block; height:100%;}
 .qb-split .sa {background:var(--a); border-radius:3px 0 0 3px;}
 .qb-split .sb {background:var(--b); border-radius:0 3px 3px 0; flex:1;}
-.qb .qb-rounds {width:100%; border-collapse:collapse; font-size:.88rem; border:none; margin:0;}
+.qb .qb-rounds {width:100%; border-collapse:collapse; font-size:.88rem; border:none;
+                margin:0 0 .9rem;}
 .qb .qb-rounds th, .qb .qb-rounds td {border-left:none; border-right:none; border-top:none;}
 .qb-rounds th {font-weight:600; font-size:.78rem; color:var(--muted); text-align:right;
                padding:.25rem .3rem; border-bottom:1px solid var(--line);}
@@ -677,6 +693,7 @@ _BATTLE_CSS = """
 .qb-legend {display:flex; flex-wrap:wrap; gap:.3rem 1rem; font-size:.85rem; font-weight:600;}
 .qb-legend > span {display:inline-flex; align-items:center; gap:.3rem; white-space:nowrap;}
 .qb-legend .qb-dash {margin-right:0;}
+.qb-dash.a {border-top-color:var(--a);} .qb-dash.b {border-top-color:var(--b);}
 @media (max-width:380px) {
   .qb-duo {grid-template-columns:1fr;} .qb-duo > div + div {margin-top:.9rem;}
   .qb-row {grid-template-columns:4.4rem 1fr 4.4rem;}
@@ -738,14 +755,21 @@ def duel(RS: dict, market: str) -> dict:
     cba, cbb = (ra.get("평단") or {}), (rb.get("평단") or {})
     if ra["가능"] and rb["가능"]:
         d.update(mode="twr", va=ra["수익률"], vb=rb["수익률"])
-        d["idx"] = next((r["지수"] for r in (ra, rb)
-                         if r.get("지수") is not None), None)
         d["h2h"] = perf.head_to_head(ra["tw"]["누적"], rb["tw"]["누적"])
         curves = {ka: ra["tw"]["누적"], kb: rb["tw"]["누적"]}
-        bench = next((r["bench"] for r in (ra, rb)
-                      if not r.get("bench", pd.DataFrame()).empty), None)
-        if bench is not None:
-            curves["지수"] = bench["누적"]
+        if market == "all":
+            # 종합은 사람마다 국장·미국장 비중이 달라 비교 지수도 다릅니다
+            # ('같은 비중 지수'). 한 줄짜리 지수 값이나 라운드의 지수 칸은
+            # 둘 중 누구 것인지 모호하니 띄우지 않습니다.
+            d["idx"] = None
+            d["idx_a"], d["idx_b"] = ra.get("지수"), rb.get("지수")
+        else:
+            d["idx"] = next((r["지수"] for r in (ra, rb)
+                             if r.get("지수") is not None), None)
+            bench = next((r["bench"] for r in (ra, rb)
+                          if not r.get("bench", pd.DataFrame()).empty), None)
+            if bench is not None:
+                curves["지수"] = bench["누적"]
         d["rounds"] = perf.weekly_rounds(curves, accounts=(ka, kb))
         d["today"] = (float(ra["tw"]["일수익률"].iloc[-1]),
                       float(rb["tw"]["일수익률"].iloc[-1]))
@@ -757,6 +781,10 @@ def duel(RS: dict, market: str) -> dict:
         d["gap"] = gap
         d["leader"] = ka if gap > 1e-12 else kb if gap < -1e-12 else None
     return d
+
+
+def _idx_name(d: dict) -> str:
+    return "지수" if d["market"] == "all" else PERF_MARKETS[d["market"]]["지수"]
 
 
 def _side_html(d: dict, RS: dict, k: str, side: str, *, mini: bool) -> str:
@@ -774,14 +802,16 @@ def _side_html(d: dict, RS: dict, k: str, side: str, *, mini: bool) -> str:
                  if v is not None else '<div class="qb-score na">–</div>')
     sub = ""
     if not mini:
-        if d["mode"] == "twr" and d.get("idx") is not None:
-            ex = v - d["idx"]
-            sub = (f'<div class="qb-sub">{PERF_MARKETS[d["market"]]["지수"]}보다 '
+        idx = d.get(f"idx_{side}", d.get("idx"))
+        if d["mode"] == "twr" and idx is not None:
+            ex = v - idx
+            sub = (f'<div class="qb-sub">{_idx_name(d)}보다 '
                    f'<b class="{_cls(ex)}">{_sgn(ex, unit="%p")}</b></div>')
         elif d["mode"] == "평단":
             sub = '<div class="qb-sub">평단 기준</div>'
         elif not d["mode"]:
-            why = ("평단 기준" if (not r["가능"] and (r.get("평단") or {})
+            why = (r.get("사유") if not r["가능"] and r.get("사유") else
+                   "평단 기준" if (not r["가능"] and (r.get("평단") or {})
                                  .get("수익률") is not None)
                    else _WHY.get(r["이유"], "측정 전") if not r["가능"] else "")
             sub = f'<div class="qb-sub">{_html.escape(why)}</div>' if why else ""
@@ -830,21 +860,43 @@ def scoreboard_html(d: dict, RS: dict, *, mini: bool = False,
             ref = (f'<div class="qb-ref"><span class="qb-dash"></span>{ix} '
                    f'<b class="{_cls(d["idx"])}">{_sgn(d["idx"])}</b>, '
                    f'{_html.escape(tail)}</div>')
+        elif d["mode"] == "twr" and (d.get("idx_a") is not None
+                                     and d.get("idx_b") is not None):
+            beat = [d["names"][k] for k, v, i in ((ka, d["va"], d["idx_a"]),
+                                                  (kb, d["vb"], d["idx_b"]))
+                    if v > i]
+            if len(beat) == 2:
+                tail = "두 사람 모두 자기 비중 지수를 이기는 중"
+            elif beat:
+                tail = f'{_ga(beat[0])} 자기 비중 지수를 이기는 중'
+            else:
+                tail = "둘 다 자기 비중 지수에 밀리는 중"
+            ref = (f'<div class="qb-ref"><span class="qb-dash"></span>'
+                   f'{_html.escape(tail)}</div>')
         elif d["mode"] == "평단":
             ref = '<div class="qb-ref">두 계좌 모두 평단 기준으로 비교했습니다</div>'
     else:
-        stuck = [d["names"][k] for k in (ka, kb) if not RS[k]["가능"]]
-        verdict = (f'<div class="qb-ref">판정 보류: '
-                   f'{_html.escape(", ".join(stuck))} 계좌를 같은 기준으로 잴 수 '
-                   f'없습니다</div>' if stuck else "")
+        stuck = [k for k in (ka, kb) if not RS[k]["가능"]]
+        if any(RS[k].get("사유") for k in stuck):
+            why = "; ".join(f'{d["names"][k]} {RS[k].get("사유") or "측정 전"}'
+                            for k in stuck)
+            verdict = f'<div class="qb-ref">판정 보류: {_html.escape(why)}</div>'
+        else:
+            verdict = (f'<div class="qb-ref">판정 보류: '
+                       f'{_html.escape(", ".join(d["names"][k] for k in stuck))} '
+                       f'계좌를 같은 기준으로 잴 수 없습니다</div>' if stuck else "")
     return f'<div class="qb-panel">{head}{board}{rope}{verdict}{ref}{stats}</div>'
 
 
 def _stat_row(label: str, a_txt: str, b_txt: str, a_val, b_val, *,
-              split: bool = False, color: bool = False) -> str:
-    """중계 화면식 한 줄 — 가운데 항목, 좌우 값, 이긴 쪽이 진하게."""
+              split: bool = False, color: bool = False, judge: bool = True) -> str:
+    """중계 화면식 한 줄 — 가운데 항목, 좌우 값, 이긴 쪽이 진하게.
+
+    judge=False: 승패가 없는 값(미국 비중 등) — 둘 다 같은 굵기로.
+    """
     wa = wb = ""
-    if a_val is not None and b_val is not None and pd.notna(a_val) and pd.notna(b_val):
+    if (judge and a_val is not None and b_val is not None
+            and pd.notna(a_val) and pd.notna(b_val)):
         if a_val > b_val:
             wa = " win"
         elif b_val > a_val:
@@ -857,12 +909,14 @@ def _stat_row(label: str, a_txt: str, b_txt: str, a_val, b_val, *,
         sa = 100 * (a_val or 0) / tot
         bar = (f'<div class="qb-split"><span class="sa" style="width:{sa:.1f}%">'
                f'</span><span class="sb"></span></div>')
+    if not judge:
+        wa = wb = " even"
     return (f'<div class="qb-row"><div class="v{wa}{ca}">{a_txt}</div>'
             f'<div class="lab">{_html.escape(label)}</div>'
             f'<div class="v r{wb}{cb}">{b_txt}</div>{bar}</div>')
 
 
-def stats_html(d: dict, RS: dict) -> str:
+def stats_html(d: dict, RS: dict, extra: list | None = None) -> str:
     perf = fresh_perf()
     ka, kb = d["keys"]
     rows = []
@@ -879,6 +933,7 @@ def stats_html(d: dict, RS: dict) -> str:
         ta, tb = d["today"]
         rows.append(_stat_row(f"{d['asof']:%m/%d} 하루", _sgn(ta), _sgn(tb),
                               ta, tb, color=True))
+    rows.extend(extra or [])
     hl = {k: perf.pnl_highlights(RS[k].get("pnl", pd.DataFrame())) for k in (ka, kb)}
     if all(hl[k]["계산됨"] for k in (ka, kb)):
         ra_ = hl[ka]["플러스"] / hl[ka]["계산됨"]
@@ -892,25 +947,16 @@ def stats_html(d: dict, RS: dict) -> str:
     return f'<div class="qb-stats">{"".join(rows)}</div>' if rows else ""
 
 
-def _chart_race(d: dict, RS: dict, market: str):
-    """누적 수익률 레이스 — 두 사람 + 지수(점선), 선 끝에 이름과 값."""
+def _race(series: list):
+    """누적 수익률 레이스. series: [{"이름", "곡선"(누적 배수), "색", "점선"}]."""
     import altair as alt
-    P = PERF_MARKETS[market]
-    trio = series_trio()
-    ka, kb = d["keys"]
-    parts = []
-    for k in (ka, kb):
-        tw = RS[k]["tw"]
-        parts.append(pd.DataFrame({"날짜": tw.index, "구분": d["names"][k],
-                                   "수익률": (tw["누적"] - 1) * 100}))
-    bench = next((RS[k]["bench"] for k in (ka, kb)
-                  if not RS[k].get("bench", pd.DataFrame()).empty), None)
-    if bench is not None:
-        parts.append(pd.DataFrame({"날짜": bench.index, "구분": P["지수"],
-                                   "수익률": (bench["누적"] - 1) * 100}))
+    parts = [pd.DataFrame({"날짜": x["곡선"].index, "구분": x["이름"],
+                           "수익률": (x["곡선"].values - 1) * 100}) for x in series]
     long = pd.concat(parts, ignore_index=True)
-    order = [d["names"][ka], d["names"][kb]] + ([P["지수"]] if bench is not None else [])
-    colors = [trio["상수"], trio["배우자"], trio["지수"]][:len(order)]
+    order = [x["이름"] for x in series]
+    colors = [x["색"] for x in series]
+    dashes = [[5, 4] if x.get("점선") else [1, 0] for x in series]
+    widths = [1.6 if x.get("점선") else 2.4 for x in series]
     t0, t1 = long["날짜"].min(), long["날짜"].max()
     # 끝점이 잘리지 않을 만큼만 여백. 눈금은 데이터가 있는 날까지만 찍습니다
     # — 빈 칸에 미래 날짜가 찍히면 예측처럼 읽힙니다.
@@ -920,23 +966,24 @@ def _chart_race(d: dict, RS: dict, market: str):
     x = alt.X("날짜:T", title=None, scale=alt.Scale(domain=[t0, t1 + pad]),
               axis=alt.Axis(grid=False, values=ticks, format="%m/%d",
                             labelOverlap=True))
+    sc = dict(sort=order, legend=None)
     base = alt.Chart(long).encode(
         x=x, y=alt.Y("수익률:Q", title="누적 수익률 (%)",
                      axis=alt.Axis(gridOpacity=0.35)),
-        color=alt.Color("구분:N", sort=order, title=None,
-                        scale=alt.Scale(domain=order, range=colors),
-                        legend=None),
-        strokeDash=alt.StrokeDash("구분:N", sort=order, legend=None,
-                                  scale=alt.Scale(domain=order,
-                                                  range=[[1, 0], [1, 0], [5, 4]][:len(order)])))
-    lines = base.mark_line(strokeWidth=2.4, interpolate="monotone")
+        color=alt.Color("구분:N", title=None,
+                        scale=alt.Scale(domain=order, range=colors), **sc),
+        strokeDash=alt.StrokeDash("구분:N",
+                                  scale=alt.Scale(domain=order, range=dashes), **sc),
+        strokeWidth=alt.StrokeWidth("구분:N",
+                                    scale=alt.Scale(domain=order, range=widths), **sc))
+    lines = base.mark_line(interpolate="monotone")
     zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
         strokeWidth=1, opacity=0.4).encode(y="y:Q")
-    last = long.sort_values("날짜").groupby("구분").tail(1).copy()
+    solid = [x["이름"] for x in series if not x.get("점선")]
+    last = long[long["구분"].isin(solid)].sort_values("날짜").groupby("구분").tail(1)
     ends = alt.Chart(last).mark_circle(size=60, opacity=1).encode(
         x="날짜:T", y="수익률:Q",
-        color=alt.Color("구분:N", sort=order, legend=None,
-                        scale=alt.Scale(domain=order, range=colors)))
+        color=alt.Color("구분:N", scale=alt.Scale(domain=order, range=colors), **sc))
     hover = alt.selection_point(fields=["날짜"], nearest=True, on="pointerover",
                                 empty=False, clear="pointerout")
     wide = long.pivot_table(index="날짜", columns="구분", values="수익률").reset_index()
@@ -947,6 +994,39 @@ def _chart_race(d: dict, RS: dict, market: str):
         opacity=alt.condition(hover, alt.value(0.45), alt.value(0)),
         tooltip=tips).add_params(hover)
     return (zero + lines + rule + ends).properties(height=270), long
+
+
+def _legend_html(series: list, long: pd.DataFrame) -> str:
+    """차트 위 범례 — 폰에서 줄바꿈되고, 글씨가 테마를 따라갑니다."""
+    final = long.sort_values("날짜").groupby("구분")["수익률"].last()
+    out = []
+    for x in series:
+        n = x["이름"]
+        if n not in final.index:
+            continue
+        side = x.get("쪽", "")
+        mark = (f'<span class="qb-dash {side}"></span>' if x.get("점선")
+                else f'<span class="qb-dot {side}"></span>')
+        out.append(f'<span>{mark}{_html.escape(n)} <b class="{_cls(final[n])}">'
+                   f'{_sgn(final[n] / 100, 1)}</b></span>')
+    return '<div class="qb-legend">' + "".join(out) + '</div>'
+
+
+def _chart_race(d: dict, RS: dict, market: str):
+    """시장별 레이스 — 두 사람 + 지수(회색 점선)."""
+    trio = series_trio()
+    ka, kb = d["keys"]
+    series = [{"이름": d["names"][ka], "곡선": RS[ka]["tw"]["누적"],
+               "색": trio["상수"], "쪽": "a"},
+              {"이름": d["names"][kb], "곡선": RS[kb]["tw"]["누적"],
+               "색": trio["배우자"], "쪽": "b"}]
+    bench = next((RS[k]["bench"] for k in (ka, kb)
+                  if not RS[k].get("bench", pd.DataFrame()).empty), None)
+    if bench is not None:
+        series.append({"이름": PERF_MARKETS[market]["지수"], "곡선": bench["누적"],
+                       "색": trio["지수"], "점선": True})
+    ch, long = _race(series)
+    return ch, long, series
 
 
 def _chart_gap(d: dict):
@@ -1018,14 +1098,12 @@ def _nm(r) -> str:
 def highlights_html(d: dict, RS: dict, market: str) -> str:
     perf = fresh_perf()
     ka, kb = d["keys"]
-    _dp = 0 if market == "kr" else 2
-    unit = "원" if market == "kr" else ""
-    pre = "" if market == "kr" else "$"
-
-    def money(v):
+    def money(v, mk=None):
         if v is None or not pd.notna(v):
             return ""
-        s = f"{pre}{abs(v):,.{_dp}f}{unit}"
+        m = mk or market
+        dp, u, pr = (0, "원", "") if m == "kr" else (2, "", "$")
+        s = f"{pr}{abs(v):,.{dp}f}{u}"
         return ("+" if v > 0 else "−" if v < 0 else "") + s
 
     def items(df):
@@ -1033,10 +1111,12 @@ def highlights_html(d: dict, RS: dict, market: str) -> str:
             return '<div class="qb-empty">없음</div>'
         out = []
         for _, r in df.iterrows():
-            out.append(f'<div class="qb-it"><span class="nm">'
+            mk = r.get("시장") if "시장" in df.columns else None
+            flag = {"kr": "🇰🇷 ", "us": "🇺🇸 "}.get(mk, "")
+            out.append(f'<div class="qb-it"><span class="nm">{flag}'
                        f'{_html.escape(_nm(r))}</span>'
                        f'<span class="pc {_cls(r["수익률"])}">{_arrow(r["수익률"])}</span>'
-                       f'<span class="am">{money(r["손익"])}</span></div>')
+                       f'<span class="am">{money(r["손익"], mk)}</span></div>')
         return "".join(out)
 
     cols = []
@@ -1099,17 +1179,9 @@ def render_battle(RS: dict, market: str) -> None:
         st.caption("입금을 걷어낸 시간가중수익률로 겨루니 입금액이 달라도 "
                    "공정합니다. 주간 라운드는 금요일 마감입니다.")
 
-        ch, long = _chart_race(d, RS, market)
+        ch, long, series = _chart_race(d, RS, market)
         st.markdown("**레이스**")
-        final = long.sort_values("날짜").groupby("구분")["수익률"].last()
-        ka, kb = d["keys"]
-        keys = [(d["names"][ka], '<span class="qb-dot a"></span>'),
-                (d["names"][kb], '<span class="qb-dot b"></span>'),
-                (PERF_MARKETS[market]["지수"], '<span class="qb-dash"></span>')]
-        _qb('<div class="qb-legend">' + "".join(
-            f'<span>{mark}{_html.escape(n)} <b class="{_cls(final[n])}">'
-            f'{_sgn(final[n] / 100, 1)}</b></span>'
-            for n, mark in keys if n in final.index) + '</div>')
+        _qb(_legend_html(series, long))
         st.altair_chart(ch, use_container_width=True)
         if len(d["h2h"]["격차"]) >= 2:
             st.markdown("**누가 앞섰나**")
@@ -1143,6 +1215,176 @@ def render_battle(RS: dict, market: str) -> None:
     st.divider()
 
 
+# ── 종합 — 국장 + 미국장을 원화로 합친 배틀 ────────────────────
+# 계산은 perf.combine_markets / blended_bench (tools/test_battle.py로 검증).
+# 환율은 Frankfurter API(유럽중앙은행 등 기준환율, 키 없음)에서 받습니다.
+# 못 받으면 합치지 않습니다 — 환율 없이 원화와 달러를 더하면 거짓 숫자입니다.
+FX_URL = "https://api.frankfurter.dev/v1/{start}..?base=USD&symbols=KRW"
+_MK_LABEL = {"kr": "국장", "us": "미국장"}
+_NOT_HELD = ("기록없음", "계좌기록없음", "설정없음")
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def usdkrw(start: str) -> pd.Series:
+    """날짜 → 1달러당 원화 (영업일만, 주말·휴일은 쓰는 쪽에서 전날 값)."""
+    try:
+        r = rq.get(FX_URL.format(start=start), timeout=15)
+        if r.status_code != 200:
+            return pd.Series(dtype="float64")
+        rates = (r.json() or {}).get("rates") or {}
+        s = pd.Series({pd.Timestamp(d): float(v["KRW"]) for d, v in rates.items()
+                       if isinstance(v, dict) and v.get("KRW")}, dtype="float64")
+        return s.sort_index()
+    except Exception:
+        return pd.Series(dtype="float64")
+
+
+def combined_perf(acct: str) -> dict:
+    """한 사람의 국장 + 미국장 합산 성과 (원화 시간가중)."""
+    perf = fresh_perf()
+    out = {"계좌": acct, "가능": False, "이유": "", "사유": "", "시장": {},
+           "pnl": pd.DataFrame(), "평단": None, "미국있음": False}
+    parts, benches, blocked, pnls = {}, {}, [], []
+    for mk in ("kr", "us"):
+        r = account_perf(acct, mk)
+        out["시장"][mk] = {"이유": r["이유"],
+                         "수익률": r.get("수익률") if r["가능"] else None}
+        if r["이유"] in _NOT_HELD:
+            continue
+        tw = r.get("tw")
+        if not (r["가능"] or r["이유"] == "한점") or tw is None or tw.empty:
+            blocked.append(f'{_MK_LABEL[mk]} {_WHY.get(r["이유"], "측정 전")}')
+            continue
+        parts[mk] = tw
+        b = r.get("bench", pd.DataFrame())
+        if b is not None and not b.empty:
+            benches[mk] = b["누적"]
+        p = r.get("pnl", pd.DataFrame())
+        if p is not None and not p.empty:
+            pnls.append(p.assign(시장=mk))
+    out["pnl"] = pd.concat(pnls, ignore_index=True) if pnls else pd.DataFrame()
+    out["미국있음"] = "us" in parts
+    if blocked:
+        out.update(이유="시장보류", 사유=", ".join(blocked))
+        return out
+    if not parts:
+        out.update(이유="기록없음", 사유="보유 기록 없음")
+        return out
+    fx = None
+    if "us" in parts:
+        start = min(t.index.min() for t in parts.values()) - pd.Timedelta(days=10)
+        fx = usdkrw(f"{start:%Y-%m-%d}")
+        if fx.empty:
+            out.update(이유="환율없음", 사유="환율을 받지 못함")
+            return out
+    comb = perf.combine_markets(parts, fx)
+    if len(comb) < 2:
+        out.update(이유="한점", 사유="재동기화 1회 — 다음 주부터")
+        return out
+    bench = perf.blended_bench(comb, benches, fx)
+    last = comb.iloc[-1]
+    cols = [c for c in comb.columns if c.startswith("평가액_")]
+    tot = float(sum(last[c] for c in cols)) or 1.0
+    for mk in parts:
+        out["시장"][mk]["비중"] = float(last[f"평가액_{mk}"]) / tot
+    out.update(가능=True, tw=comb, bench=pd.DataFrame({"누적": bench}),
+               수익률=float(comb["누적"].iloc[-1] - 1),
+               지수=float(bench.iloc[-1] - 1) if len(bench) else None)
+    if fx is not None:
+        usk = perf.combine_markets({"us": parts["us"]}, fx)
+        out["환율효과"] = (float(usk["누적"].iloc[-1] - 1)
+                       - float(parts["us"]["누적"].iloc[-1] - 1))
+        out["환율"] = (float(fx.iloc[-1]), fx.index[-1])
+    return out
+
+
+def _market_rows(d: dict, RSall: dict) -> list:
+    """종합 매치 스탯에 끼워 넣는 시장별 줄."""
+    ka, kb = d["keys"]
+    rows = []
+    for mk in ("kr", "us"):
+        va = RSall[ka]["시장"].get(mk, {}).get("수익률")
+        vb = RSall[kb]["시장"].get(mk, {}).get("수익률")
+        if va is None and vb is None:
+            continue
+        rows.append(_stat_row(_MK_LABEL[mk] + (" (달러)" if mk == "us" else ""),
+                              _sgn(va), _sgn(vb), va, vb, color=True))
+    wa = RSall[ka]["시장"].get("us", {}).get("비중")
+    wb = RSall[kb]["시장"].get("us", {}).get("비중")
+    if wa is not None or wb is not None:
+        f = lambda w: f"{w * 100:.0f}%" if w is not None else "0%"  # noqa: E731
+        rows.append(_stat_row("미국 비중", f(wa), f(wb), wa, wb, judge=False))
+    fa, fb = RSall[ka].get("환율효과"), RSall[kb].get("환율효과")
+    if fa is not None or fb is not None:
+        rows.append(_stat_row("환율 효과", _sgn(fa, unit="%p"), _sgn(fb, unit="%p"),
+                              fa, fb, judge=False, color=True))
+    return rows
+
+
+def all_results() -> tuple[dict, dict]:
+    RSall = {a: combined_perf(a) for a in ACCOUNTS.values()}
+    return RSall, duel(RSall, "all")
+
+
+def render_all() -> None:
+    """🏆 종합 탭 — 국장 + 미국장 원화 합산 배틀."""
+    if not (STATE_REPO and STATE_TOKEN):
+        st.info("비공개 상태 레포가 설정되지 않아 성과를 볼 수 없습니다.")
+        return
+    RSall, d = all_results()
+    if len(d["keys"]) != 2:
+        return
+    ka, kb = d["keys"]
+    if not any(RSall[k]["미국있음"] for k in (ka, kb)) and d["mode"]:
+        st.info("미국 계좌 기록이 아직 없어 종합은 국장 성과와 같습니다. "
+                "성과(한국) 탭을 보세요.")
+        return
+    st.subheader("🏆 종합 배틀 (국장 + 미국장)")
+    stats = (stats_html(d, RSall, extra=_market_rows(d, RSall))
+             if d["mode"] else "")
+    _qb(scoreboard_html(d, RSall, stats=stats))
+    if not d["mode"]:
+        st.info("두 사람의 국장·미국장을 같은 기준(원화 시간가중)으로 잴 수 있게 "
+                "되면 종합 승부가 나옵니다. 사유는 위 스코어보드에 있습니다.")
+        return
+    fx = next((RSall[k].get("환율") for k in (ka, kb) if RSall[k].get("환율")), None)
+    fx_txt = (f" 미국 주식은 날마다 유럽중앙은행 기준환율로 바꿉니다 (최근 "
+              f"{fx[0]:,.1f}원, {fx[1]:%m/%d})." if fx else "")
+    st.caption("국장과 미국장을 원화로 합친 시간가중수익률입니다." + fx_txt
+               + " 지수는 각자의 국장·미국장 비중대로 시총상위200 지수와 "
+               "SPY(원화 환산)를 샀다면의 수익률이라, 사람마다 다릅니다. "
+               "환율 효과는 미국 주식을 원화로 잰 수익률에서 달러로 잰 수익률을 "
+               "뺀 값입니다.")
+    trio = series_trio()
+    series = [{"이름": d["names"][ka], "곡선": RSall[ka]["tw"]["누적"],
+               "색": trio["상수"], "쪽": "a"},
+              {"이름": d["names"][kb], "곡선": RSall[kb]["tw"]["누적"],
+               "색": trio["배우자"], "쪽": "b"}]
+    for k, side, col in ((ka, "a", trio["상수"]), (kb, "b", trio["배우자"])):
+        b = RSall[k].get("bench", pd.DataFrame())
+        if b is not None and not b.empty:
+            series.append({"이름": f'지수({d["names"][k]} 비중)', "곡선": b["누적"],
+                           "색": col, "점선": True, "쪽": side})
+    ch, long = _race(series)
+    st.markdown("**레이스**")
+    _qb(_legend_html(series, long))
+    st.altair_chart(ch, use_container_width=True)
+    if len(d["h2h"]["격차"]) >= 2:
+        st.markdown("**누가 앞섰나**")
+        _qb(f'<div class="qb-sub"><span class="qb-dot a"></span> 위는 '
+            f'{_html.escape(_ga(d["names"][ka]))} 앞선 날, '
+            f'<span class="qb-dot b"></span> 아래는 '
+            f'{_html.escape(_ga(d["names"][kb]))} 앞선 날</div>')
+        st.altair_chart(_chart_gap(d), use_container_width=True)
+    rh = rounds_html(d)
+    if rh:
+        st.markdown("**주간 라운드**")
+        _qb(rh)
+    st.markdown("**종목 하이라이트** (두 시장 통틀어)")
+    _qb(highlights_html(d, RSall, "kr"))
+    st.caption("종목 수익률은 그 시장 통화 기준입니다 (미국 종목은 달러).")
+
+
 def perf_strip() -> None:
     """화면 맨 위 — 계좌 수익률. 제일 먼저 보고 싶은 숫자입니다.
 
@@ -1163,6 +1405,11 @@ def perf_strip() -> None:
 
     asof = None
     rows = [r for _, rs in per_market for _, r in rs]
+    if any(mk == "us" for mk, _ in per_market):
+        RSall, dall = all_results()
+        if any(RSall[k]["미국있음"] for k in dall["keys"]) and dall["mode"]:
+            _qb(scoreboard_html(dall, RSall, mini=True,
+                                label="🏆 종합 (국장 + 미국장, 원화)"), mini=True)
     for mk, mrows in per_market:
         P = PERF_MARKETS[mk]
         RSm = {r["계좌"]: r for _, r in mrows}
@@ -1245,10 +1492,10 @@ else:
 top_label = "🔔 매수 신호" if M["has_signals"] else "🔔 상위 종목"
 # 성과만 시장 탭을 따로 둡니다 — 위의 '시장' 라디오는 모델·실행·백테스트를
 # 가르는 것이고, 성과는 두 계좌·두 시장을 **나란히 보고 싶은** 화면입니다.
-(tab_perf_kr, tab_perf_us, tab_top, tab_run, tab_model, tab_bt,
+(tab_all, tab_perf_kr, tab_perf_us, tab_top, tab_run, tab_model, tab_bt,
  tab_log) = st.tabs(
-    ["💰 성과(한국)", "💰 성과(미국)", top_label, "▶️ 실행", "📊 모델",
-     "🧪 백테스트", "📜 기록"])
+    ["🏆 종합", "💰 성과(한국)", "💰 성과(미국)", top_label, "▶️ 실행",
+     "📊 모델", "🧪 백테스트", "📜 기록"])
 
 SYM, NAME, SEC = M["symbol"], M["name"], M["sector"]
 
@@ -1810,6 +2057,9 @@ def render_perf(market: str) -> None:
                             use_container_width=True, height=260)
 
 
+
+with tab_all:
+    render_all()
 
 with tab_perf_kr:
     render_perf("kr")

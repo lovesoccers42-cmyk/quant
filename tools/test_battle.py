@@ -94,6 +94,57 @@ check(list(hl["아픈"]["종목코드"]) == ["E", "B"], "아픈 손가락 = 많�
 check(hl["플러스"] == 2 and hl["계산됨"] == 4 and hl["보유"] == 5,
       "원가미상은 순위·비율에서 빠짐")
 
+print("\n[종합 — 국장 + 미국장 원화 합산]")
+
+
+def tw(days, values, flows=None):
+    v = pd.Series(values, index=pd.to_datetime(days), dtype=float)
+    f = pd.Series(flows or {}, dtype=float)
+    f.index = pd.to_datetime(f.index)
+    return perf.twr(v, f)
+
+
+kd = ["2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15"]
+kr = tw(kd, [1_000_000, 1_000_000, 1_000_000, 1_000_000])
+c = perf.combine_markets({"kr": kr, "us": None}, None)
+check(np.allclose(c["누적"].values, kr["누적"].values),
+      "미국이 없으면 국장 수익률 그대로 (환율 없이도)")
+
+# 10/13에 $1,000 매수(입금), 10/14 +10%, 10/15 환율만 1,000 → 1,100
+us = tw(kd[1:], [1000, 1100, 1100], {"2026-10-13": 1000})
+fx = pd.Series([1000, 1000, 1000, 1100], index=pd.to_datetime(kd))
+c = perf.combine_markets({"kr": kr, "us": us}, fx)
+check(abs(c["일수익률"].loc["2026-10-13"]) < 1e-12,
+      "미국 첫날: 산 금액만큼 입금으로 잡혀 수익 0")
+check(abs(c["일수익률"].loc["2026-10-14"] - 100_000 / 2_000_000) < 1e-12,
+      "미국 +10% → 원화 총액 기준 +5% (비중 절반)")
+check(abs(c["일수익률"].loc["2026-10-15"] - 110_000 / 2_100_000) < 1e-12,
+      "환율만 올라도 원화로는 수익 (+110,000원 / 2,100,000원)")
+check(perf.combine_markets({"kr": kr, "us": us}, None).empty,
+      "미국이 있는데 환율이 없으면 합치지 않음 (단위가 섞임)")
+
+# 거래일이 다름 — 미국만 여는 날(10/16)
+us2 = tw(kd[1:] + ["2026-10-16"], [1000, 1000, 1000, 1050], {"2026-10-13": 1000})
+fx2 = pd.Series(1000.0, index=pd.to_datetime(kd + ["2026-10-16"]))
+c2 = perf.combine_markets({"kr": kr, "us": us2}, fx2)
+check(c2["평가액_kr"].loc["2026-10-16"] == 1_000_000,
+      "국장이 쉬는 날은 국장 평가액을 전날 값으로")
+check(abs(c2["일수익률"].loc["2026-10-16"] - 50_000 / 2_000_000) < 1e-12,
+      "그날 수익은 열린 시장 몫만")
+
+# 같은 비중 지수 — 절반씩, 국장 지수 +2%, SPY 0%, 환율 고정 → +1%
+kb = pd.Series([1.0, 1.0, 1.02, 1.02], index=pd.to_datetime(kd))
+sb = pd.Series([1.0, 1.0, 1.0], index=pd.to_datetime(kd[1:]))
+cc = perf.combine_markets({"kr": kr, "us": us}, pd.Series(1000.0, index=pd.to_datetime(kd)))
+bb = perf.blended_bench(cc, {"kr": kb, "us": sb},
+                        pd.Series(1000.0, index=pd.to_datetime(kd)))
+check(abs(bb.loc["2026-10-14"] - 1.01) < 1e-12, "비중 절반씩이면 지수 수익도 절반씩 (+1%)")
+check(abs(bb.iloc[0] - 1.0) < 1e-12, "같은 비중 지수는 1.0에서 시작")
+# 미국을 사기 전날까지는 국장 지수만
+kb2 = pd.Series([1.0, 1.03, 1.03, 1.03], index=pd.to_datetime(kd))
+bb2 = perf.blended_bench(cc, {"kr": kb2, "us": sb})
+check(abs(bb2.loc["2026-10-13"] - 1.03) < 1e-12, "미국 사기 전에는 국장 지수 100%")
+
 print()
 if FAIL:
     print(f"실패 {FAIL}건")

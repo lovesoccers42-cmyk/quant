@@ -810,3 +810,88 @@ def pnl_highlights(pnl: pd.DataFrame, n: int = 3) -> dict:
     out["아픈"] = (known[known["수익률"] < 0]
                  .sort_values("수익률", ascending=True).head(n))
     return out
+
+
+# ── 종합 — 국장 + 미국장을 원화로 합치기 ─────────────────────
+# 두 시장의 수익률을 그냥 평균내면 안 됩니다 — 넣은 돈의 크기가 다르고,
+# 미국 주식은 환율로도 벌거나 잃습니다. 그래서 날마다 '원화 총평가액'을
+# 만들고, 입출금도 원화로 바꿔 twr()에 그대로 넣습니다.
+#
+#     V(t) = V_kr(t) + V_us(t) × 환율(t)
+#     F(t) = F_kr(t) + F_us(t) × 환율(t)
+#
+# 거래일이 다른 날(한쪽만 휴장)은 쉬는 시장의 평가액을 전날 값으로 둡니다
+# — 실제로 그 시장 가격이 안 움직였으니까요. 환율은 그날도 움직입니다.
+
+def combine_markets(parts: dict, fx: pd.Series | None,
+                    fx_markets: tuple = ("us",)) -> pd.DataFrame:
+    """시장별 twr() 결과를 원화로 합친 시간가중수익률.
+
+    parts: {"kr": twr 결과(원화), "us": twr 결과(달러), ...} — 비거나 None인
+           시장은 건너뜁니다 (그 사람이 그 시장에 없으면 비중 0).
+    fx:    날짜 → 1달러당 원화. fx_markets에 든 시장에만 곱합니다.
+    돌려주는 것: twr()와 같은 열 + 시장별 원화 평가액 열 ("평가액_kr" 등).
+    환율이 필요한데 없으면 빈 표 — 환율 없이 합치면 단위가 섞입니다.
+    """
+    use = {m: t for m, t in parts.items() if t is not None and len(t)}
+    if not use:
+        return pd.DataFrame()
+    need_fx = [m for m in use if m in fx_markets]
+    if need_fx and (fx is None or fx.dropna().empty):
+        return pd.DataFrame()
+    idx = pd.DatetimeIndex(sorted(set().union(*[t.index for t in use.values()])))
+    x = None
+    if need_fx:
+        f = fx.dropna().sort_index()
+        x = f.reindex(f.index.union(idx)).ffill().bfill().reindex(idx)
+    vals, flows = {}, pd.Series(0.0, index=idx)
+    for m, t in use.items():
+        v = t["평가액"].reindex(idx).ffill().fillna(0.0)
+        fl = t["순입출금"].reindex(idx).fillna(0.0)
+        if m in fx_markets:
+            v, fl = v * x, fl * x
+        vals[f"평가액_{m}"] = v
+        flows = flows + fl
+    V = pd.DataFrame(vals).sum(axis=1)
+    live = V[V > 0]
+    if live.empty:
+        return pd.DataFrame()
+    start = live.index[0]
+    out = twr(V.loc[start:], flows.loc[start:])
+    for k, v in vals.items():
+        out[k] = v.loc[start:]
+    if x is not None:
+        out["환율"] = x.loc[start:]
+    return out
+
+
+def blended_bench(comb: pd.DataFrame, benches: dict, fx: pd.Series | None = None,
+                  fx_markets: tuple = ("us",)) -> pd.Series:
+    """'같은 비중 지수' — 그 사람의 시장 비중대로 각 시장 지수를 샀다면.
+
+    comb:    combine_markets() 결과 (평가액_<시장> 열로 전날 비중을 씁니다)
+    benches: {"kr": 지수 누적 배수, "us": SPY 누적 배수(달러)}
+    하루 수익률 = Σ 전날비중_m × 지수수익률_m (미국 지수는 원화로 환산).
+    비중이 0인 시장(아직 안 산 시장)은 그날 영향이 없습니다.
+    돌려주는 것: 누적 배수 Series (comb와 같은 날짜, 1.0에서 시작).
+    """
+    if comb is None or comb.empty:
+        return pd.Series(dtype="float64")
+    idx = comb.index
+    cols = [c for c in comb.columns if c.startswith("평가액_")]
+    total = comb[cols].sum(axis=1)
+    r = pd.Series(0.0, index=idx)
+    for c in cols:
+        m = c.split("_", 1)[1]
+        b = benches.get(m)
+        if b is None or b.dropna().empty:
+            continue
+        b = b.dropna().sort_index()
+        lvl = b.reindex(b.index.union(idx)).ffill().reindex(idx)
+        if m in fx_markets and "환율" in comb.columns:
+            lvl = lvl * comb["환율"]
+        rm = (lvl / lvl.shift(1) - 1.0).fillna(0.0)
+        w = (comb[c] / total).shift(1).fillna(0.0)
+        r = r + w * rm
+    r.iloc[0] = 0.0
+    return (1 + r.replace([np.inf, -np.inf], 0.0).fillna(0.0)).cumprod()
