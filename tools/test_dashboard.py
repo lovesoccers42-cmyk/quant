@@ -435,18 +435,18 @@ else:
                  and "상태" in d.value.index), None)
     check(summ is not None, "성과(한국) 요약 표가 그려짐")
     if summ is not None:
-        st_alt = str(summ.loc["상태", "배우자"])
+        st_alt = str(summ.loc["상태", "은진"])
         st_main = str(summ.loc["상태", "상수"])
         check(st_alt == "체결내역 필요",
-              f"배우자 상태 = {st_alt!r} ('측정 전'이면 사고 재발)")
+              f"은진 상태 = {st_alt!r} ('측정 전'이면 사고 재발)")
         check(st_main == "측정 중", f"상수 상태 = {st_main!r} (깨끗한 계좌는 그대로)")
-        why = str(summ.loc["숨긴 사유", "배우자"]) if "숨긴 사유" in summ.index else ""
+        why = str(summ.loc["숨긴 사유", "은진"]) if "숨긴 사유" in summ.index else ""
         check("10/19" in why, f"숨긴 사유에 날짜가 보임 — {why!r}")
-        check(str(summ.loc["수익률 (시간가중)", "배우자"]) == "숨김",
+        check(str(summ.loc["수익률 (시간가중)", "은진"]) == "숨김",
               "시간가중 칸은 '–'가 아니라 '숨김'")
     warns = " ".join(w.value for w in at2.warning)
-    check("배우자" in warns and "alt·" not in warns,
-          "경고문이 'alt'가 아니라 '배우자'로 적힘")
+    check("은진" in warns and "alt·" not in warns,
+          "경고문이 'alt'가 아니라 '은진'으로 적힘")
     check(warns.count("10/19") >= 2,
           "맨 위 상자와 성과 탭 경고 모두 날짜를 보여 줌")
 
@@ -464,8 +464,8 @@ else:
     check("주간 라운드" not in md, "라운드는 둘 다 시간가중일 때만")
     # 종합 탭: 한 시장이라도 숨겨지면 합치지 않고 사유를 밝힘
     check("종합 배틀" in " ".join(h.value for h in at2.subheader)
-          and "판정 보류: 배우자 국장 체결내역 필요" in md,
-          "종합은 배우자 국장이 숨겨지면 판정 보류 + 사유")
+          and "판정 보류: 은진 국장 체결내역 필요" in md,
+          "종합은 은진 국장이 숨겨지면 판정 보류 + 사유")
 
 # 배틀 계산(앞선 날·역전·라운드)은 따로 점검합니다 — 워크플로 파일을 고치지
 # 않아도 이 점검을 돌리는 곳이면 같이 돌도록 여기서 부릅니다.

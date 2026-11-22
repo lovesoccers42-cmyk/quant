@@ -426,7 +426,7 @@ def spy_curve(start_iso: str, end_iso: str) -> pd.DataFrame:
                         index=pd.DatetimeIndex(b["Date"], name="날짜"))
 
 
-ACCOUNTS = {"상수 (main)": "main", "배우자 (alt)": "alt"}
+ACCOUNTS = {"상수 (main)": "main", "은진 (alt)": "alt"}
 
 
 def _suffix(acct: str) -> str:
@@ -1030,7 +1030,7 @@ def _chart_race(d: dict, RS: dict, market: str):
 
 
 def _chart_gap(d: dict):
-    """격차 — 0 위는 상수 리드, 아래는 배우자 리드."""
+    """격차 — 0 위는 상수 리드, 아래는 은진 리드."""
     import altair as alt
     trio = series_trio()
     g = d["h2h"]["격차"]
@@ -1280,6 +1280,14 @@ def combined_perf(acct: str) -> dict:
     comb = perf.combine_markets(parts, fx)
     if len(comb) < 2:
         out.update(이유="한점", 사유="재동기화 1회 — 다음 주부터")
+        return out
+    # 시장별로 믿을 수 있어도 합친 곡선을 한 번 더 되묻습니다 — 합칠 때만
+    # 생기는 어긋남(2026-11-22: 입금 없이 시작한 미국 보유)이 있었습니다.
+    trust = perf.twr_trust(comb)
+    if not trust["신뢰"]:
+        days = ", ".join(f"{pd.Timestamp(x):%m/%d}" for x in trust["날짜"][:3])
+        out.update(이유="입출금누락", 신뢰=trust,
+                   사유=f"합산 곡선에 설명 안 되는 변화 ({days})")
         return out
     bench = perf.blended_bench(comb, benches, fx)
     last = comb.iloc[-1]

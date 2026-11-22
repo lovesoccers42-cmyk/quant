@@ -848,6 +848,14 @@ def combine_markets(parts: dict, fx: pd.Series | None,
     for m, t in use.items():
         v = t["평가액"].reindex(idx).ffill().fillna(0.0)
         fl = t["순입출금"].reindex(idx).fillna(0.0)
+        # 그 시장이 처음 잡히는 날은 그날 평가액 전체를 '들어온 돈'으로 봅니다
+        # — twr()가 첫날 수익을 0으로 두는 것과 같은 약속입니다.
+        # 왜 (2026-11-22 실측): 미국 첫 보유(10/16)는 보유목록만 올라오고
+        # 체결내역이 없어 입금이 0이었습니다. 미국 탭 혼자는 첫날을 기준점으로
+        # 삼으니 괜찮았지만, 합산에서는 미국 주식 전체가 하루 수익으로 잡혀
+        # 두 시장 다 마이너스인데 종합이 +67% / +86%로 나왔습니다.
+        t0 = t["평가액"].dropna().index.min()
+        fl.loc[t0] = v.loc[t0]
         if m in fx_markets:
             v, fl = v * x, fl * x
         vals[f"평가액_{m}"] = v
