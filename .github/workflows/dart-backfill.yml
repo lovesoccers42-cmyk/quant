@@ -63,7 +63,9 @@ jobs:
             echo "::error::DART_API_KEY Secret이 없습니다. opendart.fss.or.kr에서 인증키를 발급받아 저장소 Settings > Secrets에 DART_API_KEY로 넣어주세요."
             exit 1
           fi
-          echo "인증키 확인됨 (앞 4자리 ${DART_API_KEY:0:4}...)"
+          # 공개 저장소의 로그는 누구나 봅니다 — 키의 어떤 부분도 찍지 않고
+          # 길이만 확인합니다 (GitHub의 자동 가림은 '전체 값'만 가립니다).
+          echo "인증키 확인됨 (${#DART_API_KEY}자)"
 
       - name: 패키지 설치
         run: pip install -r requirements.txt
@@ -73,6 +75,8 @@ jobs:
           # 파일이 옛 버전으로 되돌아간 채 돌아가는 사고를 막습니다.
           # 계정 매핑과 분기 환산을 인증키 없이 검증하고, 틀리면 여기서 멈춥니다.
           python tools/test_fs_dart.py
+          # 인증키가 로그·요약으로 새지 않는지 (공개 저장소)
+          python tools/test_redaction.py
 
       - name: 데이터 내려받기
         run: |

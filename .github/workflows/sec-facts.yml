@@ -12,8 +12,23 @@ name: 미국 재무제표 (SEC EDGAR)
 # 보고 작성했습니다. probe 는 아무것도 저장하지 않고 '계정별로 태그를 못 찾은
 # 회사 수'와 '계정별 데이터 기간'만 보고합니다. 그 숫자가 멀쩡한 걸 확인한
 # 뒤에 collect 를 돌리세요.
+#
+# **예약 실행 (2026-11-13 추가).** 처음엔 손으로 한 번 돌리는 이주(移住)
+# 작업이라 예약이 없었고, 그래서 SEC 재무는 10/15 수집분에 멈춰 있었습니다.
+# yahooquery 쪽(미국 월간)은 매달 새 분기를 넣지만 EDGAR가 덮은 종목은
+# 그 행을 지우고 EDGAR 값을 쓰므로, EDGAR를 다시 돌리지 않으면 그 종목들의
+# 최신 분기가 영영 들어오지 않습니다.
+#
+#   매월 25일 15:17 UTC = 26일 00:17 KST, 예약은 collect 로 돕니다.
+#   - 10-Q 마감(분기말 +40~45일)·10-K 마감(+60~90일)이 모두 그달 중순
+#     안쪽이라 25일이면 그달 공시를 다 받습니다.
+#   - 미국 주문서(1일)보다 며칠 앞이라, 그 사이 평일 일간 실행이 새 재무로
+#     밸류 지표를 다시 계산하고 주문서가 그걸 씁니다.
+#   - 정각을 피했습니다 — GitHub는 정각 예약을 몰려서 더 늦게 돌립니다.
 
 on:
+  schedule:
+    - cron: "17 15 25 * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -27,8 +42,12 @@ on:
         required: false
         default: ""
 
+# 미국 일간·월간과 **같은 줄**에 섭니다. 셋 다 global_fs.parquet을 받아서
+# 다시 올리는데, 따로 돌면 일간이 수집 전 파일을 받아 두었다가 수집이 끝난
+# 뒤에 올려 EDGAR 수집분을 덮어쓸 수 있습니다 (예약이 생기면서 겹칠 수
+# 있게 됐습니다).
 concurrency:
-  group: quant-us-facts
+  group: quant-pipeline-us
   cancel-in-progress: false
 
 permissions:
@@ -44,6 +63,11 @@ jobs:
       # SEC는 접속 주체를 밝히는 User-Agent를 요구합니다. 비워 두면 레포
       # 주소로 식별합니다 — 메일을 쓰시려면 Variables에 QUANT_SEC_UA 를 넣으세요.
       QUANT_SEC_UA: ${{ vars.QUANT_SEC_UA }}
+      # 예약 실행에는 입력이 없습니다 — 비어 있으면 collect.
+      # (그냥 inputs.mode를 쓰면 빈 문자열이 넘어가 스크립트가 사용법만
+      #  찍고 끝나고, 올리기 단계도 건너뜁니다.)
+      MODE: ${{ github.event.inputs.mode || 'collect' }}
+      LIMIT: ${{ github.event.inputs.limit || '0' }}
       TZ: Asia/Seoul
 
     steps:
@@ -72,16 +96,14 @@ jobs:
 
       - name: EDGAR 수집
         run: |
-          python tools/sec_facts.py \
-            "${{ github.event.inputs.mode }}" \
-            "${{ github.event.inputs.limit || '0' }}"
+          python tools/sec_facts.py "$MODE" "$LIMIT"
 
       - name: 데이터 기간 다시 점검
-        if: ${{ github.event.inputs.mode == 'collect' }}
+        if: ${{ env.MODE == 'collect' }}
         run: python tools/probe_us.py
 
       - name: 올리기 (collect 일 때만)
-        if: ${{ github.event.inputs.mode == 'collect' }}
+        if: ${{ env.MODE == 'collect' }}
         run: |
           [ -f data/global_fs.parquet ] || exit 1
           for try in 1 2 3; do
