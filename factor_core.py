@@ -365,3 +365,137 @@ def split_keep(code, shared: float, rem: int, mod: int = 2) -> bool:
         return True                      # 공용 — 두 계좌가 함께 봄
     mod = max(1, int(mod))
     return ((h // 10000) % mod) == (int(rem) % mod)
+
+
+# ── 재무제표 기준 시점 — 점수에 실제로 쓰인 분기 ──────────────────
+# 대시보드·주문서에 "어느 분기 재무제표로 골랐나"를 띄우기 위한 계산입니다.
+# 종목마다 마지막으로 공시한 분기가 다르고, 수집이 덜 되면 몇 분기 전
+# 숫자로 점수를 받습니다(2026-11-25 실측: 국장 2,507종목 중 1,016종목이
+# 아직 1분기 기준). 그래서 '최신 분기' 하나가 아니라 분포를 냅니다.
+
+def fs_quarters(ttm: pd.DataFrame, *, symbol: str, account: str, date: str,
+                key_account: str, filed: str | None = None) -> pd.DataFrame:
+    """종목별로 점수에 쓰인 재무제표의 결산일(과 공시일).
+
+    ttm: latest_ttm() 결과 (종목×계정마다 한 줄, ttm이 계산된 마지막 분기).
+    key_account(순이익)의 분기를 그 종목의 기준으로 씁니다 — ROE·PER이 모두
+    이 숫자에서 나옵니다. 순이익이 없는 종목은 계정 중 가장 최근 분기.
+    돌려주는 것: index=종목, 열 "결산일" (+ filed가 있으면 "공시일").
+    """
+    t = ttm[ttm["ttm"].notna()] if "ttm" in ttm.columns else ttm
+    if t.empty:
+        cols = ["결산일"] + (["공시일"] if filed else [])
+        return pd.DataFrame(columns=cols)
+    t = t.assign(**{date: pd.to_datetime(t[date])})
+    key = t[t[account] == key_account].drop_duplicates(symbol, keep="last")
+    key = key.set_index(symbol)
+    rest = (t[~t[symbol].isin(key.index)].sort_values(date)
+            .drop_duplicates(symbol, keep="last").set_index(symbol))
+    both = pd.concat([key, rest])
+    out = pd.DataFrame({"결산일": both[date]})
+    if filed and filed in both.columns:
+        out["공시일"] = pd.to_datetime(both[filed])
+    return out
+
+
+def quarter_label(ts) -> str:
+    """결산일 → '2026년 3분기' (달력 분기로 묶음 — 미국은 결산월이 제각각)."""
+    p = pd.Timestamp(ts).to_period("Q")
+    return f"{p.year}년 {p.quarter}분기"
+
+
+def due_quarter(today=None, *, lag_q: int = 45, lag_y: int = 90):
+    """오늘 기준으로 공시 마감이 지난 가장 최근 분기와 그 마감일.
+
+    분기보고서는 분기말 45일, 사업보고서(4분기)는 90일 안에 냅니다
+    (한국 자본시장법·미국 10-Q/10-K의 가장 늦은 기한). 마감이 지난 분기를
+    아직 못 받은 종목은 '뒤처진' 것입니다 — 공시가 안 나온 게 아니라
+    우리가 덜 모은 것일 가능성이 큽니다.
+    """
+    t = pd.Timestamp(today or pd.Timestamp.today()).normalize()
+    p = t.to_period("Q") - 1
+    for _ in range(8):
+        end = p.end_time.normalize()
+        due = end + pd.Timedelta(days=lag_y if p.quarter == 4 else lag_q)
+        if due <= t:
+            return p, due
+        p -= 1
+    return p, p.end_time.normalize()
+
+
+def vintage_summary(q: pd.DataFrame, codes=None, *, top: int = 3,
+                    today=None) -> dict:
+    """분기별 종목 수. 대시보드 한 줄과 주문서 '요약' 시트에 씁니다.
+
+    q: fs_quarters() 결과. codes를 주면 그 종목만 셉니다(점수 받은 종목,
+    선정 100종목 등). 위에서 top개 분기를 따로 세고 나머지는 '그 이전'.
+    금액이 없어 공개 요약에 올려도 됩니다.
+    """
+    s = q["결산일"] if "결산일" in q.columns else pd.Series(dtype="datetime64[ns]")
+    if codes is not None:
+        s = s.reindex(pd.Index(list(codes)).unique())
+    s = pd.to_datetime(s).dropna()
+    out = {"종목수": int(len(s)), "분포": []}
+    if s.empty:
+        return out
+    per = s.dt.to_period("Q")
+    cnt = per.value_counts().sort_index(ascending=False)
+    n = int(len(s))
+    for p, c in cnt.head(top).items():
+        out["분포"].append({"분기": f"{p.year}년 {p.quarter}분기",
+                           "종목수": int(c), "비율": round(c / n, 4)})
+    older = int(cnt.iloc[top:].sum())
+    if older:
+        out["분포"].append({"분기": "그 이전", "종목수": older,
+                           "비율": round(older / n, 4)})
+    main = cnt.idxmax()
+    out["최신분기"] = f"{cnt.index[0].year}년 {cnt.index[0].quarter}분기"
+    out["최신결산일"] = f"{s.max():%Y-%m-%d}"
+    out["주력분기"] = f"{main.year}년 {main.quarter}분기"
+    out["최신비율"] = round(int(cnt.iloc[0]) / n, 4)
+    dp, dd = due_quarter(today)
+    out["마감분기"] = f"{dp.year}년 {dp.quarter}분기"
+    out["마감일"] = f"{dd:%Y-%m-%d}"
+    out["마감분기비율"] = round(int((per >= dp).sum()) / n, 4)
+    if "공시일" in q.columns:
+        f = q["공시일"].reindex(s.index) if codes is not None else q["공시일"]
+        f = pd.to_datetime(f).dropna()
+        out["공시일있음"] = int(len(f))
+        if len(f):
+            out["최근공시일"] = f"{f.max():%Y-%m-%d}"
+    return out
+
+
+def pct_text(r: float) -> str:
+    """비율 → '31%'. 0이 아닌데 반올림하면 0이 되는 값은 '<1%'."""
+    return "<1%" if 0 < r < 0.005 else f"{r * 100:.0f}%"
+
+
+def vintage_text(res: dict) -> str:
+    """주문서 '요약' 시트용 한 줄 — 점수에 쓰인 재무제표의 분기.
+
+    예: "선정 100종목: 2026년 3분기 92% · 2분기 8% (전체 2,507종목: 3분기 31%
+    · 2분기 28% · 1분기 41%)". 수집이 덜 돼 몇 분기 전 숫자로 고른 종목이
+    많으면 여기서 바로 보입니다.
+    """
+    v = (res or {}).get("재무기준") or {}
+
+    def one(d: dict) -> str:
+        parts, prev_year = [], None
+        for x in d.get("분포", []):
+            q = x["분기"]
+            year = q.split("년")[0] if "년" in q else None
+            label = q.split(" ", 1)[1] if (year and year == prev_year) else q
+            prev_year = year or prev_year
+            parts.append(f"{label} {pct_text(x['비율'])}")
+        return " · ".join(parts)
+
+    sel, alln = v.get("선정") or {}, v.get("전체") or {}
+    if not sel.get("종목수") and not alln.get("종목수"):
+        return "기록 없음"
+    out = f"선정 {sel.get('종목수', 0):,}종목: {one(sel)}"
+    if alln.get("종목수"):
+        out += f" (전체 {alln['종목수']:,}종목: {one(alln)})"
+    if sel.get("최근공시일"):
+        out += f" · 가장 최근 공시 {sel['최근공시일']}"
+    return out

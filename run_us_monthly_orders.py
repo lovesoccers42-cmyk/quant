@@ -42,6 +42,7 @@ from datetime import date
 import pandas as pd
 
 import config
+import factor_core as fc
 import factor_global
 import http_util
 import portfolio
@@ -175,6 +176,7 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
              "값": (f"점수가중 · 섹터중립 {prof['sector_neutral']} · "
                    f"교차분할 {res.get('교차분할')}")},
             {"항목": "주가 기준일", "값": _price_asof()},
+            {"항목": "재무제표 기준", "값": fc.vintage_text(res)},
             {"항목": "마지막 재동기화", "값": _resync_age(cap_info)},
             {"항목": "약정 운용금액",
              "값": (_fmt(pledged)
@@ -275,6 +277,7 @@ def main(tranches: int = 1, profile: str | None = None) -> int:
             "첫실행": r["첫실행"], "미매수": r.get("미매수", 0),
             "배정완료종목수": r.get("배정완료종목수"),
             "주가기준일": _price_asof(), "재동기화": _resync_age(cap_info),
+            "재무기준": res.get("재무기준"),
             "약정액": pledged, "계좌실측": measured, "배정기준": capital,
             "종목당배정액": r.get("종목당배정액"),
             "가격초과제외": r.get("가격초과제외"),

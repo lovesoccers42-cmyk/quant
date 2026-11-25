@@ -476,6 +476,12 @@ _r = _sp.run([sys.executable, os.path.join(os.path.dirname(__file__),
 check(_r.returncode == 0,
       "배틀 계산 점검 (tools/test_battle.py)"
       + ("" if _r.returncode == 0 else "\n" + _r.stdout[-1500:]))
+_r = _sp.run([sys.executable, os.path.join(os.path.dirname(__file__),
+                                           "test_vintage.py")],
+             capture_output=True, text=True)
+check(_r.returncode == 0,
+      "재무제표 기준 시점 점검 (tools/test_vintage.py)"
+      + ("" if _r.returncode == 0 else "\n" + _r.stdout[-1500:]))
 
 print()
 if FAIL:

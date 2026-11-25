@@ -66,6 +66,12 @@ def _quality(fs_list: pd.DataFrame) -> pd.DataFrame:
     pivot["GPA"] = pivot["GrossProfit"] / pivot["TotalAssets"]
     pivot["CFO"] = (pivot["CashFlowFromContinuingOperatingActivities"]
                     / pivot["TotalAssets"])
+    # 점수에 쓰인 분기와 공시일(SEC에서 받은 종목만 공시일이 있습니다)
+    q = fc.fs_quarters(fs, symbol="Symbol", account="account", date="date",
+                       key_account="NetIncome",
+                       filed="filed" if "filed" in fs.columns else None)
+    pivot["재무결산일"] = q["결산일"]
+    pivot["재무공시일"] = q["공시일"] if "공시일" in q.columns else pd.NaT
     return pivot
 
 
@@ -108,7 +114,8 @@ def run(profile: str | None = None) -> dict:
     k_bind.columns = ["Symbol", "K_ratio"]
 
     data_bind = (ticker_list[["Symbol", "Name", "Sector", "Exchange", "Market Cap"]]
-                 .merge(fs_pivot[["ROE", "GPA", "CFO"]], how="left", on="Symbol")
+                 .merge(fs_pivot[["ROE", "GPA", "CFO", "재무결산일"]],
+                        how="left", on="Symbol")
                  .merge(value_pivot, how="left", on="Symbol")
                  .merge(ret_list, how="left", on="Symbol")
                  .merge(k_bind, how="left", on="Symbol"))
@@ -135,6 +142,9 @@ def run(profile: str | None = None) -> dict:
     coverage = {k: int(port[k].notna().sum())
                 for k in ("ROE", "PER", "12M", "K_ratio",
                           "z_quality", "z_value", "z_momentum", "qvm")}
+    fs_q = fs_pivot[["재무결산일", "재무공시일"]].rename(
+        columns={"재무결산일": "결산일", "재무공시일": "공시일"})
+    scored = port.loc[port["qvm"].notna(), "Symbol"]
 
     eligible, liq = fc.liquidity_eligible(
         price_list, symbol="Symbol", date="Date", close="Close", volume="Volume",
@@ -188,6 +198,9 @@ def run(profile: str | None = None) -> dict:
     hold_list.to_parquet(config.OUTPUT_DIR / prof["hold_file"], index=False)
 
     wide = _alias(wide).sort_values("qvm").reset_index(drop=True).round(4)
+    wide["재무분기"] = wide["재무결산일"].map(
+        lambda d: fc.quarter_label(d) if pd.notna(d) else "")
+    wide = wide.drop(columns=["재무결산일"])
     invest = wide.head(config.N_PORTFOLIO).copy()
 
     today = f"{date.today():%Y%m%d}"
@@ -225,6 +238,8 @@ def run(profile: str | None = None) -> dict:
             "model_rows": len(wide), "hold_rows": len(hold_list),
             "coverage": coverage, "유동성": liq, "선정": sel,
             "자본점검": _need,
+            "재무기준": {"전체": fc.vintage_summary(fs_q, scored),
+                      "선정": fc.vintage_summary(fs_q, invest["Symbol"])},
             "excel": str(xlsx_path), "model_date": today,
             "top_buys": top.to_dict(orient="records")}
 

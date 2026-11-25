@@ -53,6 +53,10 @@ def _quality(fs_list: pd.DataFrame) -> pd.DataFrame:
     pivot["ROE"] = pivot["당기순이익"] / pivot["자본"]
     pivot["GPA"] = pivot["매출총이익"] / pivot["자산"]
     pivot["CFO"] = pivot["영업활동으로인한현금흐름"] / pivot["자산"]
+    # 점수에 쓰인 분기 — 대시보드·주문서에 "몇 분기 재무제표로 골랐나"를 띄웁니다
+    pivot["재무결산일"] = fc.fs_quarters(
+        fs, symbol="종목코드", account="계정", date="기준일",
+        key_account="당기순이익")["결산일"]
     return pivot
 
 
@@ -147,7 +151,8 @@ def run(profile: str | None = None) -> dict:
     data_bind = (ticker_list[["종목코드", "종목명", "종가"]]
                  .merge(sector_list[["CMP_CD", "SEC_NM_KOR"]],
                         how="left", left_on="종목코드", right_on="CMP_CD")
-                 .merge(fs_pivot[["ROE", "GPA", "CFO"]], how="left", on="종목코드")
+                 .merge(fs_pivot[["ROE", "GPA", "CFO", "재무결산일"]],
+                        how="left", on="종목코드")
                  .merge(value_pivot, how="left", on="종목코드")
                  .merge(ret_list, how="left", on="종목코드")
                  .merge(k_bind, how="left", on="종목코드"))
@@ -177,6 +182,8 @@ def run(profile: str | None = None) -> dict:
     coverage = {k: int(port[k].notna().sum())
                 for k in ("ROE", "PER", "12M", "K_ratio",
                           "z_quality", "z_value", "z_momentum", "qvm")}
+    fs_q = fs_pivot[["재무결산일"]].rename(columns={"재무결산일": "결산일"})
+    scored = port.loc[port["qvm"].notna(), "종목코드"]
 
     # 실제로 살 수 있는 종목만 + 한 섹터 쏠림 제한
     eligible, liq = fc.liquidity_eligible(
@@ -253,6 +260,10 @@ def run(profile: str | None = None) -> dict:
     tech = _technical_signals(price_pivot, codes)
     wide = wide.merge(tech, how="left", left_on="종목코드", right_index=True)
     wide = wide.sort_values("qvm").reset_index(drop=True).round(4)
+    # 종목마다 몇 분기 재무제표로 점수를 받았는지 (엑셀에서 바로 보이게 글자로)
+    wide["재무분기"] = wide["재무결산일"].map(
+        lambda d: fc.quarter_label(d) if pd.notna(d) else "")
+    wide = wide.drop(columns=["재무결산일"])
     # 사람이 읽는 엑셀은 상위 100종목만, 주문 엔진이 읽는 parquet은 전체.
     invest = wide.head(config.N_PORTFOLIO).copy()
 
@@ -281,6 +292,10 @@ def run(profile: str | None = None) -> dict:
                   "팩터가중치": list(prof["qvm_weights"] or config.QVM_WEIGHTS)}
     return {**_prof_info, "selected": len(invest), "model_rows": len(wide), "buy_signals": n_buy, "sell_signals": n_sell,
             "coverage": coverage, "유동성": liq, "선정": sel,
+            # 점수에 쓰인 재무제표의 분기 분포 — 전체(점수 받은 종목)와
+            # 선정(상위 N). 금액이 없어 공개 요약에 그대로 올라갑니다.
+            "재무기준": {"전체": fc.vintage_summary(fs_q, scored),
+                      "선정": fc.vintage_summary(fs_q, invest["종목코드"])},
             "excel": str(xlsx_path), "model_date": today,
             "top_buys": top_buys.to_dict(orient="records")}
 

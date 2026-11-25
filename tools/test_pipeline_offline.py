@@ -166,6 +166,20 @@ check(any("매수" in str(k) or "매도" in str(k) for k in labels),
 check(res["buy_signals"] + res["sell_signals"] > 0,
       f"매수 {res['buy_signals']} / 매도 {res['sell_signals']} 신호")
 
+# 재무제표 기준 시점 — 모든 종목이 2026-06-30까지 공시했으니 전부 2분기여야
+import factor_core as fc  # noqa: E402
+vin = res.get("재무기준") or {}
+allv, selv = vin.get("전체") or {}, vin.get("선정") or {}
+check(allv.get("최신분기") == "2026년 2분기" and allv.get("최신비율") == 1.0,
+      f"재무기준: 점수 받은 종목 모두 2026년 2분기 ({allv.get('분포')})")
+check(sum(x["종목수"] for x in allv.get("분포", [])) == allv.get("종목수"),
+      "재무기준: 분포를 더하면 종목 수")
+check(selv.get("종목수") == res["selected"], "재무기준: 선정 종목 수가 선정과 같음")
+check("재무분기" in model.columns and set(model["재무분기"]) == {"2026년 2분기"},
+      "모델 파일에 종목별 재무분기 열")
+check(fc.vintage_text(res).startswith(f"선정 {res['selected']:,}종목: 2026년 2분기 100%"),
+      f"주문서 한 줄: {fc.vintage_text(res)}")
+
 # ── 7. 섹터 중립화 (전체 유니버스 기준) ─────────────────────
 # 모델 결과는 qvm 상위만 남긴 것이라 섹터 평균이 0일 수 없습니다.
 # 중립성은 선정 전 전체 종목에 대해 확인해야 합니다.

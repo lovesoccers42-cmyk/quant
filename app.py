@@ -694,6 +694,23 @@ _BATTLE_CSS = """
 .qb-legend > span {display:inline-flex; align-items:center; gap:.3rem; white-space:nowrap;}
 .qb-legend .qb-dash {margin-right:0;}
 .qb-dash.a {border-top-color:var(--a);} .qb-dash.b {border-top-color:var(--b);}
+/* 재무제표 기준 — 최신 분기일수록 진하게 (한 색의 진하기 = 오래됨의 정도) */
+.qb-fsbar {display:flex; gap:2px; height:.75rem; margin:.55rem 0 .45rem;}
+.qb-fsbar > span {display:block; height:100%; min-width:3px;}
+.qb-fsbar > span:first-child {border-radius:.38rem 0 0 .38rem;}
+.qb-fsbar > span:last-child {border-radius:0 .38rem .38rem 0;}
+.qb-fsbar > span:only-child {border-radius:.38rem;}
+.qb .f0 {background:rgba(90,90,90,.85); background:color-mix(in srgb,currentColor 80%,transparent);}
+.qb .f1 {background:rgba(90,90,90,.5);  background:color-mix(in srgb,currentColor 48%,transparent);}
+.qb .f2 {background:rgba(90,90,90,.28); background:color-mix(in srgb,currentColor 26%,transparent);}
+.qb .f3 {background:rgba(90,90,90,.14); background:color-mix(in srgb,currentColor 12%,transparent);}
+.qb-fskey {display:flex; flex-wrap:wrap; gap:.15rem .9rem; font-size:.85rem;}
+.qb-fskey > span {display:inline-flex; align-items:center; gap:.3rem; white-space:nowrap;}
+.qb-fskey i {display:inline-block; width:.65rem; height:.65rem; border-radius:2px;}
+.qb-fskey b {font-weight:800;}
+.qb-fsnote {font-size:.85rem; margin-top:.5rem; line-height:1.5;}
+.qb-fsnote + .qb-fsnote {margin-top:.25rem;}
+.qb-fs .qb-sub {margin-top:.35rem;}
 @media (max-width:380px) {
   .qb-duo {grid-template-columns:1fr;} .qb-duo > div + div {margin-top:.9rem;}
   .qb-row {grid-template-columns:4.4rem 1fr 4.4rem;}
@@ -1393,6 +1410,121 @@ def render_all() -> None:
     st.caption("종목 수익률은 그 시장 통화 기준입니다 (미국 종목은 달러).")
 
 
+# ── 재무제표 기준 — 이번 순위가 몇 분기 재무제표에서 나왔나 ───────────
+# 숫자는 모델 실행(factor_kor/factor_global.run)이 계산해 실행 요약에 남긴
+# '재무기준'을 그대로 씁니다 (factor_core.vintage_summary, tools/
+# test_vintage.py로 검증). 여기서는 보여 주기만 합니다.
+_FS_SCHEDULE = {
+    "kr": "국장 재무제표는 DART에서 매일 새벽에 받습니다.",
+    "us": "미국 재무제표는 매월 2일(야후)과 25일(SEC 공시)에 받습니다.",
+}
+
+
+def _fs_stats(run_info: dict) -> dict:
+    for s_ in run_info.get("steps", []) or []:
+        st_ = s_.get("stats") or {}
+        if st_.get("재무기준"):
+            return st_["재무기준"]
+    return {}
+
+
+def _q_short(label: str, prev_year: str | None) -> tuple[str, str | None]:
+    """'2026년 2분기' 앞 분기와 같은 해면 '2분기'로 줄입니다."""
+    if "년" not in label:
+        return label, prev_year
+    y = label.split("년")[0]
+    return (label.split(" ", 1)[1] if y == prev_year else label), y
+
+
+def _pct1(r) -> str:
+    return "<1%" if 0 < r < 0.005 else f"{r * 100:.0f}%"
+
+
+def _dist_text(d: dict) -> str:
+    out, py = [], None
+    for x in d.get("분포", []):
+        lab, py = _q_short(x["분기"], py)
+        out.append(f"{lab} {_pct1(x['비율'])}")
+    return " · ".join(out)
+
+
+def fs_vintage_html(v: dict, *, title: str, market: str, extra: str = "") -> str:
+    allv, sel = v.get("전체") or {}, v.get("선정") or {}
+    if not allv.get("종목수"):
+        return ""
+    bar, key, py = [], [], None
+    for i, x in enumerate(allv.get("분포", [])):
+        cls = f"f{min(i, 3)}"
+        bar.append(f'<span class="{cls}" style="flex:{max(x["비율"], .004):.4f}" '
+                   f'title="{x["분기"]} {x["종목수"]:,}종목"></span>')
+        lab, py = _q_short(x["분기"], py)
+        key.append(f'<span><i class="{cls}"></i>{_html.escape(lab)} '
+                   f'<b>{_pct1(x["비율"])}</b></span>')
+    lines = [f'<div class="qb-mkt">📑 {_html.escape(title)}</div>',
+             f'<div class="qb-fsbar" role="img" aria-label="재무제표 분기 분포: '
+             f'{_html.escape(_dist_text(allv))}">{"".join(bar)}</div>',
+             f'<div class="qb-fskey">{"".join(key)}</div>',
+             f'<div class="qb-sub">점수 받은 {allv["종목수"]:,}종목 기준'
+             + (f' · 선정 {sel["종목수"]:,}종목은 {_html.escape(_dist_text(sel))}'
+                if sel.get("종목수") else "") + '</div>']
+    due, share = allv.get("마감분기"), allv.get("마감분기비율")
+    if due and share is not None:
+        dd = pd.Timestamp(allv["마감일"])
+        if share >= 0.8:
+            lines.append(f'<div class="qb-fsnote">✅ 공시 마감({dd:%m/%d})이 지난 '
+                         f'{due}까지 반영된 종목이 {_pct1(share)}입니다.</div>')
+        else:
+            lines.append(
+                f'<div class="qb-fsnote">⚠️ 공시 마감({dd:%m/%d})이 지난 {due} '
+                f'재무제표로 점수를 받은 종목은 <b>{_pct1(share)}</b>뿐입니다. '
+                f'나머지 {_pct1(1 - share)}는 그보다 앞 분기 숫자로 순위가 '
+                f'매겨졌습니다 — 공시는 나왔는데 아직 덜 모았을 가능성이 '
+                f'큽니다.</div>')
+    if allv.get("최근공시일"):
+        lines.append(f'<div class="qb-sub">가장 최근 공시 '
+                     f'{pd.Timestamp(allv["최근공시일"]):%m/%d} '
+                     f'(SEC에서 받은 {allv.get("공시일있음", 0):,}종목 기준)</div>')
+    if extra:
+        lines.append(extra)
+    lines.append(f'<div class="qb-sub">{_FS_SCHEDULE.get(market, "")}</div>')
+    return f'<div class="qb-panel qb-fs">{"".join(lines)}</div>'
+
+
+def render_fs_vintage(run_info: dict, market: str) -> None:
+    """최근 실행 바로 아래 — 일간 실행과 주간 주문서가 쓴 재무제표."""
+    v = _fs_stats(run_info)
+    if not v:
+        st.caption("📑 재무제표 기준 시점은 다음 실행부터 표시됩니다.")
+        return
+    extra = ""
+    if market == "kr":
+        ds = load_run("dart_status.json")
+        if ds.get("실행시각"):
+            extra = (f'<div class="qb-sub">DART 마지막 수집 '
+                     f'{ds["실행시각"][5:].replace("-", "/", 1)} · '
+                     f'{ds.get("중단사유", "-")} · 이번에 '
+                     f'{int(ds.get("이번저장행수") or 0):,}행 저장</div>')
+    when = kst(run_info.get("finished", ""))
+    mode = {"daily": "일간", "monthly": "월간"}.get(run_info.get("mode"),
+                                                 run_info.get("mode", ""))
+    _qb(fs_vintage_html(v, title=f"재무제표 기준 · {mode} 실행 {when}",
+                        market=market, extra=extra))
+    if market == "kr":
+        ws = load_run("weekly_status.json")
+        names = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
+        rows = []
+        for k, r in (ws.get("계좌") or {}).items():
+            sel = ((r or {}).get("재무기준") or {}).get("선정") or {}
+            if sel.get("종목수"):
+                rows.append(f'<b>{_html.escape(names.get(k, k))}</b> 선정 '
+                            f'{sel["종목수"]:,}종목: {_html.escape(_dist_text(sel))}')
+        if rows:
+            day = ws.get("작성일", "")
+            _qb(f'<div class="qb-sub">🗓️ 주간 주문서 {day[5:].replace("-", "/")}'
+                f'이 쓴 재무제표</div>'
+                + "".join(f'<div class="qb-sub">{r}</div>' for r in rows))
+
+
 def perf_strip() -> None:
     """화면 맨 위 — 계좌 수익률. 제일 먼저 보고 싶은 숫자입니다.
 
@@ -1493,6 +1625,7 @@ if run_info:
     c2.metric("소요", f"{run_info.get('minutes', 0)}분")
     c3.metric("완료", kst(run_info.get("finished", "")))
     st.markdown(f"상태 {badge(run_info.get('status', '?'))}", unsafe_allow_html=True)
+    render_fs_vintage(run_info, M["key"])
 else:
     st.info(f"{market_label} 실행 결과가 아직 없습니다. "
             "아래 **실행** 탭에서 월간 실행을 먼저 한 번 돌려주세요.")

@@ -38,6 +38,7 @@ from datetime import date
 import pandas as pd
 
 import config
+import factor_core as fc
 import factor_kor
 import http_util
 import portfolio
@@ -161,6 +162,9 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
             # 날짜의 주가에서 나옵니다. 기준일보다 이틀 이상 뒤처져 있으면
             # 주가 수집이 실패한 것이니 거래 전에 확인하세요.
             {"항목": "주가 기준일", "값": _price_asof()},
+            # 순위가 어느 분기 재무제표에서 나왔는지 — 수집이 덜 되면 몇 분기
+            # 전 숫자로 고른 종목이 섞입니다. 비율로 적어 바로 보이게 합니다.
+            {"항목": "재무제표 기준", "값": fc.vintage_text(res)},
             # 상태는 '주문서를 뽑을 때 샀다고 가정한' 값입니다. 실제 체결과
             # 벌어지면 가지고 있지도 않은 종목을 팔라는 주문이 나옵니다
             # (실측: 연습으로 돌린 주문서의 매수 종목이 보유로 남아 그 다음
@@ -249,6 +253,7 @@ def main(tranches: int = 4, profile: str | None = None) -> int:
         "보유종목수": r["보유종목수"], "첫실행": r["첫실행"],
         "미매수": r.get("미매수", 0), "배정완료종목수": r.get("배정완료종목수"),
         "주가기준일": _price_asof(),
+        "재무기준": res.get("재무기준"),
         "재동기화": _resync_age(cap_info),
         "약정액": pledged, "계좌실측": measured, "배정기준": capital,
         "종목당배정액": r.get("종목당배정액"), "가격초과제외": r.get("가격초과제외"),

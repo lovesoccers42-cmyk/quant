@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 
 FILES = {"main": "weekly_kr_latest.json", "alt": "weekly_kr_alt_latest.json"}
-KEEP = ("기준일", "주가기준일", "이번등분", "등분수", "첫실행",
+KEEP = ("기준일", "주가기준일", "재무기준", "이번등분", "등분수", "첫실행",
         "보유종목수", "미매수", "배정완료종목수",
         "매도", "매수", "유지", "가격초과제외")
 
