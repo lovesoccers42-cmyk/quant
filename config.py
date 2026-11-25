@@ -199,14 +199,20 @@ DART_SLEEP = float(os.getenv("QUANT_DART_SLEEP", "0.25"))   # 요청 간격
 # 연속 실패가 이만큼 쌓이면 중단합니다. 막힌 서버를 계속 두드리면
 # 차단만 깊어지고 로그만 수만 줄로 불어납니다.
 DART_MAX_FAILS = int(os.getenv("QUANT_DART_MAX_FAILS", "25"))
-# 전 종목 x 11년이면 16만 회(8일)라 유동성 상위 N개만 받습니다.
-# 백테스트에서 실제로 사는 건 거래대금 5억 이상 ~700종목이라 여유 있게 자릅니다.
+# 과거 채우기(백테스트용)는 전 종목 x 11년이면 16만 회(8일)라 유동성 상위
+# N개만 받습니다. 백테스트에서 실제로 사는 건 거래대금 5억 이상 ~700종목이라
+# 여유 있게 자릅니다. 올해·작년치는 이 제한 없이 점수 매기는 전 종목을 받습니다.
 DART_MAX_TICKERS = int(os.getenv("QUANT_DART_MAX_TICKERS", "1200"))
 # DART 응답 한 건이 3~4초 걸립니다(전체 재무제표라 200행 안팎). 순차로 돌리면
 # 하루 한도(2만 회)를 다 쓰기 전에 Actions 작업 시간(6시간)이 먼저 끝납니다.
 DART_WORKERS = int(os.getenv("QUANT_DART_WORKERS", "3"))
 # 올해치는 분기가 계속 새로 나오므로 이 일수가 지나면 다시 받습니다.
 DART_REFRESH_DAYS = int(os.getenv("QUANT_DART_REFRESH_DAYS", "20"))
+# 공시 마감이 지났는데 못 받은 보고서는 마감 후 이 일수까지 매일 다시 봅니다.
+# 마감 직전에 몰려 내고, DART 재무 API에는 하루 이틀 늦게 올라오기도 합니다.
+DART_CHASE_DAYS = int(os.getenv("QUANT_DART_CHASE_DAYS", "30"))
+# 분기는 끝났지만 마감 전(일찍 내는 회사)이면 이 일수마다 봅니다.
+DART_SEASON_DAYS = int(os.getenv("QUANT_DART_SEASON_DAYS", "7"))
 # 월간 실행에서 최신 분기를 받는 데 쓸 호출 수. 과거 채우기(하루 19,000)와
 # 같은 날 겹치면 한도에 걸릴 수 있는데, 그때는 기존 재무제표로 그냥 돌아갑니다.
 DART_MONTHLY_BUDGET = int(os.getenv("QUANT_DART_MONTHLY_BUDGET", "8000"))

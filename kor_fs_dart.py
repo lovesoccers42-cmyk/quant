@@ -327,13 +327,23 @@ def probe(api_key: str, cmap: dict | None = None) -> tuple[bool, str]:
     return False, f"status {st} · {str(data.get('message'))[:80]}"
 
 
-def _fetch_year(api_key: str, ticker: str, corp: str, year: int) -> dict:
-    """한 종목·한 사업연도의 4개 보고서를 받아 정리합니다 (작업 단위)."""
+def _fetch_year(api_key: str, ticker: str, corp: str, year: int,
+                today=None) -> dict:
+    """한 종목·한 사업연도의 4개 보고서를 받아 정리합니다 (작업 단위).
+
+    기간이 아직 안 끝난 분기의 보고서는 묻지 않습니다. 있을 수가 없는데
+    연결(CFS)·별도(OFS) 두 번씩 '없음'을 받느라 호출만 씁니다 — 올해치를
+    다시 받을 때마다 사업보고서 한 건에 2회씩 버리고 있었습니다.
+    """
     by_q, got, used_total = {}, 0, 0
     statuses: dict[str, int] = {}
     sample = None
+    today = (pd.Timestamp(today) if today is not None
+             else pd.Timestamp.today()).normalize()
 
     for reprt, q, _months in REPORTS:
+        if quarter_end(year, q) >= today:
+            continue
         data, used = fetch_report(api_key, corp, year, reprt)
         used_total += used
         st = str(data.get("status"))
@@ -360,14 +370,65 @@ def load_progress() -> pd.DataFrame:
     return df
 
 
+def quarter_end(year: int, q: int) -> pd.Timestamp:
+    return (pd.Timestamp(int(year), int(q) * 3, 1) + pd.offsets.MonthEnd(0)).normalize()
+
+
+def due_date(year: int, q: int) -> pd.Timestamp:
+    """공시 마감일 — 분기·반기보고서는 분기말+45일, 사업보고서는 결산일+90일."""
+    return quarter_end(year, q) + pd.Timedelta(days=90 if int(q) == 4 else 45)
+
+
+def _got(status) -> int:
+    """'3/4' → 3. '없음'이나 이상한 값은 0."""
+    s = str(status)
+    try:
+        return int(s.split("/", 1)[0]) if "/" in s else 0
+    except ValueError:
+        return 0
+
+
+def needs_refresh(year: int, status, fetched, now) -> bool:
+    """올해·작년치를 다시 받을지.
+
+    2026-11-25 실측: 3분기 마감(11/14)이 지났는데 삼성전자·SK하이닉스를 포함해
+    선정 종목의 1/3이 아직 2분기 숫자였습니다. 11/07~11/16에 받아 둔 건은
+    '20일 뒤에 다시'라는 규칙 때문에 11/27~12/06까지 그대로였습니다. 그사이
+    주간 주문서가 두 번 나갑니다. 공시는 마감 직전에 몰리고, DART 재무 API에는
+    공시 뒤 하루 이틀 늦게 올라오기도 합니다. 그래서 공시 시즌에는 자주 봅니다.
+
+      · 마감이 지났는데 못 받은 보고서가 있으면 → 매일 (마감 후 DART_CHASE_DAYS일까지)
+      · 마감 지난 건 다 받았고, 끝난 분기가 마감 전이면 (일찍 내는 회사)
+        → DART_SEASON_DAYS일마다
+      · 그 밖에 올해치는 DART_REFRESH_DAYS일마다 (정정공시 반영)
+      · 작년치는 4개 보고서를 다 받을 때까지만 DART_REFRESH_DAYS일마다
+    """
+    now = pd.Timestamp(now).normalize()
+    fetched = pd.to_datetime(fetched, errors="coerce")
+    age = 10**6 if pd.isna(fetched) else (now - fetched.normalize()).days
+    if age < 1:                           # 오늘 받은 건 또 받지 않습니다
+        return False
+    got = _got(status)
+    due = [q for q in (1, 2, 3, 4) if due_date(year, q) <= now]
+    ended = sum(quarter_end(year, q) < now for q in (1, 2, 3, 4))
+    if got < len(due) and \
+            (now - due_date(year, due[-1])).days <= config.DART_CHASE_DAYS:
+        return True
+    if len(due) <= got < ended and age >= config.DART_SEASON_DAYS:
+        return True
+    return age >= config.DART_REFRESH_DAYS and (int(year) == now.year or got < 4)
+
+
 def _done_keys(prog: pd.DataFrame, now=None) -> set:
     """완료로 볼 종목·연도.
 
     두 가지는 완료로 치지 않습니다.
       1. 한 분기도 못 읽은 건(0/4) — 매핑이 틀려 빈손이었던 건을 '완료'로
          남기면 고친 뒤에도 영원히 건너뜁니다.
-      2. 올해치 중 받아둔 지 오래된 건 — 올해는 분기가 계속 새로 나옵니다.
-         한 번 받고 끝내면 최신 분기가 영영 안 들어옵니다.
+      2. 올해·작년치 중 다시 볼 때가 된 건 — needs_refresh 참고. 작년치도
+         봅니다. 사업보고서(4분기)는 이듬해 3월에 나오는데, 예전에는 해가
+         바뀌면 작년치를 '지나간 연도'로 보고 다시 받지 않아 4분기가 영영
+         안 들어올 뻔했습니다 (FnGuide가 죽은 뒤로는 DART가 유일한 출처입니다).
     """
     if prog.empty:
         return set()
@@ -376,11 +437,14 @@ def _done_keys(prog: pd.DataFrame, now=None) -> set:
         return set()
 
     now = pd.Timestamp(now) if now is not None else pd.Timestamp.today()
-    this_year = now.year
     if "갱신일" in ok.columns:
-        age = (now.normalize() - pd.to_datetime(ok["갱신일"], errors="coerce")).dt.days
-        stale_now = (ok["연도"].astype(int) == this_year) & (age >= config.DART_REFRESH_DAYS)
-        ok = ok[~stale_now.fillna(True)]
+        years = ok["연도"].astype(int)
+        live = years >= now.year - 1
+        stale = pd.Series(False, index=ok.index)
+        for i in ok.index[live]:
+            stale[i] = needs_refresh(int(ok.at[i, "연도"]), ok.at[i, "상태"],
+                                     ok.at[i, "갱신일"], now)
+        ok = ok[~stale]
     return set(zip(ok["종목코드"].astype(str), ok["연도"].astype(int)))
 
 
@@ -407,8 +471,24 @@ def collect(api_key: str | None = None, years=None, tickers=None,
             "GitHub Secrets에 DART_API_KEY로 넣어주세요.")
 
     years = list(years or range(config.DART_START_YEAR, pd.Timestamp.today().year + 1))
-    tickers = list(tickers or _priority_tickers())
-    if not tickers:
+    today = pd.Timestamp.today().normalize()
+    live_from = today.year - 1
+
+    # 과거 채우기(백테스트용)는 유동성 상위 DART_MAX_TICKERS개만, 올해·작년치는
+    # 점수를 매기는 전 종목을 받습니다.
+    # 2026-11-25 실측: 점수 받은 2,519종목 중 1,044종목(40%)이 아직 2026년
+    # 1분기 숫자였습니다. 상위 1,200개 밖 종목은 FnGuide에서만 받았는데
+    # FnGuide가 9월에 죽은 뒤로 아무도 안 받고 있었습니다. 거래대금이 작아
+    # 직접 사지는 않지만, 같은 줄에 세워 z점수를 매기므로 낡은 숫자가 점수
+    # 분포를 흐립니다. 올해·작년치만이라 한 번에 1만 회 안쪽이면 됩니다.
+    if tickers:
+        order = list(tickers)
+        deep = set(order)
+    else:
+        order = list(_priority_tickers(limit=0))
+        deep = set(order[:config.DART_MAX_TICKERS] if config.DART_MAX_TICKERS
+                   else order)
+    if not order:
         raise RuntimeError("수집할 종목이 없습니다 (kor_ticker가 비었습니다).")
 
     cmap = corp_map(api_key)
@@ -418,20 +498,19 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     if not ok:
         raise RuntimeError(f"DART 응답을 받지 못해 수집을 시작하지 않습니다. {why}")
 
-    dec_fye, fye_calls = december_filers(api_key, tickers, cmap)
+    dec_fye, fye_calls = december_filers(api_key, order, cmap)
     prog = load_progress()
     done = _done_keys(prog)
     odd_fiscal = 0
 
     calls, buffer, new_prog = 1 + fye_calls, [], []
-    rows_saved, skipped, missing = 0, 0, 0
-    today = pd.Timestamp.today().normalize()
+    rows_saved, skipped, missing, processed = 0, 0, 0, 0
     sample = None          # 아무것도 못 읽었을 때 원인을 보여줄 실제 응답
     statuses: dict[str, int] = {}
 
     # 받을 목록을 먼저 만듭니다 (이미 받은 건·DART에 없는 종목·비12월 결산 제외)
     tasks = []
-    for ticker in tickers:
+    for ticker in order:
         corp = cmap.get(ticker)
         if corp is None:
             missing += 1
@@ -442,10 +521,18 @@ def collect(api_key: str | None = None, years=None, tickers=None,
             odd_fiscal += 1
             continue
         for year in years:
+            year = int(year)
+            if year < live_from and ticker not in deep:
+                continue                       # 과거 채우기는 상위 종목만
+            if quarter_end(year, 1) >= today:
+                continue                       # 아직 나올 보고서가 없는 해
             if (ticker, year) in done:
                 skipped += 1
                 continue
-            tasks.append((ticker, corp, int(year)))
+            tasks.append((ticker, corp, year))
+    # 올해·작년치를 먼저 받습니다. 한도가 모자라면 과거 채우기가 밀리는 게
+    # 맞습니다 — 지금 주문서에 쓰는 숫자가 먼저입니다.
+    tasks.sort(key=lambda t: t[2] < live_from)
 
     # DART 응답이 한 건에 3~4초씩 걸립니다(전체 재무제표라 200행 안팎).
     # 순차로 돌리면 하루 한도를 다 쓰기도 전에 작업 시간(6시간)이 먼저 끝납니다.
@@ -497,6 +584,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
         for res in pool.map(work, tasks):
             if res is None:
                 continue
+            processed += 1
             for k, v in res["상태"].items():
                 statuses[k] = statuses.get(k, 0) + v
             if sample is None and res["진단"]:
@@ -520,7 +608,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
                 save_progress(prog, new_prog)
                 prog, new_prog = load_progress(), []
                 log.info("DART 수집 %d회 호출 · %d행 누적 · 남은작업 %d",
-                         calls, rows_saved, len(tasks) - len(new_prog))
+                         calls, rows_saved, len(tasks) - processed)
 
     stopped = stop["why"]
 
@@ -528,7 +616,9 @@ def collect(api_key: str | None = None, years=None, tickers=None,
         rows_saved += store.upsert("kor_fs", pd.concat(buffer, ignore_index=True))
     total = save_progress(prog, new_prog)
 
-    remaining = len(tickers) * len(years) - total
+    # 이번에 받을 목록 중 못 받은 것. 예전에는 '종목 수 × 연도 수 - 진행 기록'
+    # 이었는데, 이제 과거 연도는 상위 종목만 받으므로 그 식이 맞지 않습니다.
+    remaining = len(tasks) - processed
     out = {"호출수": calls, "저장행수": rows_saved, "완료": total,
            "남은작업": max(remaining, 0), "건너뜀": skipped,
            "DART에없음": missing, "12월결산아님": odd_fiscal,

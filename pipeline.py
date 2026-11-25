@@ -180,8 +180,11 @@ def monthly_steps() -> list[Step]:
         # 긁어오는 2차 출처라 이번을 포함해 두 번 깨졌습니다. 원출처인 DART로
         # 바꿨습니다 — 백테스트 과거 확장에 쓰는 바로 그 수집기입니다.
         # (kor_fs.py는 지워두지 않았습니다. FnGuide가 살아나면 다시 쓸 수 있습니다.)
+        # 작년치도 넘깁니다 — 사업보고서(4분기)는 이듬해 3월에 나옵니다.
+        # 다 받은 해는 진행 기록으로 건너뛰므로 호출은 들지 않습니다.
         Step("재무제표 최신화(DART)", kor_fs_dart.collect,
-             {"years": [date.today().year], "budget": config.DART_MONTHLY_BUDGET},
+             {"years": [date.today().year - 1, date.today().year],
+              "budget": config.DART_MONTHLY_BUDGET},
              validator=check_fs_dart),
         Step("밸류 지표 계산", kor_value.build),
         Step("QVM 팩터 모델", factor_kor.run, validator=check_factor),

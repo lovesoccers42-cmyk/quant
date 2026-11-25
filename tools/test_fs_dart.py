@@ -267,6 +267,45 @@ check(("000660", 2026) not in k3,
       f"올해치가 {config.DART_REFRESH_DAYS}일 넘으면 다시 받음 (최신 분기 반영)")
 check(("035720", 2018) in k3, "지나간 연도는 다시 안 받음 (더 안 바뀌므로)")
 
+# ── 7-d. 공시 시즌에는 자주 보는가 ──────────────────────────
+# 2026-11-25 실측: 3분기 마감(11/14)이 지났는데 11/07~11/16에 받아 둔 종목은
+# '20일 뒤에 다시' 규칙 때문에 12월 초까지 2분기 숫자로 남아 있었습니다.
+# 삼성전자·SK하이닉스도 11/15에 받았는데 3분기가 아직 API에 없었습니다.
+D = pd.Timestamp
+check(dart.due_date(2026, 3) == D("2026-11-14")
+      and dart.due_date(2026, 4) == D("2027-03-31"),
+      "마감일: 분기말+45일, 사업보고서는 +90일")
+NR = dart.needs_refresh
+check(NR(2026, "2/4", D("2026-11-15"), D("2026-11-25")),
+      "마감 지났는데 3분기 없음 → 열흘 전에 받았어도 다시 받음")
+check(NR(2026, "2/4", D("2026-11-24"), D("2026-11-25")),
+      "마감 뒤에는 어제 받았어도 매일 다시 봄 (API가 하루 이틀 늦음)")
+check(not NR(2026, "2/4", D("2026-11-25"), D("2026-11-25")),
+      "오늘 받은 건 같은 날 또 받지 않음")
+check(not NR(2026, "3/4", D("2026-11-20"), D("2026-11-25")),
+      "3분기까지 다 받았으면 20일 규칙대로 쉼")
+check(NR(2026, "2/4", D("2026-10-20"), D("2026-10-28")),
+      "분기는 끝났고 마감 전이면 일주일마다 봄 (일찍 내는 회사)")
+check(not NR(2026, "2/4", D("2026-10-25"), D("2026-10-28")),
+      "그 기간에도 매일은 아님")
+check(not NR(2026, "2/4", D("2026-12-20"), D("2026-12-28")),
+      f"마감 후 {config.DART_CHASE_DAYS}일이 지나면 매일 보기를 멈춤 (안 내는 회사)")
+check(NR(2027 - 1, "3/4", D("2027-01-20"), D("2027-02-01")),
+      "해가 바뀌어도 작년 사업보고서(4분기)를 기다림")
+check(NR(2026, "3/4", D("2027-04-03"), D("2027-04-05")),
+      "사업보고서 마감(3/31)이 지나면 작년치도 매일 봄")
+check(not NR(2026, "4/4", D("2027-01-10"), D("2027-04-05")),
+      "작년치를 4개 다 받았으면 더 안 받음")
+k4 = dart._done_keys(pd.DataFrame([
+    {"종목코드": "005930", "연도": 2026, "상태": "2/4", "갱신일": D("2026-11-15")},
+    {"종목코드": "000660", "연도": 2026, "상태": "3/4", "갱신일": D("2026-11-20")},
+    {"종목코드": "035720", "연도": 2025, "상태": "4/4", "갱신일": D("2026-09-17")},
+    {"종목코드": "035720", "연도": 2018, "상태": "2/4", "갱신일": D("2026-09-17")},
+]), now=D("2026-11-25"))
+check(("005930", 2026) not in k4 and ("000660", 2026) in k4
+      and ("035720", 2025) in k4 and ("035720", 2018) in k4,
+      "진행 기록에 그대로 적용 (못 받은 것만 다시)")
+
 # ── 7-b. 12월 결산 판정 (기존 kor_fs로, DART 호출 없이) ──────
 import store  # noqa: E402
 store.write("kor_fs", pd.DataFrame([
@@ -359,6 +398,37 @@ check(r2["건너뜀"] == done_after_1,
 check(len(seen) > n1, "이어서 새 구간을 받음")
 real = [x for x in seen if x[0] != PROBE]
 check(len(real) == len(set(real)), "재시작 후에도 중복 호출 없음")
+
+# ── 9-c. 올해·작년치는 전 종목, 과거는 상위만, 올해치 먼저 ───────
+# 2026-11-25 실측: 유동성 상위 1,200개 밖 1,044종목이 FnGuide가 죽은 뒤로
+# 아무도 안 받아 2026년 1분기 숫자로 점수를 받고 있었습니다.
+store.write("kor_fs", pd.DataFrame(columns=list(store.SCHEMAS["kor_fs"])))
+store.write("kor_dart_progress", pd.DataFrame(
+    columns=["종목코드", "연도", "상태", "갱신일"]))
+seen.clear()
+_old_max = config.DART_MAX_TICKERS
+config.DART_MAX_TICKERS = 10
+Y = pd.Timestamp.today().year
+dart.collect(api_key="TEST", years=[Y - 3, Y - 1, Y + 1], budget=260, chunk=10)
+config.DART_MAX_TICKERS = _old_max
+real = [x for x in seen if x[0] != PROBE]
+live_c = {c for c, y, _ in real if y == Y - 1}
+old_c = {c for c, y, _ in real if y == Y - 3}
+check(len(live_c) == len(TICKERS),
+      f"작년치는 상위 10개 밖까지 전 종목을 받음 ({len(live_c)}/{len(TICKERS)})")
+check(old_c and old_c <= {f"C{t}" for t in TICKERS[:10]},
+      f"과거 채우기는 상위 10개만 ({len(old_c)}종목)")
+check(not any(y == Y + 1 for _, y, _ in real), "아직 시작도 안 한 해는 묻지 않음")
+first_old = next(i for i, x in enumerate(real) if x[1] == Y - 3)
+check(sum(1 for x in real[:first_old] if x[1] == Y - 1) >= 4 * (len(TICKERS) - 6),
+      "올해·작년치를 과거 채우기보다 먼저 받음")
+
+# 기간이 안 끝난 분기의 보고서는 묻지 않음 (연결·별도 두 번씩 '없음'을 받던 낭비)
+seen.clear()
+r = dart._fetch_year("TEST", "005930", "C005930", 2026, today="2026-11-25")
+check(sorted(x[2] for x in seen) == ["11012", "11013", "11014"],
+      f"11월에는 1~3분기만 요청, 사업보고서는 안 물음 ({sorted(x[2] for x in seen)})")
+check(r["성공"] == 3 and r["호출"] == 3, f"3건 받고 3회 호출 ({r['성공']}, {r['호출']})")
 
 # ── 9-b. 막혔을 때 두드리지 않고 멈추는가 ───────────────────
 # 2026-10-05에 DART가 연결을 끊기 시작했는데, 실패해도 다음 건으로 넘어가는
