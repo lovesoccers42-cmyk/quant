@@ -132,6 +132,15 @@ broken = perf.twr(c3["평가액"], c3["순입출금"].where(c3.index != pd.Times
 check(not perf.twr_trust(broken)["신뢰"], "예전처럼 입금이 빠지면 신뢰 점검이 잡아냄")
 check(perf.combine_markets({"kr": kr, "us": us}, None).empty,
       "미국이 있는데 환율이 없으면 합치지 않음 (단위가 섞임)")
+# 종목 수가 붙은 시장별 곡선(퀀트 종목만)은 합산에도 종목 수를 남겨야
+# 합산 곡선의 신뢰 점검이 바구니 크기를 봅니다 (2026-11-28 실측: 시장별로는
+# 통과한 10월 초 몇 종목 구간이 합산에서만 '설명 안 되는 변화'로 숨겨짐).
+kr_n, us_n = kr.copy(), us.copy()
+kr_n["종목수"], us_n["종목수"] = 10, 5
+cn = perf.combine_markets({"kr": kr_n, "us": us_n}, fx)
+check(list(cn["종목수"]) == [10, 15, 15, 15],
+      f"합산 종목 수 = 두 시장 합 ({list(cn['종목수'])})")
+check("종목수" not in c.columns, "종목 수가 없는 곡선끼리면 합산에도 없음 (예전 그대로)")
 
 # 거래일이 다름 — 미국만 여는 날(10/16)
 us2 = tw(kd[1:] + ["2026-10-16"], [1000, 1000, 1000, 1050], {"2026-10-13": 1000})

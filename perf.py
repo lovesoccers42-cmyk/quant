@@ -986,7 +986,12 @@ def combine_markets(parts: dict, fx: pd.Series | None,
         f = fx.dropna().sort_index()
         x = f.reindex(f.index.union(idx)).ffill().bfill().reindex(idx)
     vals, flows = {}, pd.Series(0.0, index=idx)
+    n_all, has_n = pd.Series(0.0, index=idx), False
     for m, t in use.items():
+        if "종목수" in t.columns:            # 두 시장 종목 수를 더해 둡니다
+            has_n = True
+            n_all = n_all + (pd.to_numeric(t["종목수"], errors="coerce")
+                             .reindex(idx).ffill().fillna(0.0))
         v = t["평가액"].reindex(idx).ffill().fillna(0.0)
         fl = t["순입출금"].reindex(idx).fillna(0.0)
         # 그 시장이 처음 잡히는 날은 그날 평가액 전체를 '들어온 돈'으로 봅니다
@@ -1011,6 +1016,11 @@ def combine_markets(parts: dict, fx: pd.Series | None,
         out[k] = v.loc[start:]
     if x is not None:
         out["환율"] = x.loc[start:]
+    # 합산 곡선도 신뢰 점검이 바구니 크기를 보게 합니다 (twr_trust 참고).
+    # 빠뜨리면 시장별로는 통과한 초기 몇 종목짜리 구간이 합산에서만 8%
+    # 하나로 판정돼 '설명 안 되는 변화'로 숨겨집니다 (2026-11-28 실측).
+    if has_n:
+        out["종목수"] = n_all.loc[start:].astype(int)
     return out
 
 
