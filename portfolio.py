@@ -1188,7 +1188,8 @@ def _fill_day(f, asof_ts: pd.Timestamp) -> pd.Timestamp:
 
 
 def record_fills(src, *, account: str, today: date | None = None,
-                 asof: date | None = None, table: str = TRADES) -> dict:
+                 asof: date | None = None, table: str = TRADES,
+                 state_table: str | None = None) -> dict:
     """체결내역을 원장의 그 주 주문에 채워 넣습니다.
 
     asof를 주지 않으면 그 계좌의 **가장 최근 주문 날짜**에 채웁니다(보통
@@ -1204,6 +1205,15 @@ def record_fills(src, *, account: str, today: date | None = None,
     스냅샷(10/12·10/18)에서 오고 현금흐름만 10/21에 있으니, 주식을 산 것이
     통째로 **수익**으로 계산됐습니다. 분할 진입 중이던 배우자 계좌가 9일에
     +93.57%로 찍혔습니다. 실제 손익은 -145,625원이었습니다.
+
+    **state_table을 주면 못 산 신규 매수를 보유 상태에서 '미매수'로 돌립니다.**
+    주문서를 만들 때 상태는 '적힌 대로 다 샀다'고 가정하고 바뀝니다. 체결
+    내역에 없는 매수를 그대로 두면 장부에만 있는 종목이 되고, 그 등분 차례가
+    다시 오면 순위가 밀린 그 종목을 **팔라는 주문**이 나옵니다 (2026-11-27
+    실측: 은진 계좌 매도 4종목이 계좌에 없는 종목이었습니다). 미매수(기준금액
+    0)는 팔 대상이 아니고, 그 등분 차례에 아직 순위 안이면 다시 사라고
+    나오고 밀렸으면 조용히 빠집니다 — 주문서에 적힌 "못 산 종목은 다음
+    차례에 채웁니다"가 실제로 그렇게 됩니다.
     """
     today = today or date.today()
     fills = parse_fills(src)
@@ -1269,9 +1279,45 @@ def record_fills(src, *, account: str, today: date | None = None,
         upd = pd.concat([upd, pd.DataFrame(rows)], ignore_index=True)
     _write(table, upd)
 
+    unbought = []
+    if state_table and len(left):
+        unbought = _unfilled_buys_to_pending(
+            state_table, week.loc[left], asof_ts)
+
     return {"체결반영": len(matched), "원장밖": len(rows),
             "미체결": int(len(left)), "기준일": f"{asof_ts:%Y-%m-%d}",
-            "미체결종목": [_code(c) for c in week.loc[left, "종목코드"]]}
+            "미체결종목": [_code(c) for c in week.loc[left, "종목코드"]],
+            "미매수로돌림": unbought}
+
+
+def _unfilled_buys_to_pending(state_table: str, unfilled: pd.DataFrame,
+                              asof_ts) -> list:
+    """체결 안 된 신규 매수를 보유 상태에서 미매수(기준금액 0)로 돌립니다.
+
+    그 주문이 넣은 행만 건드립니다 — 편입일이 그 주문 날짜인 행. 그 뒤에
+    다시 사서 편입일이 바뀌었거나, 이미 다른 주문서가 정리한 종목은 그대로
+    둡니다. 비중확대·현금투입처럼 들고 있던 종목에 더 사는 주문은 건드리지
+    않습니다 — 종목은 계좌에 있고, 금액은 다음 재동기화가 맞춥니다.
+    """
+    buys = unfilled[unfilled["구분"].astype(str).str.strip() == "매수"]
+    codes = {_code(c) for c in buys["종목코드"] if str(c).strip()}
+    if not codes:
+        return []
+    st = load_state(state_table)
+    if st.empty:
+        return []
+    day = pd.Timestamp(asof_ts).normalize()
+    entered = pd.to_datetime(st["편입일"], errors="coerce").dt.normalize()
+    base = pd.to_numeric(st["기준금액"], errors="coerce")
+    hit = st["종목코드"].isin(codes) & (entered == day) & (base != 0.0)
+    if not hit.any():
+        return []
+    st.loc[hit, "기준금액"] = 0.0
+    _write(state_table, st)
+    out = sorted(st.loc[hit, "종목코드"])
+    log.info("체결 안 된 신규 매수 %d종목을 미매수로 돌렸습니다: %s",
+             len(out), ", ".join(out[:10]))
+    return out
 
 
 def log_trades_from_json(src, *, account: str, table: str = TRADES) -> dict:

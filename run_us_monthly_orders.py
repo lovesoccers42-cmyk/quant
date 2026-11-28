@@ -425,7 +425,8 @@ def fills_main(src: str, asof: str | None = None,
     if asof and str(asof).strip() and str(asof).strip() != "-":
         _asof = pd.Timestamp(str(asof).strip()).date()
     r = portfolio.record_fills(src, account=prof["key"], asof=_asof,
-                               table=prof["trades_table"])
+                               table=prof["trades_table"],
+                               state_table=prof["state_table"])
     print("\n" + "=" * 60)
     print(f"  체결내역 반영 — {prof['라벨']} 계좌 (미국) · {r['기준일']} 주문")
     print("=" * 60)
@@ -437,6 +438,9 @@ def fills_main(src: str, asof: str | None = None,
               f"{', '.join(r['미체결종목'][:10])}"
               f"{' …' if len(r['미체결종목']) > 10 else ''}")
         print("  (환전이 늦어 못 샀다면 다음 달 차례에 다시 후보로 올라옵니다)")
+    if r.get("미매수로돌림"):
+        print(f"  못 산 신규 매수 {len(r['미매수로돌림'])}종목을 보유에서 '미매수'로 "
+              f"돌렸습니다 — 다음 주문서에 매도로 나오지 않습니다")
     print("\n  이제 대시보드의 수익률이 계획가가 아니라 실제 체결가로 계산됩니다.")
     return 0
 

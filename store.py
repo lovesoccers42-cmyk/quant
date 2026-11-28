@@ -233,8 +233,13 @@ def write(table: str, df: pd.DataFrame) -> int:
     return len(df)
 
 
-def upsert(table: str, df: pd.DataFrame) -> int:
-    """기본키가 겹치면 새 값으로 교체, 없으면 추가. 반영된 행 수를 반환."""
+def upsert(table: str, df: pd.DataFrame, drop=None) -> int:
+    """기본키가 겹치면 새 값으로 교체, 없으면 추가. 반영된 행 수를 반환.
+
+    drop: 기존 테이블을 받아 지울 행을 True로 돌려주는 함수(선택). 새 행을
+    합치기 전에 지웁니다 — 같은 잠금 안에서 읽고 쓰므로 따로 지우고 다시
+    쓰는 것보다 안전하고 한 번만 씁니다.
+    """
     if df is None or len(df) == 0:
         return 0
 
@@ -247,6 +252,8 @@ def upsert(table: str, df: pd.DataFrame) -> int:
 
     with _write_lock:
         old = pd.read_parquet(path(table)) if path(table).exists() else pd.DataFrame()
+        if drop is not None and len(old):
+            old = old[~drop(old).astype(bool)]
         if len(old):
             # 컬럼 순서를 기존 테이블에 맞춤
             new = new.reindex(columns=[c for c in old.columns if c in new.columns]

@@ -47,6 +47,12 @@ BASE = "https://opendart.fss.or.kr/api"
 DAILY_LIMIT = 20_000          # DART 인증키 1개의 하루 호출 한도
 UNIT = 1e8                    # 원 → 억원 (기존 kor_fs 단위)
 PROGRESS = "kor_dart_progress"
+# 응답을 읽는 규칙이 바뀌면 올립니다. 진행 기록의 '판'이 이보다 낮은
+# 종목·연도는 다시 받습니다 — 예전 규칙으로 저장된 숫자가 틀렸을 때
+# 고친 규칙으로 덮어쓰기 위해서입니다.
+#   1  처음
+#   2  현금흐름표 분기값을 누적으로 읽음 (2026-11-28, _amount 참고)
+PARSER_VERSION = 2
 
 # (보고서코드, 분기, 누적개월)
 REPORTS = [("11013", 1, 3), ("11012", 2, 6), ("11014", 3, 9), ("11011", 4, 12)]
@@ -116,10 +122,18 @@ def _amount(row: dict, *, stock: bool, reprt: str = ""):
     """(값, 기준) 반환. 기준은 'q3m'(그 분기 3개월) 또는 'cum'(연초부터 누적).
 
     fnlttSinglAcntAll은 금액 컬럼이 둘입니다.
-      · thstrm_add_amount — 손익·현금흐름의 연초부터 누적
-      · thstrm_amount     — 분기보고서에서는 그 분기 3개월, 사업보고서에서는 1년
+      · thstrm_add_amount — 손익계산서의 연초부터 누적
+      · thstrm_amount     — 손익계산서: 분기보고서는 그 분기 3개월, 사업보고서는 1년
+                            현금흐름표: **언제나 연초부터 누적** (3개월치 칸이 없음)
     둘 중 무엇을 읽었는지 기억해둬야 나중에 3개월치로 환산할 때 틀리지 않습니다.
     (누적을 3개월로 착각해 빼면 완전히 엉뚱한 값이 나옵니다.)
+
+    현금흐름표(sj_div CF)는 분기보고서에 누적만 싣고 thstrm_add_amount를
+    비워 둡니다. 예전에는 이걸 '3개월치'로 읽어 2분기에 반기 누적, 3분기에
+    9개월 누적이 들어갔고 4분기는 크게 음수가 됐습니다. 2026-11-27 실측:
+    FnGuide와 겹치는 1,035종목의 2025년 영업현금흐름에서 DART 2분기 값의
+    94%, 3분기 값의 92%가 누적값과 같았습니다 (순이익은 정상). 퀄리티의
+    현금흐름 점수와 PCR이 9월부터 틀어져 있었습니다.
     """
     if stock:
         v = _num(row, "thstrm_amount")
@@ -131,8 +145,11 @@ def _amount(row: dict, *, stock: bool, reprt: str = ""):
     v = _num(row, "thstrm_amount")
     if v is None:
         return None, None
-    # 사업보고서의 thstrm_amount는 1년치 = 4분기 누적
-    return v, ("cum" if str(reprt) == "11011" else "q3m")
+    # 사업보고서의 thstrm_amount는 1년치 = 4분기 누적.
+    # 현금흐름표는 분기보고서에서도 누적입니다 (위 설명).
+    if str(reprt) == "11011" or str(row.get("sj_div", "")).strip().upper() == "CF":
+        return v, "cum"
+    return v, "q3m"
 
 
 def _period_end(row: dict, year: int | None = None, quarter: int | None = None):
@@ -366,7 +383,10 @@ def _fetch_year(api_key: str, ticker: str, corp: str, year: int,
 def load_progress() -> pd.DataFrame:
     df = store.read(PROGRESS)
     if df.empty:
-        return pd.DataFrame(columns=["종목코드", "연도", "상태", "갱신일"])
+        return pd.DataFrame(columns=["종목코드", "연도", "상태", "갱신일", "판"])
+    if "판" not in df.columns:          # '판'이 생기기 전 기록은 1판
+        df["판"] = 1
+    df["판"] = pd.to_numeric(df["판"], errors="coerce").fillna(1).astype(int)
     return df
 
 
@@ -422,7 +442,7 @@ def needs_refresh(year: int, status, fetched, now) -> bool:
 def _done_keys(prog: pd.DataFrame, now=None) -> set:
     """완료로 볼 종목·연도.
 
-    두 가지는 완료로 치지 않습니다.
+    세 가지는 완료로 치지 않습니다 (3번은 아래 코드 주석).
       1. 한 분기도 못 읽은 건(0/4) — 매핑이 틀려 빈손이었던 건을 '완료'로
          남기면 고친 뒤에도 영원히 건너뜁니다.
       2. 올해·작년치 중 다시 볼 때가 된 건 — needs_refresh 참고. 작년치도
@@ -433,6 +453,16 @@ def _done_keys(prog: pd.DataFrame, now=None) -> set:
     if prog.empty:
         return set()
     ok = prog[prog["상태"].astype(str) != "0/4"] if "상태" in prog.columns else prog
+    if ok.empty:
+        return set()
+
+    # 3. 예전 규칙(낮은 판)으로 읽은 건 — 숫자가 틀렸을 수 있습니다. 단,
+    #    자료가 아예 없었던 '없음'은 읽은 숫자가 없으니 다시 받을 이유가 없습니다.
+    ver = (pd.to_numeric(ok["판"], errors="coerce").fillna(1)
+           if "판" in ok.columns else pd.Series(1, index=ok.index))
+    old = (ver < PARSER_VERSION) & (ok["상태"].astype(str) != "없음"
+                                    if "상태" in ok.columns else True)
+    ok = ok[~old]
     if ok.empty:
         return set()
 
@@ -504,6 +534,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     odd_fiscal = 0
 
     calls, buffer, new_prog = 1 + fye_calls, [], []
+    buf_keys: set = set()          # 이번 묶음에 새로 받은 (종목, 연도)
     rows_saved, skipped, missing, processed = 0, 0, 0, 0
     sample = None          # 아무것도 못 읽었을 때 원인을 보여줄 실제 응답
     statuses: dict[str, int] = {}
@@ -593,6 +624,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
                 df = to_quarterly(res["분기"], res["종목코드"])
                 if len(df):
                     buffer.append(df)
+                    buf_keys.add((str(res["종목코드"]), int(res["연도"])))
             # DART에 그 해 자료가 아예 없는 경우(상장 전 등)는 '없음'으로 끝냅니다.
             # 0/4로 남기면 다시 받을 대상이 되어 매일 밤 같은 빈 조회를 반복하고
             # 남은작업이 영원히 0이 되지 않습니다.
@@ -600,11 +632,12 @@ def collect(api_key: str | None = None, years=None, tickers=None,
             if res["성공"] == 0 and set(res["상태"]) <= {"013"}:
                 st = "없음"
             new_prog.append({"종목코드": res["종목코드"], "연도": res["연도"],
-                             "상태": st, "갱신일": today})
+                             "상태": st, "갱신일": today,
+                             "판": PARSER_VERSION})
 
             if len(buffer) >= chunk:
-                rows_saved += store.upsert("kor_fs", pd.concat(buffer, ignore_index=True))
-                buffer = []
+                rows_saved += _save_rows(buffer, buf_keys)
+                buffer, buf_keys = [], set()
                 save_progress(prog, new_prog)
                 prog, new_prog = load_progress(), []
                 log.info("DART 수집 %d회 호출 · %d행 누적 · 남은작업 %d",
@@ -613,7 +646,7 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     stopped = stop["why"]
 
     if buffer:
-        rows_saved += store.upsert("kor_fs", pd.concat(buffer, ignore_index=True))
+        rows_saved += _save_rows(buffer, buf_keys)
     total = save_progress(prog, new_prog)
 
     # 이번에 받을 목록 중 못 받은 것. 예전에는 '종목 수 × 연도 수 - 진행 기록'
@@ -628,6 +661,36 @@ def collect(api_key: str | None = None, years=None, tickers=None,
     if rows_saved == 0 and sample is not None:
         out["진단"] = sample
     return out
+
+
+CFO = "영업활동으로인한현금흐름"
+
+
+def _save_rows(buffer: list, fetched: set) -> int:
+    """새로 받은 행을 저장합니다. 그 종목·연도의 예전 DART 현금흐름 행은 먼저 지웁니다.
+
+    같은 분기는 새 값이 덮어쓰지만, 고친 규칙에서는 만들지 않는 분기
+    (앞 분기가 없어 차분할 수 없는 분기)가 예전 규칙으로 남아 있으면
+    틀린 누적값이 그대로 남습니다. 새로 받은 종목·연도만, DART 행만 지웁니다.
+    """
+    new = pd.concat(buffer, ignore_index=True)
+    keys = {f"{t}|{y}" for t, y in fetched}
+
+    def drop(old: pd.DataFrame) -> pd.Series:
+        out = pd.Series(False, index=old.index)
+        if not keys or "출처" not in old.columns:
+            return out
+        m = ((old["계정"] == CFO) & (old["공시구분"] == "q")
+             & (old["출처"].astype(str) == "DART"))
+        if not m.any():
+            return out
+        sub = old.loc[m]
+        k = (sub["종목코드"].astype(str) + "|"
+             + pd.to_datetime(sub["기준일"]).dt.year.astype(str))
+        out.loc[k.index[k.isin(keys)]] = True
+        return out
+
+    return store.upsert("kor_fs", new, drop=drop)
 
 
 COMPANY = "kor_dart_company"

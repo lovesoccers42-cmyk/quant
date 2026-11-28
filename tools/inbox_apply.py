@@ -91,10 +91,13 @@ def _apply(path: Path, kind: str, acct: str, asof, tranches: int,
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     if kind == "fills":
         r = portfolio.record_fills(text, account=acct, asof=asof,
-                                   table=prof["trades_table"])
+                                   table=prof["trades_table"],
+                                   state_table=prof["state_table"])
         msg = (f"체결 {r['체결반영']}건 반영 ({r['기준일']} 주문)"
                + (f" · 원장밖 {r['원장밖']}건" if r["원장밖"] else "")
-               + (f" · 미체결 {r['미체결']}건" if r["미체결"] else ""))
+               + (f" · 미체결 {r['미체결']}건" if r["미체결"] else "")
+               + (f" · 못 산 신규 매수 {len(r['미매수로돌림'])}종목은 미매수로"
+                  if r.get("미매수로돌림") else ""))
         return msg
     rest, cash = portfolio.extract_cash(text)
 

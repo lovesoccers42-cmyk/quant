@@ -67,8 +67,9 @@ for q in (1, 2, 3, 4):
             add=int(CUM[q] * 0.3 * 1e8)),
         row("ifrs-full_ProfitLoss", "당기순이익", "IS", ENDS[q],
             add=int(CUM[q] * 0.1 * 1e8)),
+        # 현금흐름표는 실제 DART처럼: 누적이 thstrm_amount에, add 칸은 빈칸
         row("ifrs-full_CashFlowsFromUsedInOperatingActivities", "영업활동현금흐름",
-            "CF", ENDS[q], add=int(CUM[q] * 0.2 * 1e8)),
+            "CF", ENDS[q], amount=int(CUM[q] * 0.2 * 1e8)),
         row("ifrs-full_Assets", "자산총계", "BS", BS_ENDS[q],
             amount=int(ASSETS[q] * 1e8)),
         row("ifrs-full_Equity", "자본총계", "BS", BS_ENDS[q],
@@ -81,6 +82,10 @@ check(len(by_q[1]) == 6, f"6개 계정 모두 인식 ({len(by_q[1])}개)")
 df = dart.to_quarterly(by_q, "005930")
 rev = df[df["계정"] == "매출액"].sort_values("기준일")["값"].tolist()
 check(rev == [100, 150, 180, 170], f"누적→3개월 차분 정확 {rev} (기대 [100,150,180,170])")
+
+cfo = df[df["계정"] == "영업활동으로인한현금흐름"].sort_values("기준일")["값"].tolist()
+check(cfo == [20, 30, 36, 34],
+      f"현금흐름표는 thstrm_amount가 누적 → 3개월로 차분 {cfo} (기대 [20,30,36,34])")
 
 assets = df[df["계정"] == "자산"].sort_values("기준일")["값"].tolist()
 check(assets == [1000, 1100, 1050, 1200],
@@ -126,7 +131,7 @@ old_tax = [
     row("ifrs_GrossProfit", "매출총이익", "IS", ENDS[1], add=int(240 * 1e8)),
     row("ifrs_ProfitLoss", "당기순이익", "IS", ENDS[1], add=int(80 * 1e8)),
     row("ifrs_CashFlowsFromUsedInOperatingActivities", "영업활동현금흐름", "CF",
-        ENDS[1], add=int(160 * 1e8)),
+        ENDS[1], amount=int(160 * 1e8)),
 ]
 po = dart.parse_report(payload(old_tax), "005930", 1)
 check(len(po) == 6, f"2018년 이전 ifrs_ 접두사도 6개 전부 인식 ({len(po)}개)")
@@ -177,6 +182,14 @@ check(pq["매출액"][2] == "q3m", f"분기보고서 thstrm_amount = 3개월치 
 yr = [row("ifrs-full_Revenue", "매출액", "IS", "11011", amount=int(600 * 1e8))]
 py = dart.parse_report(payload(yr), "000660", 4, 2023, "11011")
 check(py["매출액"][2] == "cum", f"사업보고서 thstrm_amount = 1년 누적 ({py['매출액'][2]})")
+
+# 현금흐름표는 분기보고서에서도 thstrm_amount가 누적입니다 (3개월치 칸이 없음).
+# 2026-11-27 실측: 이걸 3개월로 읽어 2·3분기에 누적이 들어가 있었습니다.
+cfq = [row("ifrs-full_CashFlowsFromUsedInOperatingActivities", "영업활동현금흐름",
+           "CF", "11012", amount=int(250 * 1e8))]
+pc = dart.parse_report(payload(cfq), "000660", 2, 2023, "11012")
+check(pc["영업활동으로인한현금흐름"][2] == "cum",
+      f"분기보고서의 현금흐름표 thstrm_amount = 누적 ({pc['영업활동으로인한현금흐름'][2]})")
 
 add = [row("ifrs-full_Revenue", "매출액", "IS", "11012",
            amount=int(150 * 1e8), add=int(250 * 1e8))]
@@ -229,21 +242,22 @@ check(dart.parse_report({"status": "000", "list": []}, "A", 1) == {},
       "빈 list도 빈 결과")
 
 # ── 7. 진행 상태 저장·재개 ───────────────────────────────────
+V = dart.PARSER_VERSION
 prog = dart.load_progress()
 check(prog.empty, "첫 실행에는 진행 기록이 비어 있음")
 dart.save_progress(prog, [{"종목코드": "005930", "연도": 2015, "상태": "4/4",
-                           "갱신일": pd.Timestamp("2026-09-14")}])
+                           "갱신일": pd.Timestamp("2026-09-14"), "판": V}])
 prog2 = dart.load_progress()
 check(len(prog2) == 1, "진행 기록 저장")
 check(("005930", 2015) in dart._done_keys(prog2), "완료 키 조회")
 dart.save_progress(prog2, [{"종목코드": "005930", "연도": 2015, "상태": "4/4",
-                            "갱신일": pd.Timestamp("2026-09-14")}])
+                            "갱신일": pd.Timestamp("2026-09-14"), "판": V}])
 check(len(dart.load_progress()) == 1, "같은 종목·연도를 두 번 기록하지 않음")
 
 # 빈손(0/4)으로 끝난 건은 완료로 치지 않고 다시 시도해야 한다
 dart.save_progress(dart.load_progress(),
                    [{"종목코드": "000660", "연도": 2015, "상태": "0/4",
-                     "갱신일": pd.Timestamp("2026-09-14")}])
+                     "갱신일": pd.Timestamp("2026-09-14"), "판": V}])
 keys = dart._done_keys(dart.load_progress())
 check(("000660", 2015) not in keys,
       "한 분기도 못 읽은 건은 완료로 안 봄 (매핑 고친 뒤 재시도 가능)")
@@ -261,11 +275,57 @@ prog3 = pd.DataFrame([
     {"종목코드": "035720", "연도": 2018, "상태": "4/4",
      "갱신일": NOW - pd.Timedelta(days=400)},   # 과거 연도 → 안 건드림
 ])
-k3 = dart._done_keys(prog3, now=NOW)
+k3 = dart._done_keys(prog3.assign(판=V), now=NOW)
 check(("005930", 2026) in k3, "올해치라도 최근에 받았으면 건너뜀")
 check(("000660", 2026) not in k3,
       f"올해치가 {config.DART_REFRESH_DAYS}일 넘으면 다시 받음 (최신 분기 반영)")
 check(("035720", 2018) in k3, "지나간 연도는 다시 안 받음 (더 안 바뀌므로)")
+
+# ── 7-b2. 읽는 규칙을 고치면 예전 규칙으로 받은 건 다시 받는가 ──
+import store  # noqa: E402  (위 7번까지는 kor_fs_dart 함수만 썼습니다)
+# 현금흐름표를 3개월로 잘못 읽던 1판 수집분은 지나간 연도라도 다시 받아
+# 고친 규칙으로 덮어써야 합니다. 자료가 없던 '없음'은 다시 받을 게 없습니다.
+k5 = dart._done_keys(pd.DataFrame([
+    {"종목코드": "005930", "연도": 2018, "상태": "4/4", "갱신일": NOW, "판": 1},
+    {"종목코드": "000660", "연도": 2018, "상태": "4/4", "갱신일": NOW, "판": V},
+    {"종목코드": "035720", "연도": 2018, "상태": "없음", "갱신일": NOW, "판": 1},
+]), now=NOW)
+check(("005930", 2018) not in k5, "예전 판으로 받은 건 지나간 연도라도 다시 받음")
+check(("000660", 2018) in k5, "지금 판으로 받은 건 건너뜀")
+check(("035720", 2018) in k5, "예전 판이라도 자료가 없던 '없음'은 다시 안 받음")
+store.write("kor_dart_progress", pd.DataFrame([
+    {"종목코드": "005930", "연도": 2018, "상태": "4/4", "갱신일": NOW}]))
+check(int(dart.load_progress()["판"].iloc[0]) == 1,
+      "'판' 칸이 없던 예전 기록은 1판으로 읽음")
+store.write("kor_dart_progress", pd.DataFrame(
+    columns=["종목코드", "연도", "상태", "갱신일", "판"]))
+
+# 다시 받은 종목·연도의 예전 DART 현금흐름 행은 지워야 합니다. 고친 규칙에선
+# 차분할 수 없어 안 만드는 분기(앞 분기가 없음)의 틀린 누적값이 남기 때문.
+store.write("kor_fs", pd.DataFrame([
+    {"종목코드": "005930", "기준일": pd.Timestamp("2023-06-30"), "계정": "영업활동으로인한현금흐름",
+     "값": 250.0, "공시구분": "q", "출처": "DART"},        # 예전 규칙: 반기 누적
+    {"종목코드": "005930", "기준일": pd.Timestamp("2023-06-30"), "계정": "당기순이익",
+     "값": 15.0, "공시구분": "q", "출처": "DART"},         # 현금흐름이 아님 → 그대로
+    {"종목코드": "005930", "기준일": pd.Timestamp("2022-06-30"), "계정": "영업활동으로인한현금흐름",
+     "값": 40.0, "공시구분": "q", "출처": "DART"},         # 다른 해 → 그대로
+    {"종목코드": "000660", "기준일": pd.Timestamp("2023-06-30"), "계정": "영업활동으로인한현금흐름",
+     "값": 70.0, "공시구분": "q", "출처": "DART"},         # 다른 종목 → 그대로
+    {"종목코드": "035720", "기준일": pd.Timestamp("2023-06-30"), "계정": "영업활동으로인한현금흐름",
+     "값": 30.0, "공시구분": "q", "출처": None},           # FnGuide → 그대로
+]))
+fresh = pd.DataFrame([
+    {"종목코드": "005930", "기준일": pd.Timestamp("2023-09-30"), "계정": "영업활동으로인한현금흐름",
+     "값": 36.0, "공시구분": "q", "출처": "DART"}])
+dart._save_rows([fresh], {("005930", 2023)})
+kf = store.read("kor_fs")
+kf["기준일"] = pd.to_datetime(kf["기준일"])
+cf23 = kf[(kf["종목코드"] == "005930") & (kf["계정"] == "영업활동으로인한현금흐름")
+          & (kf["기준일"].dt.year == 2023)]
+check(cf23["기준일"].dt.month.tolist() == [9],
+      f"다시 받은 해의 예전 현금흐름 누적값(6월)이 지워짐 ({cf23['기준일'].dt.strftime('%m').tolist()})")
+check(len(kf) == 5, f"다른 계정·다른 해·다른 종목·FnGuide 행은 그대로 ({len(kf)}행)")
+store.write("kor_fs", pd.DataFrame(columns=list(store.SCHEMAS["kor_fs"])))
 
 # ── 7-d. 공시 시즌에는 자주 보는가 ──────────────────────────
 # 2026-11-25 실측: 3분기 마감(11/14)이 지났는데 11/07~11/16에 받아 둔 종목은
@@ -301,7 +361,7 @@ k4 = dart._done_keys(pd.DataFrame([
     {"종목코드": "000660", "연도": 2026, "상태": "3/4", "갱신일": D("2026-11-20")},
     {"종목코드": "035720", "연도": 2025, "상태": "4/4", "갱신일": D("2026-09-17")},
     {"종목코드": "035720", "연도": 2018, "상태": "2/4", "갱신일": D("2026-09-17")},
-]), now=D("2026-11-25"))
+]).assign(판=V), now=D("2026-11-25"))
 check(("005930", 2026) not in k4 and ("000660", 2026) in k4
       and ("035720", 2025) in k4 and ("035720", 2018) in k4,
       "진행 기록에 그대로 적용 (못 받은 것만 다시)")

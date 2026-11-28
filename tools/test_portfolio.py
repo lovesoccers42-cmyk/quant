@@ -907,6 +907,37 @@ sell = filled[filled["구분"] == "매도"].iloc[0]
 check(sell["체결수량"] == 12,
       f"전량매도도 실제 수량이 들어감 ({sell['체결수량']:.0f}주)")
 
+# 못 산 신규 매수는 보유 상태에서 '미매수'로 돌아가야 합니다.
+# 안 그러면 장부에만 있는 종목이 되고, 그 등분 차례가 오면 계좌에 없는
+# 종목을 팔라는 주문이 나옵니다 (2026-11-27 실측: 은진 계좌 매도 4종목).
+STF = "kor_portfolio_fills_test"
+store.write(STF, pd.DataFrame([
+    {"종목코드": "003010", "등분": 0, "편입일": pd.Timestamp("2026-10-08"),
+     "기준금액": 318_960.0, "종목명": "혜인", "섹터": "산업재"},
+    {"종목코드": "264450", "등분": 0, "편입일": pd.Timestamp("2026-10-08"),
+     "기준금액": 316_440.0, "종목명": "유비쿼스", "섹터": "IT"},
+    {"종목코드": "111111", "등분": 1, "편입일": pd.Timestamp("2026-10-01"),
+     "기준금액": 100_000.0, "종목명": "다른", "섹터": "IT"}]))
+r_p = portfolio.record_fills(FORMS["탭+헤더(코드)"], account="main",
+                             today=date(2026, 10, 9), state_table=STF)
+_st = portfolio.load_state(STF).set_index("종목코드")["기준금액"]
+check(r_p["미매수로돌림"] == ["264450"] and _st["264450"] == 0.0,
+      f"못 산 신규 매수는 미매수(기준금액 0)로 ({r_p['미매수로돌림']})")
+check(_st["003010"] == 318_960.0 and _st["111111"] == 100_000.0,
+      "산 종목과 다른 주문의 종목은 그대로")
+check(portfolio.record_fills(FORMS["탭+헤더(코드)"], account="main",
+                             today=date(2026, 10, 9),
+                             state_table=STF)["미매수로돌림"] == [],
+      "같은 체결내역을 또 넣어도 한 번만 바뀜")
+store.write(STF, pd.DataFrame([
+    {"종목코드": "264450", "등분": 0, "편입일": pd.Timestamp("2026-10-15"),
+     "기준금액": 316_440.0, "종목명": "유비쿼스", "섹터": "IT"}]))
+portfolio.record_fills(FORMS["탭+헤더(코드)"], account="main",
+                       today=date(2026, 10, 16), asof=date(2026, 10, 8),
+                       state_table=STF)
+check(portfolio.load_state(STF).iloc[0]["기준금액"] == 316_440.0,
+      "그 뒤 다른 주문으로 다시 산 종목(편입일이 다름)은 건드리지 않음")
+
 # 주문서에 없던 종목을 직접 샀어도 성과에 들어가야 합니다
 r_x = portfolio.record_fills("종목코드\t구분\t체결수량\t체결가\n005930\t매수\t3\t80000",
                              account="main", today=date(2026, 10, 9))
