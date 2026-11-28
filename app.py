@@ -515,8 +515,15 @@ def _account_perf(acct: str, market: str = "kr") -> dict:
     # 2,062,585원이 설명되지 않는 점프로 잡혔습니다).
     flows = perf.align_flows(perf.net_flows(trades, acct), value.index,
                              pos.index)
-    tw = perf.twr(value, flows)
-    out.update({"px": px, "pos": pos, "value": value, "tw": tw})
+    tw_all = perf.twr(value, flows)
+    # 수익률은 **퀀트로 산 종목만**으로 잽니다 (perf.sleeve_twr). 시스템을
+    # 쓰기 전부터 들고 있던 종목의 등락과 매매는 넣지 않습니다. 보유 전체
+    # 수익률은 참고용으로만 남깁니다.
+    tw = perf.sleeve_twr(pos, trades, acct, px)
+    out.update({"px": px, "pos": pos, "value": value, "tw": tw,
+                "tw_all": tw_all})
+    if len(tw_all) >= 2 and perf.twr_trust(tw_all)["신뢰"]:
+        out["수익률_전체"] = float(tw_all["누적"].iloc[-1] - 1)
 
     # 평단 기준 수익률 — TWR은 거래일이 둘 있어야 나오지만 이건 첫날부터
     # 나오고 주가가 갱신될 때마다 바뀝니다. 첫 주에 화면이 '–'만 띄우면
@@ -1584,7 +1591,7 @@ def perf_strip() -> None:
         bits.append(f"**주가 {asof:%m/%d} 종가** 기준")
     if done:
         bits.append(f"측정 {min(r['시작'] for r in done):%m/%d} 시작")
-        bits.append("입금을 걷어낸 시간가중수익률")
+        bits.append("퀀트로 산 종목만 · 입금을 걷어낸 시간가중수익률")
     elif any(r.get("평단") for r in rows):
         bits.append("평단 기준 (시간가중수익률은 거래일 2개부터)")
     bits.append("자세한 내용은 아래 **성과** 탭 (시장별로 따로 있습니다)")
@@ -1963,8 +1970,11 @@ def render_perf(market: str) -> None:
             if hidden:
                 row("숨긴 사유", lambda a: (perf.trust_brief(RS[a].get("신뢰"))
                                         if a in hidden else "–"))
-            row("수익률 (시간가중)", lambda a: ("숨김" if a in hidden
-                                          else _pct(RS[a].get("수익률"))))
+            row("수익률 (퀀트 종목)", lambda a: ("숨김" if a in hidden
+                                           else _pct(RS[a].get("수익률"))))
+            row("참고: 보유 전체", lambda a: (
+                _pct(RS[a]["수익률_전체"]) if RS[a].get("수익률_전체") is not None
+                else "–"))
             row("수익률 (평단 기준)",
                 lambda a: _pct((RS[a].get("평단") or {}).get("수익률")))
             row(f"{P['지수']} 대비", lambda a: (
@@ -2029,8 +2039,11 @@ def render_perf(market: str) -> None:
                          if r.get("주가기준일") is not None), None)
             st.caption(
                 (f"주가 {asof:%Y-%m-%d} 종가 기준 · " if asof is not None else "")
-                + "수익률은 입금을 걷어낸 시간가중수익률입니다 — 분할 진입으로 "
-                  "돈을 더 넣어도 그게 수익으로 잡히지 않습니다.")
+                + "수익률은 **퀀트로 산 종목만**의 시간가중수익률입니다 — "
+                  "시스템을 쓰기 전부터 들고 계신 종목은 등락도 매매도 넣지 "
+                  "않고, 분할 진입으로 돈을 더 넣어도 그게 수익으로 잡히지 "
+                  "않습니다. 체결내역이 빠지거나 오타가 난 거래는 그날 종가로 "
+                  "셉니다(그 거래로 손익을 만들지 않음).")
 
             thin = [LBL[a] for a, r in RS.items()
                     if r["가능"] and r["일수"] < 30]

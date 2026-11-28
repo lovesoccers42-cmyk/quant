@@ -263,6 +263,131 @@ def align_flows(flows: pd.Series, value_index, snapshots) -> pd.Series:
     return pd.Series(acc).sort_index()
 
 
+# ── 퀀트로 산 종목만 ─────────────────────────────────────────────
+# 대시보드의 수익률은 '퀀트가 산 종목'의 성과입니다. 시스템을 쓰기 전부터
+# 들고 있던 종목(원장에 '매수'가 없는 종목)은 들고 있는 동안의 등락도,
+# 팔 때의 손익도 넣지 않습니다.
+#
+# 왜 (2026-11-28 실측): 상수 국장이 -7.57%로 나왔는데 증권사 앱은 -2.76%
+# 였습니다. 10월에 원래 들고 있던 80종목(2,228만원)을 정리하는 동안 지수가
+# 주마다 -11%, -10%씩 빠졌고, 그 손실이 전부 퀀트 성과로 잡혀 있었습니다.
+ENTRY_WORDS = ("매수",)            # 신규 편입만 — 비중확대·현금투입은 아님
+FILL_PRICE_GAP = 0.5               # 체결가가 그날 종가와 이만큼 넘게 다르면 오타로 봅니다
+
+
+def entry_dates(trades: pd.DataFrame, account: str) -> dict:
+    """종목 → 퀀트가 처음 산 주문 날짜. 원장에 '매수'가 없는 종목은 없음.
+
+    체결 기록이 없는 매수도 셉니다 — 체결내역을 안 올린 주가 있어도 그
+    종목이 퀀트 종목이라는 사실은 같습니다. 실제로 안 샀다면 보유목록에
+    없으니 평가액에 들어오지 않습니다.
+    """
+    if trades is None or trades.empty:
+        return {}
+    t = trades[trades["계좌"].astype(str) == str(account)]
+    t = t[t["구분"].astype(str).str.strip().isin(ENTRY_WORDS)]
+    if t.empty:
+        return {}
+    when = pd.to_datetime(t["기준일"], errors="coerce").dt.normalize()
+    codes = _code6(t["종목코드"])
+    out = when.groupby(codes.to_numpy()).min().dropna()
+    return {str(k): pd.Timestamp(v) for k, v in out.items()}
+
+
+def sleeve_positions(pos: pd.DataFrame, entries: dict) -> pd.DataFrame:
+    """보유수량 표에서 퀀트 종목만, 처음 산 날부터 남깁니다."""
+    if pos is None or pos.empty:
+        return pd.DataFrame()
+    keep = [c for c in pos.columns if c in entries]
+    out = pos[keep].copy()
+    for c in keep:
+        out.loc[out.index < entries[c], c] = 0.0
+    return out
+
+
+def sleeve_flows(pos_q: pd.DataFrame, trades: pd.DataFrame, account: str,
+                 px: pd.DataFrame, value_index) -> pd.Series:
+    """스냅샷 사이 보유수량 변화로 현금흐름을 만듭니다.
+
+    수량이 늘거나 준 만큼을 그 사이 체결가로 셉니다. 체결 기록이 없거나
+    맞지 않으면(방향이 반대, 수량이 더 많음, 체결가가 그날 종가와 50% 넘게
+    다름) **그 스냅샷 날의 종가**로 셉니다 — 그 거래로는 손익을 만들지
+    않는다는 뜻입니다. 체결내역을 빠뜨리거나 오타가 나도 수익률이 튀지
+    않습니다 (2026-11-28 실측: 은진 체결내역의 뉴파워프라즈마 체결단가가
+    9,100원 대신 91,000원으로 적혀 -813,400원 손실로 잡혔습니다).
+
+    현금흐름은 그 스냅샷이 평가액에 반영되는 첫 거래일에 놓습니다
+    (align_flows와 같은 규칙).
+    """
+    out = pd.Series(dtype="float64")
+    if pos_q is None or pos_q.empty or len(pos_q) < 2 or px is None or px.empty:
+        return out
+    idx = pd.DatetimeIndex(value_index).sort_values()
+    if not len(idx):
+        return out
+
+    fills = pd.DataFrame()
+    if trades is not None and not trades.empty:
+        t = trades[trades["계좌"].astype(str) == str(account)].copy()
+        pxf = pd.to_numeric(t.get("체결가"), errors="coerce")
+        qf = pd.to_numeric(t.get("체결수량"), errors="coerce")
+        ok = pxf.notna() & qf.notna() & (qf > 0)
+        t = t[ok]
+        if len(t):
+            sign = np.where(t["구분"].astype(str).str.contains(
+                "|".join(SELL_WORDS), na=False), -1.0, 1.0)
+            fills = pd.DataFrame({
+                "c": _code6(t["종목코드"]).to_numpy(),
+                "d": pd.to_datetime(t["체결일"], errors="coerce").dt.normalize().to_numpy(),
+                "q": sign * qf[ok].to_numpy(),
+                "p": pxf[ok].to_numpy()})
+
+    ff = px.ffill()
+    snaps = pos_q.index.sort_values()
+    acc: dict = {}
+    for prev, s in zip(snaps[:-1], snaps[1:]):
+        k = idx.searchsorted(s, side="left")
+        if k >= len(idx):
+            continue                          # 평가액이 아직 모르는 스냅샷
+        d = idx[k]
+        upto = ff.loc[:s]
+        if not len(upto):
+            continue
+        close = upto.iloc[-1]
+        dq = pos_q.loc[s] - pos_q.loc[prev]
+        for c, q in dq[dq.abs() > 1e-9].items():
+            ref = close.get(c)
+            if ref is None or not np.isfinite(ref) or ref <= 0:
+                continue                      # 가격을 모르면 평가액에도 없습니다
+            amt, fq = 0.0, 0.0
+            if len(fills):
+                f = fills[(fills["c"] == c) & (fills["d"] > prev) & (fills["d"] <= s)]
+                f = f[(f["p"] / ref - 1).abs() <= FILL_PRICE_GAP]
+                if len(f):
+                    nq = float(f["q"].sum())
+                    if np.sign(nq) == np.sign(q) and abs(nq) <= abs(q) + 1e-9:
+                        fq, amt = nq, float((f["q"] * f["p"]).sum())
+            amt += (q - fq) * float(ref)
+            acc[d] = acc.get(d, 0.0) + amt
+    if not acc:
+        return out
+    return pd.Series(acc).sort_index()
+
+
+def sleeve_twr(pos: pd.DataFrame, trades: pd.DataFrame, account: str,
+               px: pd.DataFrame) -> pd.DataFrame:
+    """퀀트로 산 종목만의 시간가중수익률. twr()와 같은 열."""
+    pos_q = sleeve_positions(pos, entry_dates(trades, account))
+    if pos_q.empty:
+        return twr(pd.Series(dtype="float64"))
+    value = daily_value(pos_q, px)
+    value = value[value.cumsum() > 0]         # 첫 퀀트 종목이 들어온 날부터
+    if value.empty:
+        return twr(value)
+    flows = sleeve_flows(pos_q, trades, account, px, value.index)
+    return twr(value, flows)
+
+
 def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
     """이 시간가중수익률을 믿어도 되는가.
 

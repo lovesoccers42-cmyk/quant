@@ -1227,6 +1227,21 @@ def record_fills(src, *, account: str, today: date | None = None,
     asof_ts = (pd.Timestamp(asof) if asof is not None
                else mine["기준일"].max())
     week = mine[mine["기준일"] == asof_ts].copy()
+    if week.empty and asof is not None:
+        # 파일 이름의 날짜는 보통 **올린 날**입니다. 주문서는 그보다 하루이틀
+        # 앞이라, 그 날짜에 정확히 맞는 주문이 없으면 일주일 안쪽의 가장
+        # 최근 주문서에 채웁니다. 예전에는 통째로 '원장밖 체결'이 되어 주문
+        # 행은 영영 체결 안 된 채 남았습니다 (2026-11-28 실측: 11/27 주문서의
+        # 체결내역을 fills_alt_2026-11-28.csv로 올려 전부 원장밖으로 들어갔고,
+        # 상수 계좌 원장의 '미체결'이 148건까지 쌓여 있었습니다).
+        orders = mine[~mine["메모"].astype(str).str.contains("원장밖", na=False)] \
+            if "메모" in mine.columns else mine
+        near = orders.loc[(orders["기준일"] <= asof_ts)
+                          & (orders["기준일"] >= asof_ts - pd.Timedelta(days=7)),
+                          "기준일"]
+        if len(near):
+            asof_ts = near.max()
+            week = mine[mine["기준일"] == asof_ts].copy()
     if week.empty and asof is None:
         raise ValueError(f"{asof_ts:%Y-%m-%d} 날짜의 주문이 없습니다.")
     # asof를 명시했는데 그 날 주문이 없으면(원장이 생기기 전 거래) 체결내역
@@ -1270,6 +1285,12 @@ def record_fills(src, *, account: str, today: date | None = None,
     # 으로 읽어, 실제로는 못 판 종목을 계획가에 팔았다고 계산합니다
     # (실측: 10/7 주문서의 매도 4종목은 계좌에 없어서 못 팔았습니다).
     left = week.index.difference(pd.Index(used))
+    # 이미 체결가가 들어 있는 행은 미체결이 아닙니다 — 고친 줄 하나만 다시
+    # 올리는 경우가 있습니다(예: 체결단가 오타 수정). 그때 나머지 행을
+    # 미체결로 찍고 못 산 매수로 되돌리면 멀쩡한 보유가 장부에서 빠집니다.
+    _filled = pd.to_numeric(upd.loc[left, "체결가"], errors="coerce").notna() \
+        if len(left) else pd.Series(dtype=bool)
+    left = left[~_filled.to_numpy()] if len(left) else left
     for i in left:
         memo = str(upd.loc[i, "메모"] or "")
         if "미체결" not in memo:

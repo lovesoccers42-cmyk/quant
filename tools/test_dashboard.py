@@ -343,6 +343,12 @@ else:
             "종가": round(p * (1 + 0.003 * _r.standard_normal()), 0)}
            for d in PD for c, p in CODES.items()]
     _price = pd.DataFrame(_px)
+    # 2026-11-28부터 수익률은 '퀀트 종목만' + 보유수량 변화로 현금흐름을
+    # 셉니다(perf.sleeve_twr). 체결 1주·보유 2주 같은 어긋남은 이제 그날
+    # 종가로 흡수돼 숨길 이유가 아닙니다. 숨김 화면을 시험하려면 그래도
+    # 설명이 안 되는 점프가 필요합니다 — 주가 자료가 하루 3배로 튀는 경우.
+    _g = (_price["종목코드"] == "000002") & (_price["날짜"] == pd.Timestamp("2026-10-19"))
+    _price.loc[_g, "종가"] = 30000.0
 
     def _t(d):
         return pd.Timestamp(d)
@@ -442,7 +448,7 @@ else:
         check(st_main == "측정 중", f"상수 상태 = {st_main!r} (깨끗한 계좌는 그대로)")
         why = str(summ.loc["숨긴 사유", "은진"]) if "숨긴 사유" in summ.index else ""
         check("10/19" in why, f"숨긴 사유에 날짜가 보임 — {why!r}")
-        check(str(summ.loc["수익률 (시간가중)", "은진"]) == "숨김",
+        check(str(summ.loc["수익률 (퀀트 종목)", "은진"]) == "숨김",
               "시간가중 칸은 '–'가 아니라 '숨김'")
     warns = " ".join(w.value for w in at2.warning)
     check("은진" in warns and "alt·" not in warns,

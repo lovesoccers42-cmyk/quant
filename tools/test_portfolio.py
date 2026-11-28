@@ -937,6 +937,22 @@ portfolio.record_fills(FORMS["탭+헤더(코드)"], account="main",
                        state_table=STF)
 check(portfolio.load_state(STF).iloc[0]["기준금액"] == 316_440.0,
       "그 뒤 다른 주문으로 다시 산 종목(편입일이 다름)은 건드리지 않음")
+# 오타 고친 줄 하나만 다시 올려도 이미 체결된 나머지는 그대로여야 합니다.
+store.write(STF, pd.DataFrame([
+    {"종목코드": "003010", "등분": 0, "편입일": pd.Timestamp("2026-10-08"),
+     "기준금액": 318_960.0, "종목명": "혜인", "섹터": "산업재"}]))
+r_fix = portfolio.record_fills("종목코드\t구분\t체결수량\t체결단가\n"
+                               "009970\t매도\t12\t62,400",
+                               account="main", today=date(2026, 10, 10),
+                               asof=date(2026, 10, 8), state_table=STF)
+_tl2 = portfolio.trade_log(account="main")
+_hy = _tl2[_tl2["종목코드"] == "003010"].iloc[0]
+check(r_fix["미체결종목"] == ["264450"] and r_fix["미매수로돌림"] == []
+      and portfolio.load_state(STF).iloc[0]["기준금액"] == 318_960.0
+      and "미체결" not in str(_hy["메모"] or ""),
+      f"고친 줄만 다시 올려도 이미 체결된 매수는 미체결로 안 찍힘 ({r_fix['미체결종목']})")
+check(float(_tl2[_tl2["종목코드"] == "009970"].iloc[0]["체결가"]) == 62_400,
+      "다시 올린 줄의 체결가로 고쳐짐")
 
 # 주문서에 없던 종목을 직접 샀어도 성과에 들어가야 합니다
 r_x = portfolio.record_fills("종목코드\t구분\t체결수량\t체결가\n005930\t매수\t3\t80000",
@@ -974,6 +990,15 @@ ro = portfolio.record_fills(
     account="alt", today=date(2026, 10, 9), asof=date(2026, 9, 30))
 check(ro["원장밖"] == 1,
       "원장이 없던 날짜도 체결내역만으로 기록됨 (계획가 없이)")
+# 파일 이름에 '올린 날'(주문 다음 날)을 적어도 그 주 주문서에 채워야 합니다.
+# 예전에는 전부 원장밖 체결이 되고 주문 행은 미체결로 남았습니다
+# (2026-11-28 실측: 11/27 주문서를 fills_alt_2026-11-28.csv로 올림).
+rn = portfolio.record_fills(
+    "종목코드\t구분\t체결수량\t체결가\n001060\t매수\t3\t27400",
+    account="alt", today=date(2026, 10, 9), asof=date(2026, 10, 9))
+check(rn["체결반영"] == 1 and rn["원장밖"] == 0 and rn["기준일"] == "2026-10-07",
+      f"이름의 날짜가 주문 다음 날이어도 그 주 주문서에 채움 ({rn['기준일']}, "
+      f"원장밖 {rn['원장밖']})")
 
 # 분할 진입 중 남은 현금을 등록해도 같은 돈을 두 번 쓰지 않아야 합니다
 ST5 = "kor_portfolio_cashguard_test"
