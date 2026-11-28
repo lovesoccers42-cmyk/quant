@@ -1497,11 +1497,45 @@ def fs_vintage_html(v: dict, *, title: str, market: str, extra: str = "") -> str
     return f'<div class="qb-panel qb-fs">{"".join(lines)}</div>'
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def state_json(path: str) -> dict:
+    """비공개 레포의 json 하나 (예: orders/us_orders_latest.json). 없으면 {}.
+
+    미국 월간 주문서 요약은 금액이 들어 있어 공개 릴리스에 올리지 않고
+    비공개 레포 orders/에만 둡니다. 여기서는 재무제표 기준만 꺼내 씁니다.
+    """
+    if not (STATE_REPO and STATE_TOKEN):
+        return {}
+    try:
+        r = rq.get(f"{API}/repos/{STATE_REPO}/contents/{path}", timeout=60,
+                   headers={"Accept": "application/vnd.github.raw",
+                            "X-GitHub-Api-Version": "2022-11-28",
+                            "Authorization": f"Bearer {STATE_TOKEN}"})
+        if r.status_code != 200:
+            return {}
+        out = json.loads(r.content.decode("utf-8"))
+        return out if isinstance(out, dict) else {}
+    except Exception:
+        return {}
+
+
+_MKT_NAME = {"kr": "국장", "us": "미국장"}
+
+
+def _order_vintage_html(title: str, per_acct: list[tuple[str, dict]]) -> str:
+    rows = []
+    for name, sel in per_acct:
+        rows.append(f'<div class="qb-sub"><b>{_html.escape(name)}</b> 선정 '
+                    f'{sel["종목수"]:,}종목: {_html.escape(_dist_text(sel))}</div>')
+    return f'<div class="qb-sub">{title}</div>' + "".join(rows)
+
+
 def render_fs_vintage(run_info: dict, market: str) -> None:
-    """최근 실행 바로 아래 — 일간 실행과 주간 주문서가 쓴 재무제표."""
+    """최근 실행 바로 아래 — 일간 실행과 주문서가 쓴 재무제표 (시장별)."""
+    mk = _MKT_NAME.get(market, market)
     v = _fs_stats(run_info)
     if not v:
-        st.caption("📑 재무제표 기준 시점은 다음 실행부터 표시됩니다.")
+        st.caption(f"📑 {mk} 재무제표 기준 시점은 다음 실행부터 표시됩니다.")
         return
     extra = ""
     if market == "kr":
@@ -1514,11 +1548,30 @@ def render_fs_vintage(run_info: dict, market: str) -> None:
     when = kst(run_info.get("finished", ""))
     mode = {"daily": "일간", "monthly": "월간"}.get(run_info.get("mode"),
                                                  run_info.get("mode", ""))
-    _qb(fs_vintage_html(v, title=f"재무제표 기준 · {mode} 실행 {when}",
+    _qb(fs_vintage_html(v, title=f"{mk} 재무제표 기준 · {mode} 실행 {when}",
                         market=market, extra=extra))
+    names = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
+    if market == "us":
+        # 미국 월간 주문서(매월 1일)가 쓴 재무제표 — 비공개 레포에서 읽습니다.
+        per, day, waiting = [], "", False
+        for a in names:
+            j = state_json(f"orders/us_orders{'' if a == 'main' else '_' + a}_latest.json")
+            if not j:
+                continue
+            day = j.get("기준일", day) or day
+            sel = ((j.get("재무기준") or {}).get("선정") or {})
+            if sel.get("종목수"):
+                per.append((names[a], sel))
+            else:
+                waiting = True
+        d = day[5:].replace("-", "/") if day else ""
+        if per:
+            _qb(_order_vintage_html(f"🗓️ 월간 주문서 {d}이 쓴 재무제표", per))
+        elif waiting:
+            _qb(f'<div class="qb-sub">🗓️ 월간 주문서 {d} — 주문서가 쓴 재무제표는 '
+                f'다음 주문서(매월 1일)부터 표시됩니다.</div>')
     if market == "kr":
         ws = load_run("weekly_status.json")
-        names = {a: lab.split(" (")[0] for lab, a in ACCOUNTS.items()}
         rows = []
         for k, r in (ws.get("계좌") or {}).items():
             sel = ((r or {}).get("재무기준") or {}).get("선정") or {}
@@ -1632,10 +1685,18 @@ if run_info:
     c2.metric("소요", f"{run_info.get('minutes', 0)}분")
     c3.metric("완료", kst(run_info.get("finished", "")))
     st.markdown(f"상태 {badge(run_info.get('status', '?'))}", unsafe_allow_html=True)
-    render_fs_vintage(run_info, M["key"])
 else:
     st.info(f"{market_label} 실행 결과가 아직 없습니다. "
             "아래 **실행** 탭에서 월간 실행을 먼저 한 번 돌려주세요.")
+
+# 재무제표 기준은 두 시장을 나란히 보여 줍니다 — 위 라디오로 고른 시장만
+# 보이면 미국 쪽이 있는 줄 모릅니다 (2026-11-28 "미국장도 표시해 주세요").
+_by_key = {m["key"]: m for m in MARKETS.values()}
+_fs_cols = st.columns(2)
+for _col, _k in zip(_fs_cols, ("kr", "us")):
+    with _col:
+        render_fs_vintage(run_info if _k == M["key"]
+                          else load_run(_by_key[_k]["run"]), _k)
 
 top_label = "🔔 매수 신호" if M["has_signals"] else "🔔 상위 종목"
 # 성과만 시장 탭을 따로 둡니다 — 위의 '시장' 라디오는 모델·실행·백테스트를

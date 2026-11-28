@@ -398,9 +398,24 @@ def fs_quarters(ttm: pd.DataFrame, *, symbol: str, account: str, date: str,
     return out
 
 
+def cal_quarter(ts) -> pd.Period:
+    """결산일 → 가장 가까운 달력 분기말의 분기.
+
+    미국은 결산일이 제각각입니다 — 애플 10/03, 소매업체 11/01처럼 분기말이
+    달력과 어긋납니다. 그냥 달력 분기로 자르면 11/01에 끝난 분기(8~10월)가
+    '4분기'로 찍혀 아직 끝나지도 않은 분기를 받은 것처럼 보였습니다
+    (2026-11-28 미국 6.6%). 가장 가까운 분기말로 붙이면 3분기가 됩니다.
+    한국은 결산일이 전부 분기말이라 결과가 같습니다.
+    """
+    t = pd.Timestamp(ts).normalize()
+    p = t.to_period("Q")
+    end, prev_end = p.end_time.normalize(), (p - 1).end_time.normalize()
+    return p if (end - t) <= (t - prev_end) else p - 1
+
+
 def quarter_label(ts) -> str:
-    """결산일 → '2026년 3분기' (달력 분기로 묶음 — 미국은 결산월이 제각각)."""
-    p = pd.Timestamp(ts).to_period("Q")
+    """결산일 → '2026년 3분기' (가장 가까운 달력 분기 — cal_quarter 참고)."""
+    p = cal_quarter(ts)
     return f"{p.year}년 {p.quarter}분기"
 
 
@@ -438,7 +453,7 @@ def vintage_summary(q: pd.DataFrame, codes=None, *, top: int = 3,
     out = {"종목수": int(len(s)), "분포": []}
     if s.empty:
         return out
-    per = s.dt.to_period("Q")
+    per = s.map(cal_quarter)
     cnt = per.value_counts().sort_index(ascending=False)
     n = int(len(s))
     for p, c in cnt.head(top).items():
