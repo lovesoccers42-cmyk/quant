@@ -375,6 +375,21 @@ check(perf.twr_trust(_twq)["신뢰"], "오타·체결 누락이 있어도 설명
 check(len(perf.sleeve_twr(_posq, _trq.iloc[:1], "main", _pxq)) == 0,
       "퀀트 종목이 하나도 없으면 빈 결과 (원래 종목만 팔았음)")
 
+# 종목이 적은 바구니는 하루 8%를 넘게 움직이는 게 정상입니다. 처음 몇 주
+# 몇 종목짜리였던 상수 국장이 이것 때문에 '체결내역 필요'로 숨겨졌습니다.
+print("\n[적은 종목 바구니 — 정상 등락을 점프로 오판하지 않는가]")
+_d4 = pd.bdate_range("2026-10-12", periods=4)
+_t4 = pd.DataFrame({"평가액": [1_000_000.0, 1_150_000.0, 1_150_000.0, 1_725_000.0],
+                    "순입출금": [0.0] * 4, "종목수": [4, 4, 4, 4]}, index=_d4)
+_tr4 = perf.twr_trust(_t4)
+check(_tr4["점프일수"] == 1 and _t4.index[3] in _tr4["날짜"],
+      f"4종목 바구니: 하루 +15%는 정상, +50%는 점프 ({_tr4['점프일수']}일)")
+check(not perf.twr_trust(_t4.drop(columns="종목수"))["신뢰"]
+      and perf.twr_trust(_t4.drop(columns="종목수"))["점프일수"] == 2,
+      "종목수를 모르면 예전처럼 8% 하나로 판정")
+check("종목수" in _twq.columns and int(_twq["종목수"].iloc[-1]) == 3,
+      f"퀀트 곡선에 그날 종목 수가 붙음 ({int(_twq['종목수'].iloc[-1])})")
+
 print()
 if FAIL:
     print(f"실패 {FAIL}건 — 고치기 전에는 수익률 숫자를 믿지 마세요.")

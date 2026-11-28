@@ -385,7 +385,13 @@ def sleeve_twr(pos: pd.DataFrame, trades: pd.DataFrame, account: str,
     if value.empty:
         return twr(value)
     flows = sleeve_flows(pos_q, trades, account, px, value.index)
-    return twr(value, flows)
+    out = twr(value, flows)
+    # 그날 들고 있던 퀀트 종목 수 — 신뢰 점검이 '몇 종목짜리 바구니인가'를
+    # 보고 하루 변동 허용폭을 정합니다 (twr_trust 참고).
+    n = (pos_q > 0).sum(axis=1)
+    out["종목수"] = (n.reindex(n.index.union(out.index)).ffill()
+                   .reindex(out.index).fillna(0).astype(int))
+    return out
 
 
 def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
@@ -424,7 +430,17 @@ def twr_trust(t: pd.DataFrame, *, band: float = 0.08) -> dict:
     # +10,547 = 직전 평가액의 54%. 예전 판정은 "흐름이 크니 설명됨"으로
     # 통과시켜 +53%를 그대로 내보냈습니다). 방향과 크기를 같이 봐야 합니다.
     resid = (v - prev - f)
-    unexplained = (resid.abs() > prev.abs() * band).fillna(False)
+    # 종목이 적으면 주가만으로도 하루 8%를 넘게 움직입니다. 퀀트 종목만 재는
+    # 곡선은 처음 몇 주가 몇 종목짜리라(상수 국장: 10월 첫 주 약 10종목,
+    # 지수가 그 주 -11%) 정상적인 등락이 '설명 안 되는 점프'로 잡혔습니다
+    # (2026-11-28 실측). 분산 효과만큼 넓힙니다: 100종목이면 8%, 25종목이면
+    # 16%, 10종목이면 25%. '종목수' 열이 없으면 예전처럼 8% 하나입니다.
+    lim = pd.Series(band, index=t.index, dtype="float64")
+    if "종목수" in t.columns:
+        n_prev = pd.to_numeric(t["종목수"], errors="coerce").shift(1)
+        wide = band * np.sqrt(100.0 / n_prev.clip(lower=1))
+        lim = wide.where(wide > band, band).fillna(band)
+    unexplained = (resid.abs() > prev.abs() * lim).fillna(False)
     n = int(unexplained.sum())
     out["점프일수"] = n
     out["점프합"] = float(resid[unexplained].abs().sum())
